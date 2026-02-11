@@ -1,0 +1,7 @@
+FROM alpine:3.20
+RUN mkdir -p /app/lib
+RUN echo 'import os, json, urllib.request\nprint(json.dumps({"answer": "hello"}))' > /app/agent.py
+RUN echo 'def helper():\n    return 42' > /app/lib/utils.py
+RUN echo 'httpx>=0.27' > /app/requirements.txt
+RUN echo '# Test Agent README' > /app/README.md
+CMD ["cat", "/app/agent.py"]
