@@ -19,9 +19,10 @@ from .config import Settings
 from .core import Hivemind
 from .models import (
     HealthResponse,
+    IndexRequest,
+    IndexResponse,
     QueryRequest,
     QueryResponse,
-    RecordPatchRequest,
     StoreRequest,
     StoreResponse,
 )
@@ -199,75 +200,26 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
 
-    # ── Admin record endpoints (direct record access, bypasses agent layer) ──
+    @app.post(
+        "/v1/index",
+        response_model=IndexResponse,
+        dependencies=[Depends(check_auth)],
+    )
+    async def index(req: IndexRequest, hm: Hivemind = Depends(get_hivemind)):
+        try:
+            return await hm.pipeline.run_index(req)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
+    # ── Admin schema endpoint ──
 
     @app.get(
-        "/v1/admin/records/{record_id}",
+        "/v1/admin/schema",
         dependencies=[Depends(check_auth)],
     )
-    async def get_record(
-        record_id: str, hm: Hivemind = Depends(get_hivemind)
-    ):
-        result = await asyncio.to_thread(hm.store.get_record_meta, record_id)
-        if not result:
-            raise HTTPException(status_code=404, detail="Record not found")
-        return result
-
-    @app.patch(
-        "/v1/admin/records/{record_id}",
-        dependencies=[Depends(check_auth)],
-    )
-    async def update_record(
-        record_id: str,
-        body: RecordPatchRequest,
-        hm: Hivemind = Depends(get_hivemind),
-    ):
-        has_metadata = "metadata" in body.model_fields_set
-        has_index_text = "index_text" in body.model_fields_set
-
-        if not has_metadata and not has_index_text:
-            raise HTTPException(
-                status_code=400,
-                detail="Provide 'metadata' and/or 'index_text' to update",
-            )
-
-        metadata = body.metadata if has_metadata else None
-        index_text = body.index_text if has_index_text else None
-
-        if has_metadata:
-            if metadata is None:
-                raise HTTPException(
-                    status_code=400, detail="'metadata' must be an object"
-                )
-        if has_index_text:
-            if index_text is None:
-                raise HTTPException(
-                    status_code=400, detail="'index_text' must be a string"
-                )
-
-        ok = await asyncio.to_thread(
-            hm.store.update_record,
-            record_id,
-            metadata=metadata,
-            index_text=index_text,
-            update_metadata=has_metadata,
-            update_index_text=has_index_text,
-        )
-        if not ok:
-            raise HTTPException(status_code=404, detail="Record not found")
-        return {"status": "ok"}
-
-    @app.delete(
-        "/v1/admin/records/{record_id}",
-        dependencies=[Depends(check_auth)],
-    )
-    async def delete_record(
-        record_id: str, hm: Hivemind = Depends(get_hivemind)
-    ):
-        ok = await asyncio.to_thread(hm.store.delete_record, record_id)
-        if not ok:
-            raise HTTPException(status_code=404, detail="Record not found")
-        return {"status": "ok"}
+    async def get_schema(hm: Hivemind = Depends(get_hivemind)):
+        schema = await asyncio.to_thread(hm.db.get_schema)
+        return {"schema": schema}
 
     # ── Agent CRUD ──
 
@@ -362,7 +314,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         timeout_seconds: Annotated[int, Form(ge=1)] = 120,
         hm: Hivemind = Depends(get_hivemind),
     ):
-        # Read and validate archive size incrementally.
         try:
             content = await _read_upload_bytes_limited(
                 archive,
@@ -374,7 +325,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 detail=str(e),
             )
 
-        # Extract tarball to temp directory
         tmpdir = tempfile.mkdtemp(prefix="hivemind-upload-")
         try:
             try:
@@ -391,7 +341,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     detail="Archive extraction failed",
                 )
 
-            # Build Docker image
             agent_id = uuid4().hex[:12]
             image_tag = f"hivemind-agent-{agent_id}:latest"
 
@@ -411,7 +360,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     detail="Docker build failed",
                 )
 
-            # Register agent
             try:
                 config = AgentConfig(
                     agent_id=agent_id,
@@ -431,7 +379,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 )
             await asyncio.to_thread(hm.agent_store.create, config)
 
-            # Extract source files from built image (non-fatal)
             file_count = 0
             try:
                 files = await runner.extract_image_files_async(image_tag)

@@ -1,9 +1,6 @@
 import os
-import tempfile
 
 import pytest
-
-from hivemind.store import RecordStore
 
 
 @pytest.fixture(autouse=True)
@@ -25,6 +22,7 @@ def _clear_default_agent_env():
         "HIVEMIND_DEFAULT_SCOPE_IMAGE",
         "HIVEMIND_DEFAULT_QUERY_IMAGE",
         "HIVEMIND_DEFAULT_MEDIATOR_IMAGE",
+        "HIVEMIND_DATABASE_URL",
     )
     before = {k: os.environ.get(k) for k in keys}
     for key in keys:
@@ -40,6 +38,10 @@ def _clear_default_agent_env():
             os.environ[key] = "anthropic/claude-sonnet-4.5"
         elif key == "HIVEMIND_CORS_ALLOW_ORIGINS":
             os.environ[key] = ""
+        elif key == "HIVEMIND_DATABASE_URL":
+            # Don't override if test already set it
+            if key not in os.environ or not os.environ[key]:
+                os.environ[key] = ""
         else:
             os.environ[key] = ""
     yield
@@ -48,14 +50,3 @@ def _clear_default_agent_env():
             os.environ.pop(key, None)
         else:
             os.environ[key] = value
-
-
-@pytest.fixture
-def tmp_db():
-    """Temporary RecordStore backed by a throwaway SQLite file."""
-    fd, path = tempfile.mkstemp(suffix=".db")
-    os.close(fd)
-    store = RecordStore(path)
-    yield store
-    store.close()
-    os.unlink(path)

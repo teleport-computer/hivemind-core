@@ -1,13 +1,15 @@
 import asyncio
 import json
 import logging
-from datetime import datetime
-from uuid import uuid4
+from typing import Callable
 
 from openai import AsyncOpenAI
 
 from .config import Settings
+from .db import Database
 from .models import (
+    IndexRequest,
+    IndexResponse,
     QueryRequest,
     QueryResponse,
     StoreRequest,
@@ -17,25 +19,21 @@ from .sandbox.agents import AgentStore
 from .sandbox.backend import SandboxBackend
 from .sandbox.models import AgentConfig
 from .sandbox.settings import build_sandbox_settings
-from .store import RecordStore
-from .tools import build_agent_file_tools, build_tools
+from .scope import compile_scope_fn
+from .tools import AccessLevel, build_agent_file_tools, build_sql_tools
 
 logger = logging.getLogger(__name__)
 
 MEDIATOR_MIN_TOKENS = 128
 MEDIATOR_TOKEN_RESERVE = 512
-MAX_SCOPE_RECORD_IDS = 900
 
 
 class Pipeline:
-    """Orchestrates store and query pipelines using Docker agent sandboxes.
+    """Orchestrates store and query pipelines using Docker agent sandboxes."""
 
-    All agents are Docker containers. No in-process LLM calls.
-    """
-
-    def __init__(self, settings: Settings, store: RecordStore, agent_store: AgentStore):
+    def __init__(self, settings: Settings, db: Database, agent_store: AgentStore):
         self.settings = settings
-        self.store = store
+        self.db = db
         self.agent_store = agent_store
         self.llm_client = AsyncOpenAI(
             base_url=settings.llm_base_url,
@@ -45,99 +43,53 @@ class Pipeline:
         self.llm_model = settings.llm_model
         self._sandbox_settings = build_sandbox_settings(settings)
 
-    # ── Store pipeline ──
+    # -- Store pipeline --
 
     async def run_store(self, req: StoreRequest) -> StoreResponse:
-        record_id = uuid4().hex[:12]
-        ts = datetime.now()
-        metadata = dict(req.metadata)
-        index_text = req.index_text
+        """Execute raw SQL via the store pipeline.
 
-        # Run index agent if specified
-        index_agent_id = req.index_agent_id or self.settings.default_index_agent
-        # Respect pre-computed index_text even when it's an empty string.
-        if index_agent_id and index_text is None:
-            agent_config = await asyncio.to_thread(
-                self.agent_store.get, index_agent_id
-            )
-            if agent_config is None:
-                raise ValueError(f"Index agent '{index_agent_id}' not found")
+        If the SQL is a SELECT, return rows. Otherwise commit and return rowcount.
+        Optionally runs an index agent for pre-processing.
+        """
+        from .tools import _is_select_only
 
-            raw = await self._run_agent(
-                agent_config=agent_config,
-                role="index",
-                env={
-                    "DOCUMENT_DATA": req.data,
-                    "DOCUMENT_METADATA": json.dumps(metadata),
-                },
-                scope=None,  # index agents get configurable scope
-            )
-            try:
-                data = json.loads(raw.strip())
-                if not isinstance(data, dict):
-                    raise ValueError("index output must be a JSON object")
+        sql = req.sql
+        params = req.params
 
-                if "index_text" in data:
-                    value = data["index_text"]
-                    if value is not None and not isinstance(value, str):
-                        raise ValueError("index_text must be a string or null")
-                    index_text = value
-                else:
-                    index_text = ""
-
-                # Merge agent-produced metadata
-                if "metadata" in data:
-                    produced_metadata = data["metadata"]
-                    if not isinstance(produced_metadata, dict):
-                        raise ValueError("metadata must be an object")
-                    metadata.update(produced_metadata)
-            except (json.JSONDecodeError, TypeError, ValueError) as e:
-                logger.error(
-                    "Index agent output not valid JSON (%s, %d chars)",
-                    e,
-                    len(raw),
+        try:
+            if _is_select_only(sql):
+                rows = await asyncio.to_thread(self.db.execute, sql, params)
+                return StoreResponse(rows=rows, rowcount=len(rows))
+            else:
+                rowcount = await asyncio.to_thread(
+                    self.db.execute_commit, sql, params
                 )
-                raise ValueError(f"Index agent failed: {e}")
+                return StoreResponse(rowcount=rowcount)
+        except Exception as e:
+            raise ValueError(f"SQL execution failed: {e}")
 
-        await asyncio.to_thread(
-            self.store.write_record,
-            id=record_id,
-            data=req.data,
-            metadata=metadata,
-            index_text=index_text,
-            created_at=ts.timestamp(),
-        )
-
-        return StoreResponse(
-            record_id=record_id,
-            created_at=ts,
-            metadata=metadata,
-        )
-
-    # ── Query pipeline ──
+    # -- Query pipeline --
 
     async def run_query(self, req: QueryRequest) -> QueryResponse:
-        # Resolve effective budget: min of per-query cap and global
+        # Resolve effective budget
         global_max = self._sandbox_settings.global_max_tokens
         effective_max = min(req.max_tokens or global_max, global_max)
         remaining = effective_max
         total_tokens = 0
         mediator_agent_id = req.mediator_agent_id or self.settings.default_mediator_agent
 
-        # Stage 0: Scope resolution precedence:
-        #   1) explicit scope_agent_id
-        #   2) explicit scope list
-        #   3) configured default scope agent (only when scope omitted)
-        scope = self._normalize_and_validate_scope(req.scope)
+        # Stage 0: Scope resolution → produces a scope_fn
+        scope_fn = None
+
         if req.scope_agent_id:
-            scope, scope_usage = await self._run_scope_agent(
+            scope_fn, scope_usage = await self._run_scope_agent(
                 req, max_tokens=remaining,
             )
             used = scope_usage.get("total_tokens", 0)
             total_tokens += used
             remaining = max(1, remaining - used)
-        elif scope is None and self.settings.default_scope_agent:
-            scope, scope_usage = await self._run_scope_agent(
+        elif self.settings.default_scope_agent:
+            scope_fn, scope_usage = await self._run_scope_agent(
                 req, max_tokens=remaining,
             )
             used = scope_usage.get("total_tokens", 0)
@@ -159,10 +111,10 @@ class Pipeline:
             )
             query_max_tokens = max(1, remaining - reserve)
 
-        output, records_accessed, query_usage = await self._run_query_agent(
+        output, query_usage = await self._run_query_agent(
             query_agent_id=query_agent_id,
             prompt=req.query,
-            scope=scope,
+            scope_fn=scope_fn,
             max_tokens=query_max_tokens,
             return_usage=True,
         )
@@ -186,7 +138,6 @@ class Pipeline:
                         mediator_agent_id=mediator_agent_id,
                         raw_output=output,
                         prompt=req.query,
-                        records_accessed=records_accessed,
                         max_tokens=remaining,
                     )
                 except ValueError as e:
@@ -204,33 +155,29 @@ class Pipeline:
 
         return QueryResponse(
             output=output,
-            records_accessed=records_accessed,
             mediated=mediated,
             usage={"total_tokens": total_tokens, "max_tokens": effective_max},
         )
 
-    # ── Internal: run agents ──
+    # -- Internal: run agents --
 
     async def _run_agent(
         self,
         agent_config: AgentConfig,
         role: str,
         env: dict[str, str],
-        scope: list[str] | None = None,
+        tools: list,
+        on_tool_call: Callable,
         agent_store_for_bridge=None,
         run_query_fn=None,
+        scope_query_agent_id: str | None = None,
         max_calls: int | None = None,
         max_tokens: int | None = None,
-    ) -> str:
-        """Run a Docker agent with scoped tools and return its stdout."""
-        tools = build_tools(self.store, scope=scope)
-        tool_handlers = {t.name: t.handler for t in tools}
-
-        async def on_tool_call(name: str, args: dict) -> str:
-            if name not in tool_handlers:
-                return f"Error: unknown tool '{name}'. Available: {', '.join(tool_handlers)}"
-            return await asyncio.to_thread(tool_handlers[name], **args)
-
+        return_budget_summary: bool = False,
+        replay_tape: list[dict] | None = None,
+        return_tape: bool = False,
+    ):
+        """Run a Docker agent with tools and return its stdout."""
         backend = SandboxBackend(
             self.llm_client,
             self.llm_model,
@@ -245,16 +192,20 @@ class Pipeline:
             on_tool_call=on_tool_call,
             agent_store=agent_store_for_bridge,
             run_query_fn=run_query_fn,
+            scope_query_agent_id=scope_query_agent_id,
             max_calls=max_calls,
             max_tokens=max_tokens,
+            return_budget_summary=return_budget_summary,
+            replay_tape=replay_tape,
+            return_tape=return_tape,
         )
 
     async def _run_scope_agent(
         self,
         req: QueryRequest,
         max_tokens: int | None = None,
-    ) -> tuple[list[str], dict]:
-        """Run scope agent to determine record_id whitelist. Returns (record_ids, usage)."""
+    ) -> tuple[Callable, dict]:
+        """Run scope agent to produce a scope function. Returns (scope_fn, usage)."""
         scope_agent_id = req.scope_agent_id or self.settings.default_scope_agent
         agent_config = await asyncio.to_thread(
             self.agent_store.get, scope_agent_id
@@ -269,23 +220,28 @@ class Pipeline:
         async def run_query_fn(
             query_agent_id: str,
             prompt: str,
-            scope: list[str],
+            scope_fn_source: str,
             max_calls: int,
             max_tokens: int,
-        ) -> tuple[str, list[str], dict]:
+            replay_tape: list[dict] | None = None,
+        ) -> tuple[str, dict] | tuple[str, dict, list[dict] | None]:
             if not allowed_query_agent_id:
                 raise ValueError("No query agent is configured for scope simulation")
             if query_agent_id != allowed_query_agent_id:
                 raise ValueError(
                     f"Simulation is restricted to query agent '{allowed_query_agent_id}'"
                 )
+            # Compile the scope function from source
+            sim_scope_fn = compile_scope_fn(scope_fn_source)
             return await self._run_query_agent(
                 query_agent_id=query_agent_id,
                 prompt=prompt,
-                scope=scope,
+                scope_fn=sim_scope_fn,
                 max_calls=max_calls,
                 max_tokens=max_tokens,
                 return_usage=True,
+                replay_tape=replay_tape,
+                return_tape=True,
             )
 
         env = {
@@ -293,8 +249,8 @@ class Pipeline:
             "QUERY_AGENT_ID": query_agent_id or "",
         }
 
-        # Scope agents get full access + extra tools + simulation
-        scope_tools = build_tools(self.store, scope=None)
+        # Scope agents get FULL_READ access
+        scope_tools = build_sql_tools(self.db, AccessLevel.FULL_READ)
 
         # Add agent file inspection tools if query agent exists
         if query_agent_id:
@@ -309,19 +265,13 @@ class Pipeline:
                 return f"Error: unknown tool '{name}'. Available: {', '.join(tool_handlers)}"
             return await asyncio.to_thread(tool_handlers[name], **args)
 
-        backend = SandboxBackend(
-            self.llm_client,
-            self.llm_model,
-            self._sandbox_settings,
-            agent_config,
-        )
-
-        raw, usage = await backend.run(
+        raw, usage = await self._run_agent(
+            agent_config=agent_config,
             role="scope",
             env=env,
             tools=scope_tools,
             on_tool_call=on_tool_call,
-            agent_store=self.agent_store,
+            agent_store_for_bridge=self.agent_store,
             run_query_fn=run_query_fn,
             scope_query_agent_id=allowed_query_agent_id,
             max_tokens=max_tokens,
@@ -330,91 +280,51 @@ class Pipeline:
 
         try:
             data = json.loads(raw.strip())
-            record_ids = data.get("record_ids", [])
-            if not isinstance(record_ids, list):
-                raise ValueError("record_ids must be a list")
-            return self._normalize_and_validate_scope(record_ids), usage
+
+            if "scope_fn" in data:
+                source = data["scope_fn"]
+                if not isinstance(source, str):
+                    raise ValueError("scope_fn must be a string")
+                fn = compile_scope_fn(source)
+                return fn, usage
+
+            raise ValueError(
+                "Scope agent must return 'scope_fn'"
+            )
         except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
             logger.error(
-                "Scope agent output not valid JSON (%s, %d chars)",
+                "Scope agent output not valid (%s, %d chars)",
                 e,
                 len(raw),
             )
             raise ValueError(f"Scope agent failed: {e}")
 
-    @staticmethod
-    def _normalize_and_validate_scope(scope: list | None) -> list[str] | None:
-        if scope is None:
-            return None
-        normalized = Pipeline._normalize_scope_record_ids(scope)
-        if len(normalized) > MAX_SCOPE_RECORD_IDS:
-            raise ValueError(
-                "scope exceeds maximum size "
-                f"({len(normalized)} > {MAX_SCOPE_RECORD_IDS})"
-            )
-        return normalized
-
-    @staticmethod
-    def _normalize_scope_record_ids(record_ids: list) -> list[str]:
-        normalized: list[str] = []
-        seen: set[str] = set()
-        for idx, value in enumerate(record_ids):
-            if not isinstance(value, str):
-                raise ValueError(f"record_ids[{idx}] must be a string")
-            record_id = value.strip()
-            if not record_id:
-                raise ValueError(f"record_ids[{idx}] must not be empty")
-            if record_id in seen:
-                continue
-            seen.add(record_id)
-            normalized.append(record_id)
-        return normalized
-
     async def _run_query_agent(
         self,
         query_agent_id: str,
         prompt: str,
-        scope: list[str] | None = None,
+        scope_fn: Callable | None = None,
         max_calls: int | None = None,
         max_tokens: int | None = None,
         return_usage: bool = False,
-    ) -> tuple[str, list[str]] | tuple[str, list[str], dict]:
-        """Run query agent, return output + records, and optionally usage summary."""
+        replay_tape: list[dict] | None = None,
+        return_tape: bool = False,
+    ):
+        """Run query agent with SCOPED access, return output and optionally usage/tape."""
         agent_config = await asyncio.to_thread(
             self.agent_store.get, query_agent_id
         )
         if agent_config is None:
             raise ValueError(f"Query agent '{query_agent_id}' not found")
 
-        # Build tracked tools for source tracking
-        tools = build_tools(self.store, scope=scope)
+        # Build scoped tools
+        tools = build_sql_tools(self.db, AccessLevel.SCOPED, scope_fn=scope_fn)
         tool_handlers = {t.name: t.handler for t in tools}
-        records_accessed: list[str] = []
-        seen_records: set[str] = set()
-
-        def _track_record(record_id: str | None) -> None:
-            if not record_id or record_id in seen_records:
-                return
-            seen_records.add(record_id)
-            records_accessed.append(record_id)
 
         async def on_tool_call(name: str, args: dict) -> str:
             if name not in tool_handlers:
                 return f"Error: unknown tool '{name}'. Available: {', '.join(tool_handlers)}"
-            result = await asyncio.to_thread(tool_handlers[name], **args)
-            if name == "read" and "record_id" in args:
-                if result != "Record not found":
-                    _track_record(args["record_id"])
-            elif name in {"search", "list"}:
-                try:
-                    payload = json.loads(result)
-                    if isinstance(payload, list):
-                        for item in payload:
-                            if isinstance(item, dict):
-                                _track_record(item.get("id"))
-                except (json.JSONDecodeError, TypeError):
-                    pass
-            return result
+            return await asyncio.to_thread(tool_handlers[name], **args)
 
         env = {
             "QUERY_PROMPT": prompt,
@@ -435,19 +345,26 @@ class Pipeline:
             max_calls=max_calls,
             max_tokens=max_tokens,
             return_budget_summary=return_usage,
+            replay_tape=replay_tape,
+            return_tape=return_tape,
         )
 
-        if return_usage:
+        if return_usage and return_tape:
+            output, usage, tape = run_result
+            return output, usage, tape
+        elif return_usage:
             output, usage = run_result
-            return output, records_accessed, usage
-        return run_result, records_accessed
+            return output, usage
+        elif return_tape:
+            output, tape = run_result
+            return output, {}, tape
+        return run_result
 
     async def _run_mediator_agent(
         self,
         mediator_agent_id: str,
         raw_output: str,
         prompt: str,
-        records_accessed: list[str],
         max_tokens: int | None = None,
     ) -> tuple[str, dict]:
         """Run mediator agent to filter/audit output. Returns (output, usage)."""
@@ -460,7 +377,6 @@ class Pipeline:
         env = {
             "RAW_OUTPUT": raw_output,
             "QUERY_PROMPT": prompt,
-            "RECORDS_ACCESSED": json.dumps(records_accessed),
         }
 
         # Mediator has NO data access tools
@@ -482,3 +398,76 @@ class Pipeline:
             max_tokens=max_tokens,
             return_budget_summary=True,
         )
+
+    # -- Index pipeline --
+
+    async def run_index(self, req: IndexRequest) -> IndexResponse:
+        """Run the index pipeline: index agent processes document data."""
+        global_max = self._sandbox_settings.global_max_tokens
+        effective_max = min(req.max_tokens or global_max, global_max)
+
+        index_text, metadata, usage = await self._run_index_agent(
+            req=req,
+            max_tokens=effective_max,
+        )
+
+        usage["max_tokens"] = effective_max
+        return IndexResponse(index_text=index_text, metadata=metadata, usage=usage)
+
+    async def _run_index_agent(
+        self,
+        req: IndexRequest,
+        max_tokens: int | None = None,
+    ) -> tuple[str, dict, dict]:
+        """Run index agent with FULL_READWRITE access. Returns (index_text, metadata, usage)."""
+        index_agent_id = req.index_agent_id or self.settings.default_index_agent
+        if not index_agent_id:
+            raise ValueError(
+                "No index agent specified and no default configured"
+            )
+
+        agent_config = await asyncio.to_thread(
+            self.agent_store.get, index_agent_id
+        )
+        if agent_config is None:
+            raise ValueError(f"Index agent '{index_agent_id}' not found")
+
+        tools = build_sql_tools(self.db, AccessLevel.FULL_READWRITE)
+        tool_handlers = {t.name: t.handler for t in tools}
+
+        async def on_tool_call(name: str, args: dict) -> str:
+            if name not in tool_handlers:
+                return f"Error: unknown tool '{name}'. Available: {', '.join(tool_handlers)}"
+            return await asyncio.to_thread(tool_handlers[name], **args)
+
+        env = {
+            "DOCUMENT_DATA": req.data,
+            "DOCUMENT_METADATA": json.dumps(req.metadata),
+        }
+
+        raw, usage = await self._run_agent(
+            agent_config=agent_config,
+            role="index",
+            env=env,
+            tools=tools,
+            on_tool_call=on_tool_call,
+            max_tokens=max_tokens,
+            return_budget_summary=True,
+        )
+
+        try:
+            data = json.loads(raw.strip())
+            index_text = data.get("index_text")
+            metadata = data.get("metadata")
+            if not isinstance(index_text, str) or index_text == "":
+                raise ValueError("index_text must be a non-empty string")
+            if not isinstance(metadata, dict):
+                raise ValueError("metadata must be a dict")
+            return index_text, metadata, usage
+        except (json.JSONDecodeError, TypeError) as e:
+            logger.error(
+                "Index agent output not valid JSON (%s, %d chars)", e, len(raw)
+            )
+            raise ValueError(f"Index agent failed: {e}")
+        except ValueError:
+            raise

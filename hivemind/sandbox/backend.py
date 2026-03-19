@@ -101,7 +101,9 @@ class SandboxBackend:
         max_calls: int | None = None,
         max_tokens: int | None = None,
         return_budget_summary: bool = False,
-    ) -> str | tuple[str, dict]:
+        replay_tape: list[dict] | None = None,
+        return_tape: bool = False,
+    ) -> str | tuple:
         """Run the agent container and return its stdout output."""
         agent = self.agent
 
@@ -135,6 +137,7 @@ class SandboxBackend:
             agent_store=agent_store,
             run_query_fn=run_query_fn,
             scope_query_agent_id=scope_query_agent_id,
+            replay_tape=replay_tape,
         )
 
         try:
@@ -151,6 +154,9 @@ class SandboxBackend:
                 # OpenAI SDK auto-routing: standard SDKs use these env vars
                 "OPENAI_BASE_URL": f"{bridge_url}/v1",
                 "OPENAI_API_KEY": session_token,
+                # Anthropic SDK auto-routing: claude-agent-sdk + anthropic SDK
+                "ANTHROPIC_BASE_URL": bridge_url,
+                "ANTHROPIC_API_KEY": session_token,
                 **env,
             }
 
@@ -190,8 +196,14 @@ class SandboxBackend:
                 else:
                     output = "(Agent produced no output)"
 
-            if return_budget_summary:
+            tape_data = bridge.get_recorded_tape() if return_tape else None
+
+            if return_budget_summary and return_tape:
+                return output, budget.summary(), tape_data
+            elif return_budget_summary:
                 return output, budget.summary()
+            elif return_tape:
+                return output, tape_data
             return output
 
         finally:

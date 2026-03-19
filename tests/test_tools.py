@@ -1,212 +1,397 @@
-"""Tests for the 3 agent tools + agent file inspection tools."""
+"""Tests for SQL tools and access level enforcement."""
+
 import json
-import sqlite3
-import time
+import os
 
 import pytest
 
+from hivemind.db import Database
 from hivemind.sandbox.agents import AgentStore
+from hivemind.sandbox.models import AgentConfig
 from hivemind.tools import (
-    MAX_TOOL_LIST_LIMIT,
-    MAX_TOOL_READ_LIMIT,
-    MAX_TOOL_SEARCH_LIMIT,
+    AccessLevel,
+    Tool,
+    _is_select_only,
+    _references_internal_tables,
     build_agent_file_tools,
-    build_tools,
+    build_sql_tools,
 )
 
 
-def _setup_records(store):
-    """Populate store with test records."""
-    t = time.time()
-    store.write_record("r1", "alice first doc", {"user": "alice"}, "python ml alice", t)
-    store.write_record("r2", "alice second doc", {"user": "alice"}, "python web alice", t + 1)
-    store.write_record("r3", "bob's document", {"user": "bob"}, "java web bob", t + 2)
-    store.write_record("r4", "anonymous note", {}, "notes misc", t + 3)
-
-
-class TestSearch:
-    def test_search_returns_results(self, tmp_db):
-        _setup_records(tmp_db)
-        tools = build_tools(tmp_db)
-        search = next(t for t in tools if t.name == "search")
-        results = json.loads(search.handler(query="python"))
-        assert len(results) >= 1
-        assert "id" in results[0]
-        assert "metadata" in results[0]
-        assert "score" in results[0]
-
-    def test_search_scoped(self, tmp_db):
-        _setup_records(tmp_db)
-        tools = build_tools(tmp_db, scope=["r1"])
-        search = next(t for t in tools if t.name == "search")
-        results = json.loads(search.handler(query="python"))
-        assert len(results) == 1
-        assert results[0]["id"] == "r1"
-
-    def test_search_limit_is_clamped(self, tmp_db):
-        t = time.time()
-        for i in range(MAX_TOOL_SEARCH_LIMIT + 50):
-            tmp_db.write_record(
-                f"s{i}",
-                f"doc {i}",
-                {},
-                "common term",
-                t + i,
-            )
-        tools = build_tools(tmp_db)
-        search = next(t for t in tools if t.name == "search")
-        results = json.loads(search.handler(query="common", limit=999999))
-        assert len(results) == MAX_TOOL_SEARCH_LIMIT
-
-
-class TestRead:
-    def test_read_includes_metadata_header(self, tmp_db):
-        _setup_records(tmp_db)
-        tools = build_tools(tmp_db)
-        read = next(t for t in tools if t.name == "read")
-        result = read.handler(record_id="r1")
-        assert "record_id: r1" in result
-        assert "alice first doc" in result
-
-    def test_read_shows_metadata_keys(self, tmp_db):
-        _setup_records(tmp_db)
-        tools = build_tools(tmp_db)
-        read = next(t for t in tools if t.name == "read")
-        result = read.handler(record_id="r1")
-        assert "user: alice" in result
-
-    def test_read_no_header_on_subsequent_chunks(self, tmp_db):
-        _setup_records(tmp_db)
-        tools = build_tools(tmp_db)
-        read = next(t for t in tools if t.name == "read")
-        result = read.handler(record_id="r1", offset=5)
-        assert "record_id:" not in result
-
-    def test_read_not_found(self, tmp_db):
-        tools = build_tools(tmp_db)
-        read = next(t for t in tools if t.name == "read")
-        assert read.handler(record_id="nonexistent") == "Record not found"
-
-    def test_read_scoped_out(self, tmp_db):
-        _setup_records(tmp_db)
-        tools = build_tools(tmp_db, scope=["r2"])
-        read = next(t for t in tools if t.name == "read")
-        assert read.handler(record_id="r1") == "Record not found"
-
-    def test_read_limit_and_offset_are_clamped(self, tmp_db):
-        data = "x" * (MAX_TOOL_READ_LIMIT + 100)
-        tmp_db.write_record("long", data, {}, "long data", time.time())
-        tools = build_tools(tmp_db)
-        read = next(t for t in tools if t.name == "read")
-
-        result = read.handler(record_id="long", offset=-100, limit=10**9)
-        first_chunk = result.split("\n\n--- offset", 1)[0]
-        # Header is included at offset 0; payload should not exceed clamp.
-        assert len(first_chunk) <= MAX_TOOL_READ_LIMIT + 128
-
-
-class TestList:
-    def test_list_returns_records(self, tmp_db):
-        _setup_records(tmp_db)
-        tools = build_tools(tmp_db)
-        list_tool = next(t for t in tools if t.name == "list")
-        results = json.loads(list_tool.handler())
-        assert len(results) == 4
-        assert "id" in results[0]
-        assert "metadata" in results[0]
-
-    def test_list_scoped(self, tmp_db):
-        _setup_records(tmp_db)
-        tools = build_tools(tmp_db, scope=["r1", "r3"])
-        list_tool = next(t for t in tools if t.name == "list")
-        results = json.loads(list_tool.handler())
-        assert len(results) == 2
-        ids = {r["id"] for r in results}
-        assert ids == {"r1", "r3"}
-
-    def test_list_limit_is_clamped(self, tmp_db):
-        t = time.time()
-        for i in range(MAX_TOOL_LIST_LIMIT + 50):
-            tmp_db.write_record(
-                f"l{i}",
-                f"doc {i}",
-                {},
-                f"index {i}",
-                t + i,
-            )
-        tools = build_tools(tmp_db)
-        list_tool = next(t for t in tools if t.name == "list")
-        results = json.loads(list_tool.handler(limit=10**9))
-        assert len(results) == MAX_TOOL_LIST_LIMIT
-
-
-class TestToolSchemas:
-    def test_three_tools(self, tmp_db):
-        tools = build_tools(tmp_db)
-        assert len(tools) == 3
-        names = {t.name for t in tools}
-        assert names == {"search", "read", "list"}
-
-    def test_openai_format(self, tmp_db):
-        tools = build_tools(tmp_db)
-        for tool in tools:
-            d = tool.to_openai_def()
-            assert d["type"] == "function"
-            assert "name" in d["function"]
-            assert "parameters" in d["function"]
-
-
-# ── Agent file inspection tools ──
+# ── Fixtures ──
 
 
 @pytest.fixture
-def agent_store_with_files():
-    conn = sqlite3.connect(":memory:")
-    conn.row_factory = sqlite3.Row
-    store = AgentStore(conn)
+def pg_db():
+    """Create a test Postgres Database, skip if not available."""
+    test_dsn = os.environ.get("HIVEMIND_TEST_DATABASE_URL", "")
+    if not test_dsn:
+        pytest.skip("HIVEMIND_TEST_DATABASE_URL not set")
+    db = Database(test_dsn)
+    yield db
+    db.close()
 
-    from hivemind.sandbox.models import AgentConfig
 
-    store.create(AgentConfig(
-        agent_id="qa-1",
-        name="Query Agent",
-        image="myorg/qa:v1",
-    ))
-    store.save_files("qa-1", {
-        "agent.py": "import httpx\nprint('hello')\n",
-        "lib/utils.py": "def helper(): pass\n",
-    })
-    return store
+@pytest.fixture
+def test_table(pg_db):
+    """Create a test table and clean up after."""
+    pg_db.execute_commit(
+        "CREATE TABLE IF NOT EXISTS test_tools_data "
+        "(id SERIAL PRIMARY KEY, name TEXT, team TEXT)"
+    )
+    pg_db.execute_commit("DELETE FROM test_tools_data")
+    pg_db.execute_commit(
+        "INSERT INTO test_tools_data (name, team) VALUES (%s, %s)",
+        ["alice", "alpha"],
+    )
+    pg_db.execute_commit(
+        "INSERT INTO test_tools_data (name, team) VALUES (%s, %s)",
+        ["bob", "beta"],
+    )
+    yield
+    pg_db.execute_commit("DROP TABLE IF EXISTS test_tools_data")
+
+
+@pytest.fixture
+def agent_store(pg_db):
+    """AgentStore backed by test Postgres."""
+    return AgentStore(pg_db)
+
+
+# ── _is_select_only ──
+
+
+class TestIsSelectOnly:
+    def test_simple_select(self):
+        assert _is_select_only("SELECT 1") is True
+
+    def test_select_from_table(self):
+        assert _is_select_only("SELECT * FROM users WHERE id = 1") is True
+
+    def test_select_with_join(self):
+        assert _is_select_only(
+            "SELECT a.id, b.name FROM a JOIN b ON a.id = b.a_id"
+        ) is True
+
+    def test_insert_rejected(self):
+        assert _is_select_only("INSERT INTO t (x) VALUES (1)") is False
+
+    def test_update_rejected(self):
+        assert _is_select_only("UPDATE t SET x = 1") is False
+
+    def test_delete_rejected(self):
+        assert _is_select_only("DELETE FROM t") is False
+
+    def test_drop_rejected(self):
+        assert _is_select_only("DROP TABLE t") is False
+
+    def test_create_table_rejected(self):
+        assert _is_select_only("CREATE TABLE t (id INT)") is False
+
+    def test_multiple_statements_rejected(self):
+        assert _is_select_only("SELECT 1; DROP TABLE t") is False
+
+    def test_invalid_sql_rejected(self):
+        assert _is_select_only("NOT VALID SQL AT ALL ???") is False
+
+    def test_empty_string_rejected(self):
+        assert _is_select_only("") is False
+
+    def test_cte_select(self):
+        sql = "WITH cte AS (SELECT 1 AS v) SELECT * FROM cte"
+        # CTE wrapping a SELECT is still a SELECT
+        assert _is_select_only(sql) is True
+
+    def test_subquery(self):
+        assert _is_select_only("SELECT * FROM (SELECT 1 AS v) sub") is True
+
+
+# ── _references_internal_tables ──
+
+
+class TestReferencesInternalTables:
+    def test_detects_hivemind_agents(self):
+        assert _references_internal_tables("SELECT * FROM _hivemind_agents") is True
+
+    def test_case_insensitive(self):
+        assert _references_internal_tables("SELECT * FROM _HIVEMIND_AGENTS") is True
+
+    def test_mixed_case(self):
+        assert _references_internal_tables("SELECT * FROM _Hivemind_Agent_Files") is True
+
+    def test_normal_table_allowed(self):
+        assert _references_internal_tables("SELECT * FROM users") is False
+
+    def test_in_where_clause(self):
+        assert (
+            _references_internal_tables(
+                "SELECT * FROM t WHERE table_name = '_hivemind_agents'"
+            )
+            is True
+        )
+
+
+# ── build_sql_tools: AccessLevel.NONE ──
+
+
+class TestAccessLevelNone:
+    def test_returns_empty_list(self, pg_db):
+        tools = build_sql_tools(pg_db, AccessLevel.NONE)
+        assert tools == []
+
+
+# ── build_sql_tools: AccessLevel.FULL_READ (scope agent) ──
+
+
+class TestAccessLevelFullRead:
+    def _get_tools(self, pg_db):
+        tools = build_sql_tools(pg_db, AccessLevel.FULL_READ)
+        return {t.name: t for t in tools}
+
+    def test_returns_two_tools(self, pg_db):
+        tools = build_sql_tools(pg_db, AccessLevel.FULL_READ)
+        assert len(tools) == 2
+        names = {t.name for t in tools}
+        assert names == {"execute_sql", "get_schema"}
+
+    def test_select_works(self, pg_db, test_table):
+        tools = self._get_tools(pg_db)
+        result = json.loads(tools["execute_sql"].handler("SELECT name FROM test_tools_data ORDER BY name"))
+        assert len(result) == 2
+        assert result[0]["name"] == "alice"
+
+    def test_insert_blocked(self, pg_db, test_table):
+        tools = self._get_tools(pg_db)
+        result = json.loads(
+            tools["execute_sql"].handler("INSERT INTO test_tools_data (name, team) VALUES ('eve', 'gamma')")
+        )
+        assert "error" in result
+        assert "SELECT" in result["error"]
+
+    def test_internal_table_blocked(self, pg_db):
+        tools = self._get_tools(pg_db)
+        result = json.loads(
+            tools["execute_sql"].handler("SELECT * FROM _hivemind_agents")
+        )
+        assert "error" in result
+        assert "internal" in result["error"].lower() or "denied" in result["error"].lower()
+
+    def test_get_schema_excludes_internal(self, pg_db, test_table):
+        tools = self._get_tools(pg_db)
+        schema = json.loads(tools["get_schema"].handler())
+        table_names = {r["table_name"] for r in schema}
+        assert "test_tools_data" in table_names
+        assert "_hivemind_agents" not in table_names
+        assert "_hivemind_agent_files" not in table_names
+
+
+# ── build_sql_tools: AccessLevel.SCOPED (query agent) ──
+
+
+class TestAccessLevelScoped:
+    def _allow_all_scope(self, sql, params, rows):
+        return {"allow": True, "rows": rows}
+
+    def _filter_team_scope(self, sql, params, rows):
+        filtered = [r for r in rows if r.get("team") == "alpha"]
+        return {"allow": True, "rows": filtered}
+
+    def _deny_scope(self, sql, params, rows):
+        return {"allow": False, "error": "Access denied by policy"}
+
+    def _error_scope(self, sql, params, rows):
+        raise RuntimeError("Scope function crashed")
+
+    def test_select_with_passthrough_scope(self, pg_db, test_table):
+        tools = build_sql_tools(pg_db, AccessLevel.SCOPED, scope_fn=self._allow_all_scope)
+        t = {t.name: t for t in tools}
+        result = json.loads(t["execute_sql"].handler("SELECT * FROM test_tools_data ORDER BY name"))
+        assert len(result) == 2
+
+    def test_scope_filters_rows(self, pg_db, test_table):
+        tools = build_sql_tools(pg_db, AccessLevel.SCOPED, scope_fn=self._filter_team_scope)
+        t = {t.name: t for t in tools}
+        result = json.loads(t["execute_sql"].handler("SELECT * FROM test_tools_data"))
+        assert len(result) == 1
+        assert result[0]["team"] == "alpha"
+
+    def test_scope_denies(self, pg_db, test_table):
+        tools = build_sql_tools(pg_db, AccessLevel.SCOPED, scope_fn=self._deny_scope)
+        t = {t.name: t for t in tools}
+        result = json.loads(t["execute_sql"].handler("SELECT * FROM test_tools_data"))
+        assert "error" in result
+        assert "denied" in result["error"].lower()
+
+    def test_scope_exception_fail_closed(self, pg_db, test_table):
+        tools = build_sql_tools(pg_db, AccessLevel.SCOPED, scope_fn=self._error_scope)
+        t = {t.name: t for t in tools}
+        result = json.loads(t["execute_sql"].handler("SELECT * FROM test_tools_data"))
+        assert "error" in result
+        assert "denied" in result["error"].lower()
+
+    def test_insert_blocked(self, pg_db, test_table):
+        tools = build_sql_tools(pg_db, AccessLevel.SCOPED, scope_fn=self._allow_all_scope)
+        t = {t.name: t for t in tools}
+        result = json.loads(
+            t["execute_sql"].handler("INSERT INTO test_tools_data (name, team) VALUES ('x', 'y')")
+        )
+        assert "error" in result
+
+    def test_internal_table_blocked(self, pg_db):
+        tools = build_sql_tools(pg_db, AccessLevel.SCOPED, scope_fn=self._allow_all_scope)
+        t = {t.name: t for t in tools}
+        result = json.loads(t["execute_sql"].handler("SELECT * FROM _hivemind_agents"))
+        assert "error" in result
+
+
+# ── build_sql_tools: AccessLevel.FULL_READWRITE (index agent) ──
+
+
+class TestAccessLevelFullReadwrite:
+    def _get_tools(self, pg_db):
+        tools = build_sql_tools(pg_db, AccessLevel.FULL_READWRITE)
+        return {t.name: t for t in tools}
+
+    def test_select_works(self, pg_db, test_table):
+        tools = self._get_tools(pg_db)
+        result = json.loads(tools["execute_sql"].handler("SELECT name FROM test_tools_data ORDER BY name"))
+        assert len(result) == 2
+
+    def test_insert_works(self, pg_db, test_table):
+        tools = self._get_tools(pg_db)
+        result = json.loads(
+            tools["execute_sql"].handler(
+                "INSERT INTO test_tools_data (name, team) VALUES (%s, %s)",
+                ["charlie", "gamma"],
+            )
+        )
+        assert result["rowcount"] == 1
+
+    def test_update_works(self, pg_db, test_table):
+        tools = self._get_tools(pg_db)
+        result = json.loads(
+            tools["execute_sql"].handler(
+                "UPDATE test_tools_data SET team = %s WHERE name = %s",
+                ["omega", "alice"],
+            )
+        )
+        assert result["rowcount"] == 1
+
+    def test_delete_works(self, pg_db, test_table):
+        tools = self._get_tools(pg_db)
+        result = json.loads(
+            tools["execute_sql"].handler(
+                "DELETE FROM test_tools_data WHERE name = %s",
+                ["bob"],
+            )
+        )
+        assert result["rowcount"] == 1
+
+    def test_write_to_internal_table_blocked(self, pg_db):
+        tools = self._get_tools(pg_db)
+        result = json.loads(
+            tools["execute_sql"].handler(
+                "INSERT INTO _hivemind_agents (agent_id, name, image, created_at) "
+                "VALUES ('evil', 'evil', 'evil', 0)"
+            )
+        )
+        assert "error" in result
+        assert "denied" in result["error"].lower()
+
+    def test_select_from_internal_table_allowed(self, pg_db):
+        tools = self._get_tools(pg_db)
+        result = json.loads(
+            tools["execute_sql"].handler("SELECT agent_id FROM _hivemind_agents LIMIT 1")
+        )
+        # Should succeed (returns list, not error dict)
+        assert isinstance(result, list)
+
+
+# ── build_agent_file_tools ──
 
 
 class TestAgentFileTools:
-    def test_list_files(self, agent_store_with_files):
-        tools = build_agent_file_tools(agent_store_with_files, "qa-1")
-        list_tool = next(t for t in tools if t.name == "list_query_agent_files")
-        result = json.loads(list_tool.handler())
-        assert len(result["files"]) == 2
-
-    def test_read_file(self, agent_store_with_files):
-        tools = build_agent_file_tools(agent_store_with_files, "qa-1")
-        read_tool = next(t for t in tools if t.name == "read_query_agent_file")
-        content = read_tool.handler(file_path="agent.py")
-        assert "import httpx" in content
-
-    def test_read_file_not_found(self, agent_store_with_files):
-        tools = build_agent_file_tools(agent_store_with_files, "qa-1")
-        read_tool = next(t for t in tools if t.name == "read_query_agent_file")
-        result = read_tool.handler(file_path="nonexistent.py")
-        assert "not found" in result.lower()
-
-    def test_tools_are_prescoped(self, agent_store_with_files):
-        from hivemind.sandbox.models import AgentConfig
-
-        agent_store_with_files.create(AgentConfig(
-            agent_id="qa-other", name="Other", image="myorg/other:v1",
+    def test_list_files_with_files(self, pg_db, agent_store):
+        agent_store.create(AgentConfig(
+            agent_id="file-test-agent",
+            name="File Test",
+            image="img:test",
         ))
-        agent_store_with_files.save_files("qa-other", {"secret.py": "SECRET"})
+        agent_store.save_files("file-test-agent", {
+            "agent.py": "print('hello')",
+            "Dockerfile": "FROM python:3.12",
+        })
+        try:
+            tools = build_agent_file_tools(agent_store, "file-test-agent")
+            t = {t.name: t for t in tools}
+            result = json.loads(t["list_query_agent_files"].handler())
+            assert "files" in result
+            assert len(result["files"]) == 2
+        finally:
+            agent_store.delete("file-test-agent")
 
-        tools = build_agent_file_tools(agent_store_with_files, "qa-1")
-        read_tool = next(t for t in tools if t.name == "read_query_agent_file")
-        result = read_tool.handler(file_path="secret.py")
-        assert "not found" in result.lower()
+    def test_list_files_empty(self, pg_db, agent_store):
+        agent_store.create(AgentConfig(
+            agent_id="empty-file-agent",
+            name="Empty",
+            image="img:test",
+        ))
+        try:
+            tools = build_agent_file_tools(agent_store, "empty-file-agent")
+            t = {t.name: t for t in tools}
+            result = json.loads(t["list_query_agent_files"].handler())
+            assert result["files"] == []
+        finally:
+            agent_store.delete("empty-file-agent")
+
+    def test_read_file_exists(self, pg_db, agent_store):
+        agent_store.create(AgentConfig(
+            agent_id="read-test-agent",
+            name="Read Test",
+            image="img:test",
+        ))
+        agent_store.save_files("read-test-agent", {"agent.py": "print('hello')"})
+        try:
+            tools = build_agent_file_tools(agent_store, "read-test-agent")
+            t = {t.name: t for t in tools}
+            content = t["read_query_agent_file"].handler("agent.py")
+            assert content == "print('hello')"
+        finally:
+            agent_store.delete("read-test-agent")
+
+    def test_read_file_not_found(self, pg_db, agent_store):
+        agent_store.create(AgentConfig(
+            agent_id="read-miss-agent",
+            name="Read Miss",
+            image="img:test",
+        ))
+        try:
+            tools = build_agent_file_tools(agent_store, "read-miss-agent")
+            t = {t.name: t for t in tools}
+            content = t["read_query_agent_file"].handler("nonexistent.py")
+            assert "not found" in content.lower()
+        finally:
+            agent_store.delete("read-miss-agent")
+
+
+# ── Tool dataclass ──
+
+
+class TestToolDataclass:
+    def test_to_openai_def(self):
+        tool = Tool(
+            name="test_tool",
+            description="A test tool",
+            parameters={"type": "object", "properties": {}},
+            handler=lambda: "ok",
+        )
+        defn = tool.to_openai_def()
+        assert defn["type"] == "function"
+        assert defn["function"]["name"] == "test_tool"
+        assert defn["function"]["description"] == "A test tool"
+
+    def test_sql_error_returns_json_error(self, pg_db, test_table):
+        tools = build_sql_tools(pg_db, AccessLevel.FULL_READ)
+        t = {t.name: t for t in tools}
+        result = json.loads(t["execute_sql"].handler("SELECT * FROM nonexistent_table_xyz"))
+        assert "error" in result

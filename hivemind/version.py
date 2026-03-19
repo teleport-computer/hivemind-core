@@ -4,7 +4,7 @@ from importlib.metadata import PackageNotFoundError, version as package_version
 
 
 _PACKAGE_NAME = "hivemind-core"
-_FALLBACK_VERSION = "0.2.0"
+_FALLBACK_VERSION = "0.3.0"
 
 
 def resolve_version() -> str:

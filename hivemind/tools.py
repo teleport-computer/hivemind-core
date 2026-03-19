@@ -1,15 +1,30 @@
+"""SQL-based tools for agent sandboxes.
+
+Two data tools replace the old six record tools:
+  - execute_sql(sql, params) — run SQL, return JSON rows
+  - get_schema() — return table/column/index metadata
+
+Access levels:
+  - FULL_READ: scope agent — SELECT on all user tables, blocked from _hivemind_*
+  - SCOPED: query agent — SQL runs against full DB, results pass through scope_fn
+  - FULL_READWRITE: index agent — full DML, blocked from _hivemind_* writes
+  - NONE: mediator — no DB access
+"""
+
+from __future__ import annotations
+
 import json
+import enum
+import logging
 from dataclasses import dataclass
-from typing import Callable
+from typing import Callable, TYPE_CHECKING
 
-from .store import RecordStore
+if TYPE_CHECKING:
+    from .db import Database
 
-DEFAULT_READ_CHUNK = 20_000
-MAX_TOOL_SEARCH_LIMIT = 200
-MAX_TOOL_LIST_LIMIT = 200
-MAX_TOOL_LIST_OFFSET = 5_000_000
-MAX_TOOL_READ_LIMIT = 50_000
-MAX_TOOL_READ_OFFSET = 5_000_000
+logger = logging.getLogger(__name__)
+
+MAX_RESULT_ROWS = 10_000
 
 
 @dataclass
@@ -28,6 +43,149 @@ class Tool:
                 "parameters": self.parameters,
             },
         }
+
+
+class AccessLevel(enum.Enum):
+    FULL_READ = "full_read"
+    SCOPED = "scoped"
+    FULL_READWRITE = "full_readwrite"
+    NONE = "none"
+
+
+def _is_select_only(sql: str) -> bool:
+    """Check if SQL is a read-only statement using sqlglot AST parsing."""
+    import sqlglot
+
+    try:
+        statements = sqlglot.parse(sql, error_level=sqlglot.ErrorLevel.RAISE)
+    except sqlglot.errors.ParseError:
+        return False
+
+    if not statements:
+        return False
+
+    for stmt in statements:
+        if stmt is None:
+            return False
+        # Only SELECT statements are allowed
+        if not isinstance(stmt, sqlglot.exp.Select):
+            return False
+
+    return True
+
+
+def _references_internal_tables(sql: str) -> bool:
+    """Check if SQL references _hivemind_* internal tables."""
+    # Simple text check — covers FROM, JOIN, INSERT INTO, etc.
+    upper = sql.upper()
+    return "_HIVEMIND_" in upper
+
+
+def build_sql_tools(
+    db: Database,
+    access: AccessLevel,
+    scope_fn: Callable[[str, list, list[dict]], dict] | None = None,
+) -> list[Tool]:
+    """Build SQL tools with the given access level.
+
+    For SCOPED access, scope_fn is required — every query's results
+    pass through it for filtering/transformation.
+    """
+    if access == AccessLevel.NONE:
+        return []
+
+    def execute_sql(sql: str, params: list | None = None) -> str:
+        safe_params = params or []
+
+        # Block internal table access for non-system callers
+        if access in (AccessLevel.FULL_READ, AccessLevel.SCOPED):
+            if _references_internal_tables(sql):
+                return json.dumps({"error": "Access to internal tables is denied"})
+            if not _is_select_only(sql):
+                return json.dumps({"error": "Only SELECT queries are allowed"})
+
+        if access == AccessLevel.FULL_READWRITE:
+            if _references_internal_tables(sql):
+                # Allow reads but block writes to internal tables
+                if not _is_select_only(sql):
+                    return json.dumps({"error": "Write access to internal tables is denied"})
+
+        try:
+            if _is_select_only(sql):
+                rows = db.execute(sql, safe_params)
+                rows = rows[:MAX_RESULT_ROWS]
+            else:
+                rowcount = db.execute_commit(sql, safe_params)
+                return json.dumps({"rowcount": rowcount})
+        except Exception as e:
+            return json.dumps({"error": str(e)})
+
+        # Apply scope function for SCOPED access
+        if access == AccessLevel.SCOPED and scope_fn is not None:
+            try:
+                result = scope_fn(sql, safe_params, rows)
+                if not isinstance(result, dict):
+                    return json.dumps({"error": "Scope function returned invalid result"})
+                if not result.get("allow", False):
+                    error_msg = result.get("error", "Query denied by scope function")
+                    return json.dumps({"error": error_msg})
+                rows = result.get("rows", [])
+            except Exception as e:
+                logger.debug("Scope function error: %s", e)
+                return json.dumps({"error": "Query denied by scope function"})
+
+        return json.dumps(rows, default=str)
+
+    def get_schema() -> str:
+        try:
+            schema = db.get_schema(exclude_internal=True)
+            return json.dumps(schema, default=str)
+        except Exception as e:
+            return json.dumps({"error": str(e)})
+
+    tools = [
+        Tool(
+            name="execute_sql",
+            description=(
+                "Execute a SQL query against the database. "
+                "For SELECT queries, returns a JSON array of row objects. "
+                "For write queries (INSERT/UPDATE/DELETE), returns {rowcount: N}. "
+                "Use parameterized queries with %s placeholders."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "sql": {
+                        "type": "string",
+                        "description": "SQL query to execute (use %s for parameters)",
+                    },
+                    "params": {
+                        "type": "array",
+                        "items": {},
+                        "description": "Query parameters (optional)",
+                        "default": [],
+                    },
+                },
+                "required": ["sql"],
+            },
+            handler=execute_sql,
+        ),
+        Tool(
+            name="get_schema",
+            description=(
+                "Get the database schema: table names, column names, types, and defaults. "
+                "Use this to understand the data model before writing queries."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {},
+                "required": [],
+            },
+            handler=get_schema,
+        ),
+    ]
+
+    return tools
 
 
 def build_agent_file_tools(agent_store, query_agent_id: str) -> list[Tool]:
@@ -80,141 +238,5 @@ def build_agent_file_tools(agent_store, query_agent_id: str) -> list[Tool]:
                 "required": ["file_path"],
             },
             handler=read_query_agent_file,
-        ),
-    ]
-
-
-def build_tools(
-    store: RecordStore, scope: list[str] | None = None
-) -> list[Tool]:
-    """Build the 3 scoped storage tools: search, read, list."""
-
-    def _safe_int(value, default: int) -> int:
-        try:
-            return int(value)
-        except (TypeError, ValueError):
-            return default
-
-    def _clamp_int(value, default: int, min_value: int, max_value: int) -> int:
-        parsed = _safe_int(value, default)
-        if parsed < min_value:
-            return min_value
-        if parsed > max_value:
-            return max_value
-        return parsed
-
-    def search(query: str, limit: int = 20) -> str:
-        safe_limit = _clamp_int(limit, 20, 1, MAX_TOOL_SEARCH_LIMIT)
-        results = store.search(query, scope=scope, limit=safe_limit)
-        return json.dumps(results, default=str)
-
-    def read(record_id: str, offset: int = 0, limit: int = DEFAULT_READ_CHUNK) -> str:
-        record = store.read(record_id, scope=scope)
-        if record is None:
-            return "Record not found"
-        safe_offset = _clamp_int(offset, 0, 0, MAX_TOOL_READ_OFFSET)
-        safe_limit = _clamp_int(limit, DEFAULT_READ_CHUNK, 1, MAX_TOOL_READ_LIMIT)
-        data = record["data"]
-        total = len(data)
-        chunk = data[safe_offset : safe_offset + safe_limit]
-
-        header = ""
-        if safe_offset == 0:
-            meta_parts = [f"record_id: {record['id']}"]
-            meta = record.get("metadata", {})
-            if meta:
-                for k, v in list(meta.items())[:5]:
-                    meta_parts.append(f"{k}: {v}")
-            header = "[" + ", ".join(str(p) for p in meta_parts) + "]\n\n"
-
-        if safe_offset + safe_limit < total:
-            remaining = total - safe_offset - safe_limit
-            return (
-                f"{header}{chunk}\n\n--- offset {safe_offset}, showing {len(chunk)} of "
-                f"{total} chars, {remaining} remaining. "
-                f"Call read again with offset={safe_offset + safe_limit} to continue. ---"
-            )
-        return f"{header}{chunk}" if header else chunk
-
-    def list_records(limit: int = 20, offset: int = 0) -> str:
-        safe_limit = _clamp_int(limit, 20, 1, MAX_TOOL_LIST_LIMIT)
-        safe_offset = _clamp_int(offset, 0, 0, MAX_TOOL_LIST_OFFSET)
-        results = store.list_records(scope=scope, limit=safe_limit, offset=safe_offset)
-        return json.dumps(results, default=str)
-
-    return [
-        Tool(
-            name="search",
-            description=(
-                "Search the knowledge base using a text query. "
-                "Returns matching records with IDs, metadata, index_text, and score."
-            ),
-            parameters={
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "Search query",
-                    },
-                    "limit": {
-                        "type": "integer",
-                        "description": "Max results (default 20)",
-                        "default": 20,
-                    },
-                },
-                "required": ["query"],
-            },
-            handler=search,
-        ),
-        Tool(
-            name="read",
-            description=(
-                "Read the data of a record by ID. Returns metadata and the data content. "
-                "For large records, returns a chunk and tells you how to fetch more."
-            ),
-            parameters={
-                "type": "object",
-                "properties": {
-                    "record_id": {
-                        "type": "string",
-                        "description": "The record ID to read",
-                    },
-                    "offset": {
-                        "type": "integer",
-                        "description": "Character offset to start reading from (default 0)",
-                        "default": 0,
-                    },
-                    "limit": {
-                        "type": "integer",
-                        "description": f"Max characters to return (default {DEFAULT_READ_CHUNK})",
-                        "default": DEFAULT_READ_CHUNK,
-                    },
-                },
-                "required": ["record_id"],
-            },
-            handler=read,
-        ),
-        Tool(
-            name="list",
-            description=(
-                "Browse recent records. Returns metadata and index_text, sorted by most recent."
-            ),
-            parameters={
-                "type": "object",
-                "properties": {
-                    "limit": {
-                        "type": "integer",
-                        "description": "Max results (default 20)",
-                        "default": 20,
-                    },
-                    "offset": {
-                        "type": "integer",
-                        "description": "Skip first N results (default 0)",
-                        "default": 0,
-                    },
-                },
-                "required": [],
-            },
-            handler=list_records,
         ),
     ]

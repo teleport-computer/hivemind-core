@@ -2,28 +2,28 @@ import logging
 from inspect import isawaitable
 
 from .config import Settings
+from .db import Database
 from .pipeline import Pipeline
 from .sandbox.agents import AgentStore
 from .sandbox.docker_runner import DockerRunner
 from .sandbox.models import AgentConfig, SandboxSettings
 from .sandbox.settings import build_sandbox_settings
-from .store import RecordStore
 from .version import APP_VERSION
 
 logger = logging.getLogger(__name__)
 
 
 class Hivemind:
-    """Thin wrapper: storage + pipeline + health."""
+    """Thin wrapper: database + pipeline + health."""
 
     def __init__(self, settings: Settings):
         self.settings = settings
-        self.store = RecordStore(settings.db_path, settings.encryption_key)
-        self.agent_store = AgentStore(self.store._conn, self.store._lock)
+        self.db = Database(settings.database_url)
+        self.agent_store = AgentStore(self.db)
         self.pipeline: Pipeline | None = None
         try:
             self._bootstrap_default_agents()
-            self.pipeline = Pipeline(settings, self.store, self.agent_store)
+            self.pipeline = Pipeline(settings, self.db, self.agent_store)
 
             # Cleanup stale containers from previous crashes
             try:
@@ -33,10 +33,10 @@ class Hivemind:
                 logger.debug("Docker cleanup skipped: %s", e)
         except Exception:
             try:
-                self.store.close()
+                self.db.close()
             except Exception as close_error:
                 logger.debug(
-                    "Store close failed after init error: %s", close_error
+                    "Database close failed after init error: %s", close_error
                 )
             raise
 
@@ -120,9 +120,14 @@ class Hivemind:
                 )
 
     def health(self) -> dict:
+        rows = self.db.execute(
+            "SELECT COUNT(*) AS cnt FROM information_schema.tables "
+            "WHERE table_schema = 'public'"
+        )
+        table_count = rows[0]["cnt"] if rows else 0
         return {
             "status": "ok",
-            "record_count": self.store.count_records(),
+            "table_count": table_count,
             "version": APP_VERSION,
         }
 
@@ -136,4 +141,4 @@ class Hivemind:
                     if isawaitable(result):
                         await result
         finally:
-            self.store.close()
+            self.db.close()

@@ -18,13 +18,9 @@ Startup safety rule: if `HIVEMIND_HOST` is non-local (not `127.0.0.1`, `localhos
 
 ## Conventions And Gotchas
 
-- IDs (`record_id`, `agent_id`) are opaque strings (currently 12-char hex).
+- IDs (`agent_id`) are opaque strings (currently 12-char hex).
 - Most endpoints use JSON. `POST /v1/agents/upload` uses `multipart/form-data`.
 - `POST /v1/query` canonical field is `query`. `prompt` is still accepted as a deprecated alias.
-- OpenAPI schema still marks `query` as required (for generated clients, send `query`).
-- `created_at` differs by endpoint:
-  - `POST /v1/store` returns ISO datetime string
-  - `GET /v1/admin/records/{id}` returns Unix timestamp (float seconds)
 - Validation errors return `422` (Pydantic/FastAPI). Runtime errors return `400`/`404`/`503`/`500` with `{"detail": ...}`.
 
 ## Public API
@@ -38,28 +34,21 @@ Health check (never requires auth).
 ```json
 {
   "status": "ok",
-  "record_count": 42,
-  "version": "0.2.0"
+  "table_count": 5,
+  "version": "0.3.0"
 }
 ```
 
 ### `POST /v1/store`
 
-Store a record. `data` is encrypted at rest when `HIVEMIND_ENCRYPTION_KEY` is configured.
+Execute a SQL statement against the database. For write operations (INSERT, UPDATE, DELETE, CREATE TABLE, etc.).
 
 **Request body**
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
-| `data` | string | yes | Min length 1 |
-| `metadata` | object | no | Schemaless JSON, defaults to `{}` |
-| `index_text` | string or null | no | If provided, used directly for FTS |
-| `index_agent_id` | string | no | Runs index agent to produce `index_text` and optional metadata |
-
-Indexing priority:
-1. `index_text` provided -> use it
-2. else `index_agent_id` (or configured default index agent) -> run agent
-3. else -> record is stored without FTS index text
+| `sql` | string | yes | SQL statement (min length 1) |
+| `params` | array | no | Query parameters (defaults to `[]`). Use `%s` placeholders |
 
 **Example**
 
@@ -68,9 +57,15 @@ curl -X POST http://localhost:8100/v1/store \
   -H "Authorization: Bearer $API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
-    "data": "Q3 retro: decided to migrate payments from PayPal to Stripe.",
-    "metadata": {"author": "alice", "team": "payments"},
-    "index_text": "Q3 retro payment migration PayPal Stripe"
+    "sql": "CREATE TABLE IF NOT EXISTS notes (id SERIAL PRIMARY KEY, content TEXT, team TEXT, created_at TIMESTAMP DEFAULT NOW())"
+  }'
+
+curl -X POST http://localhost:8100/v1/store \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "sql": "INSERT INTO notes (content, team) VALUES (%s, %s)",
+    "params": ["Q3 retro: decided to migrate payments from PayPal to Stripe.", "payments"]
   }'
 ```
 
@@ -78,14 +73,13 @@ curl -X POST http://localhost:8100/v1/store \
 
 ```json
 {
-  "record_id": "482feb9fd696",
-  "created_at": "2026-02-12T22:01:49.774955",
-  "metadata": {"author": "alice", "team": "payments"}
+  "rows": [],
+  "rowcount": 1
 }
 ```
 
 **Common errors**
-- `400` index agent not found / invalid index agent output
+- `400` SQL execution error
 - `401` unauthorized (when API key enabled)
 - `422` invalid request body
 
@@ -99,27 +93,17 @@ Run query pipeline: optional scope agent -> query agent -> optional mediator.
 |---|---|---|---|
 | `query` | string | yes | Canonical field, min length 1 |
 | `prompt` | string | no | Deprecated alias; used only if `query` missing/blank |
-| `scope` | array[string] or null | no | Record whitelist. `null` = all records |
 | `query_agent_id` | string | no | Required unless default query agent configured |
-| `scope_agent_id` | string | no | Explicit scope agent for dynamic scope resolution |
+| `scope_agent_id` | string | no | Scope agent writes a scope function for result filtering |
 | `mediator_agent_id` | string | no | Optional output auditing/filtering |
 | `max_tokens` | integer | no | Per-request cap (min 1), clamped to server global max |
 
-Scope resolution order:
+Scope resolution:
 1. `scope_agent_id` if provided
-2. else explicit `scope` from request
-3. else configured default scope agent
-4. else unscoped (`null`)
+2. else configured default scope agent
+3. else unscoped (all query results pass through)
 
-Scope rules:
-- Enforced in SQL layer (query agent tools cannot escape scope)
-- IDs are trimmed + deduplicated
-- Max scope size is 900 record IDs
-- Empty scope list means no records visible
-
-Mediator behavior:
-- If mediator budget is too low (`<128` tokens remaining), mediator is skipped
-- If mediator fails for a non-not-found reason, raw query output is returned (`mediated=false`)
+The scope agent outputs `{"scope_fn": "def scope(sql, params, rows): ..."}` — a Python function that acts as a query firewall. Every SQL query the query agent issues has its results passed through this function.
 
 **Example**
 
@@ -129,8 +113,7 @@ curl -X POST http://localhost:8100/v1/query \
   -H "Content-Type: application/json" \
   -d '{
     "query": "What technical decisions were made recently?",
-    "query_agent_id": "qa-1",
-    "scope": ["rec_001", "rec_002"],
+    "query_agent_id": "default-query",
     "max_tokens": 50000
   }'
 ```
@@ -139,71 +122,81 @@ curl -X POST http://localhost:8100/v1/query \
 
 ```json
 {
-  "output": "Two decisions were made: migrate payments to Stripe and move internal APIs to gRPC.",
-  "records_accessed": ["482feb9fd696", "a1b2c3d4e5f6"],
+  "output": "Two decisions were made: migrate payments to Stripe and switch internal APIs to gRPC.",
   "mediated": false,
   "usage": {"total_tokens": 12345, "max_tokens": 50000}
 }
 ```
 
 **Common errors**
-- `400` no query agent configured, agent not found, invalid scope-agent output, scope too large
+- `400` no query agent configured, agent not found, invalid scope-agent output, scope function compilation error
 - `401` unauthorized (when API key enabled)
 - `422` validation errors (for example `max_tokens <= 0`)
 
-### `GET /v1/admin/records/{record_id}`
+### `POST /v1/index`
 
-Get record metadata + `index_text`. Raw encrypted/decrypted `data` is never returned here.
-
-**Response 200**
-
-```json
-{
-  "id": "482feb9fd696",
-  "metadata": {"author": "alice", "team": "payments"},
-  "index_text": "Q3 retro payment migration PayPal Stripe",
-  "created_at": 1739404909.774955
-}
-```
-
-**Errors**
-- `404` record not found
-
-### `PATCH /v1/admin/records/{record_id}`
-
-Update `metadata` and/or `index_text`.
+Run the index pipeline: index agent processes document data and returns structured index fields.
 
 **Request body**
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
-| `metadata` | object | no | Replaces metadata when present |
-| `index_text` | string | no | Replaces FTS text when present |
-
-At least one field must be present.
+| `data` | string | yes | Document content to index (min length 1) |
+| `metadata` | object | no | Arbitrary metadata passed to index agent (defaults to `{}`) |
+| `index_agent_id` | string | no | Required unless default index agent configured |
+| `max_tokens` | integer | no | Per-request cap (min 1), clamped to server global max |
 
 **Example**
 
 ```bash
-curl -X PATCH http://localhost:8100/v1/admin/records/482feb9fd696 \
+curl -X POST http://localhost:8100/v1/index \
   -H "Authorization: Bearer $API_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"metadata": {"reviewed": true}, "index_text": "updated search text"}'
+  -d '{
+    "data": "Q3 retro: payments migrated from PayPal to Stripe due to better APIs.",
+    "metadata": {"team": "payments", "author": "alice"}
+  }'
 ```
 
-**Responses**
-- `200` `{"status": "ok"}`
-- `400` missing fields, `metadata: null`, or `index_text: null`
-- `404` record not found
-- `422` invalid types (for example `metadata` array, `index_text` number)
+**Response 200**
 
-### `DELETE /v1/admin/records/{record_id}`
+```json
+{
+  "index_text": "Title: Q3 Payment Migration\nSummary: Payments team migrated from PayPal to Stripe.\nTags: payments, migration, stripe",
+  "metadata": {
+    "title": "Q3 Payment Migration",
+    "summary": "Payments team migrated from PayPal to Stripe for better APIs and lower international fees.",
+    "tags": ["payments", "migration", "stripe"],
+    "key_claims": ["PayPal replaced by Stripe", "Better APIs cited as reason"]
+  },
+  "usage": {"total_tokens": 1234, "max_tokens": 200000}
+}
+```
 
-Delete record and associated FTS index.
+**Common errors**
+- `400` no index agent configured, agent not found, invalid agent output
+- `401` unauthorized (when API key enabled)
+- `422` validation errors (for example empty `data`, `max_tokens <= 0`)
 
-**Responses**
-- `200` `{"status": "ok"}`
-- `404` `{"detail": "Record not found"}`
+### `GET /v1/admin/schema`
+
+Get the database schema (table names, columns, types).
+
+**Response 200**
+
+```json
+{
+  "schema": [
+    {
+      "table_name": "notes",
+      "column_name": "id",
+      "data_type": "integer",
+      "column_default": "nextval('notes_id_seq'::regclass)",
+      "is_nullable": "NO"
+    }
+  ]
+}
+```
 
 ### `POST /v1/agents`
 
@@ -233,8 +226,6 @@ Server validates Docker image availability before registration.
   "files_extracted": 5
 }
 ```
-
-`files_extracted` is best-effort source extraction from the image and may be `0` even when registration succeeds.
 
 **Common errors**
 - `400` image missing locally
@@ -287,11 +278,6 @@ curl -X POST http://localhost:8100/v1/agents/upload \
 }
 ```
 
-**Common errors**
-- `400` missing Dockerfile, invalid archive, oversized archive/member, too many entries
-- `422` invalid numeric form values
-- `500` archive extraction/build failures (details are redacted)
-
 ### `GET /v1/agents`
 
 List registered agents.
@@ -340,7 +326,13 @@ Auth for bridge endpoints (except `/health`):
 Authorization: Bearer <SESSION_TOKEN>
 ```
 
-Agents automatically receive `BRIDGE_URL`, `SESSION_TOKEN`, `OPENAI_BASE_URL`, and `OPENAI_API_KEY` in env vars.
+Or (Anthropic SDK style):
+
+```http
+x-api-key: <SESSION_TOKEN>
+```
+
+Agents automatically receive `BRIDGE_URL`, `SESSION_TOKEN`, `OPENAI_BASE_URL`, `OPENAI_API_KEY`, `ANTHROPIC_BASE_URL`, and `ANTHROPIC_API_KEY` in env vars.
 
 ### Common Endpoints (All Agent Roles)
 
@@ -351,6 +343,8 @@ Agents automatically receive `BRIDGE_URL`, `SESSION_TOKEN`, `OPENAI_BASE_URL`, a
 | `POST` | `/tools/{tool_name}` | Invoke tool with `{"arguments": {...}}` |
 | `POST` | `/llm/chat` | LLM proxy with budget enforcement |
 | `POST` | `/v1/chat/completions` | OpenAI-compatible chat completions proxy |
+| `POST` | `/v1/messages` | Anthropic-compatible messages proxy |
+| `POST` | `/v1/messages/count_tokens` | Anthropic-compatible token counting (no budget charge) |
 
 `POST /llm/chat` request fields:
 - `messages` (required)
@@ -388,25 +382,43 @@ Available only when bridge role is `scope`.
 {
   "query_agent_id": "qa-1",
   "prompt": "What changed this week?",
-  "record_ids": ["r1", "r2"]
+  "scope_fn_source": "def scope(sql, params, rows):\n    return {'allow': True, 'rows': rows}",
+  "replay_tape": null
 }
 ```
 
+`replay_tape` (optional): serialized tape from a previous simulation run. When provided,
+the bridge replays cached LLM responses for turns where the request hash matches — these
+replayed turns are free (no LLM API call, no budget charge). When tool results change
+(because the scope function changed), messages diverge, the tape stops replaying, and live LLM
+calls resume automatically.
+
+`/sandbox/simulate` response:
+
+```json
+{
+  "output": "...",
+  "tape": [{"request_hash": "...", "response": {...}, "request_kwargs": {...}}]
+}
+```
+
+`tape`: the recorded LLM request/response pairs from this run. Pass it back as
+`replay_tape` in a subsequent simulation with a different `scope_fn_source` to cheaply
+replay the common prefix.
+
 ### Agent Tools Exposed Through Bridge
 
-Query/index/scope roles receive scoped storage tools:
+Tools are role-dependent with different access levels:
 
-| Tool | Signature | Behavior |
+| Role | Tools | Access Level |
 |---|---|---|
-| `search` | `search(query, limit=20)` | FTS5 search, limit clamped to `1..200` |
-| `read` | `read(record_id, offset=0, limit=20000)` | Chunked record read, limit clamped to `1..50000` |
-| `list` | `list(limit=20, offset=0)` | List records by recency, limit clamped to `1..200` |
+| **Scope** | `execute_sql`, `get_schema`, `list_query_agent_files`, `read_query_agent_file` | FULL_READ — SELECT on user tables, blocked from `_hivemind_*` |
+| **Query** | `execute_sql`, `get_schema` | SCOPED — SQL runs, results pass through scope_fn |
+| **Index** | `execute_sql`, `get_schema` | FULL_READWRITE — full DML, blocked from `_hivemind_*` writes |
+| **Mediator** | (none) | NONE — no DB access |
 
-Scope agents additionally receive:
-- `list_query_agent_files()`
-- `read_query_agent_file(file_path)`
-
-Mediator agents receive no data tools.
+`execute_sql(sql, params=[])` — Execute SQL. Returns JSON string of result rows or `{rowcount: N}`.
+`get_schema()` — Returns database schema (tables, columns, types).
 
 ## Python Client Example
 
@@ -415,7 +427,6 @@ import httpx
 
 BASE = "http://localhost:8100"
 API_KEY = "your-api-key"
-QUERY_AGENT_ID = "default-query"
 
 client = httpx.Client(
     base_url=BASE,
@@ -423,23 +434,31 @@ client = httpx.Client(
     timeout=120,
 )
 
+# Create a table
+client.post(
+    "/v1/store",
+    json={
+        "sql": "CREATE TABLE IF NOT EXISTS notes (id SERIAL PRIMARY KEY, content TEXT, team TEXT)",
+    },
+).raise_for_status()
+
+# Insert data
 store_resp = client.post(
     "/v1/store",
     json={
-        "data": "Sprint retro: moved internal APIs from REST to gRPC.",
-        "metadata": {"team": "backend", "type": "decision"},
-        "index_text": "sprint retro REST gRPC migration",
+        "sql": "INSERT INTO notes (content, team) VALUES (%s, %s)",
+        "params": ["Sprint retro: moved internal APIs from REST to gRPC.", "backend"],
     },
 )
 store_resp.raise_for_status()
-record_id = store_resp.json()["record_id"]
+print(store_resp.json())  # {"rows": [], "rowcount": 1}
 
+# Query
 query_resp = client.post(
     "/v1/query",
     json={
         "query": "What decisions were made?",
-        "query_agent_id": QUERY_AGENT_ID,
-        "scope": [record_id],
+        "query_agent_id": "default-query",
         "max_tokens": 50000,
     },
 )

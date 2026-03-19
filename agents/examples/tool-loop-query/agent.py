@@ -29,29 +29,27 @@ COMPACTION_CHAR_THRESHOLD = 80_000  # ~20k tokens
 COMPACTION_KEEP_RECENT = 4  # keep last N assistant+tool exchanges
 
 SYSTEM_PROMPT = """\
-You are a query agent with access to a knowledge base. Answer the question \
+You are a query agent with SQL access to a database. Answer the question \
 using the provided tools.
 
 Available tools:
-- search(query, limit=20): Full-text search. Returns [{id, metadata, index_text, score}].
-- read(record_id, offset=0, limit=20000): Read a record's full data. Returns text with metadata header.
-- list(limit=20, offset=0): Browse recent records. Returns [{id, metadata, index_text}].
+- get_schema(): Get the database schema (tables, columns, types). Call this first.
+- execute_sql(sql, params=[]): Execute a SQL query. Use %s for parameter placeholders. \
+Returns JSON rows for SELECT queries.
 
 To call tools, output one or more JSON blocks like this:
 ```tool
-{"name": "search", "arguments": {"query": "payments migration"}}
+{"name": "get_schema", "arguments": {}}
 ```
 
-You can call multiple tools in one response — they run in parallel:
 ```tool
-{"name": "read", "arguments": {"record_id": "abc123"}}
+{"name": "execute_sql", "arguments": {"sql": "SELECT * FROM users WHERE team = %s", "params": ["alpha"]}}
 ```
-```tool
-{"name": "read", "arguments": {"record_id": "def456"}}
-```
+
+You can call multiple tools in one response — they run in parallel.
 
 When you have enough information to answer, just write your answer as plain text \
-(no tool blocks). Be concise and accurate. Paraphrase — do not reproduce text verbatim. \
+(no tool blocks). Be concise and accurate. Paraphrase — do not reproduce data verbatim. \
 If nothing relevant is found, say so honestly.\
 """
 

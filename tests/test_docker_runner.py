@@ -138,6 +138,8 @@ async def test_run_agent_basic():
         f"{kwargs['environment']['BRIDGE_URL']}/v1"
     )
     assert kwargs["environment"]["OPENAI_API_KEY"] == "tok-123"
+    assert kwargs["environment"]["ANTHROPIC_BASE_URL"] == kwargs["environment"]["BRIDGE_URL"]
+    assert kwargs["environment"]["ANTHROPIC_API_KEY"] == "tok-123"
     assert kwargs["mem_limit"] == "256m"
     assert kwargs["pids_limit"] == 256
     assert kwargs["read_only"] is True
@@ -179,6 +181,8 @@ async def test_run_agent_with_env():
     assert env["CUSTOM_VAR"] == "value"
     assert env["OPENAI_BASE_URL"] == f"{env['BRIDGE_URL']}/v1"
     assert env["OPENAI_API_KEY"] == "tok-123"
+    assert env["ANTHROPIC_BASE_URL"] == env["BRIDGE_URL"]
+    assert env["ANTHROPIC_API_KEY"] == "tok-123"
 
 
 @pytest.mark.asyncio

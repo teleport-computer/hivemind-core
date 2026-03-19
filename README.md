@@ -1,14 +1,17 @@
 # hivemind-core
 
-A neutral encrypted storage and Docker agent sandbox platform. Like Postgres for AI-mediated knowledge — apps define their own metadata, access control, and query logic by registering Docker agent images.
+A forkable agent platform with raw Postgres and scope-function query firewall. Apps define their own schema, access control, and query logic by registering Docker agent images.
 
-Core provides only the irreducible primitives: encrypted record storage, FTS5 full-text search, Docker sandboxes, scope enforcement, and pipeline orchestration.
+Core provides only the irreducible primitives: raw SQL execution, Docker sandboxes, scope function enforcement, and pipeline orchestration. In production, runs inside a dstack Confidential VM where LUKS2 disk encryption and TDX memory encryption protect data-at-rest — no application-level encryption needed.
 
 ## Quickstart
 
 ```bash
 # Install
 uv sync --all-extras
+
+# Start local Postgres
+docker compose -f deploy/docker-compose.dev.yml up -d
 
 # Configure
 cp .env.example .env
@@ -37,7 +40,7 @@ curl http://localhost:8100/v1/health
                        │   (curl, httpx, any HTTP client) │
                        └────────┬──────────┬─────────────┘
                                 │          │
-                       POST /v1/store   POST /v1/query
+                       POST /v1/store   POST /v1/query  POST /v1/index
                                 │          │
                        ┌────────▼──────────▼─────────────┐
                        │    FastAPI Server (server.py)    │
@@ -49,18 +52,19 @@ curl http://localhost:8100/v1/health
                        ┌────────▼──────────▼─────────────┐
                        │    Pipeline (pipeline.py)        │
                        │                                  │
-                       │  Store: data → index → write     │
+                       │  Store: sql → execute → response │
                        │  Query: scope → query → mediator │
+                       │  Index: data → index agent → out │
                        │                                  │
                        │  Tracks token budgets per stage   │
                        └──┬────────┬────────┬────────────┘
                           │        │        │
                  ┌────────▼─┐  ┌───▼───┐  ┌─▼────────────┐
-                 │RecordStore│  │Agent  │  │Sandbox       │
+                 │ Database  │  │Agent  │  │Sandbox       │
                  │           │  │Store  │  │Backend       │
-                 │SQLite+FTS5│  │       │  │              │
-                 │Fernet enc │  │CRUD + │  │Docker runner │
-                 │Scope WHERE│  │files  │  │Bridge server │
+                 │ Postgres  │  │       │  │              │
+                 │ (raw SQL) │  │CRUD + │  │Docker runner │
+                 │           │  │files  │  │Bridge server │
                  └───────────┘  └───────┘  └──────────────┘
 ```
 
@@ -68,35 +72,14 @@ curl http://localhost:8100/v1/health
 
 ```
 Client sends:
-  { data: "Sprint retro notes...",
-    metadata: {"author": "alice"},
-    index_agent_id: "idx-1"  }       ← OR index_text: "precomputed"
+  { sql: "INSERT INTO notes (content, team) VALUES (%s, %s)",
+    params: ["Sprint retro notes...", "alpha"] }
             │
             ▼
-  Priority: index_text > index_agent_id > default index agent > nothing
-            │
-    ┌───────▼────────────────────────────────┐
-    │ Index Agent Container (Docker)         │
-    │                                        │
-    │ ENV (advisory):                        │
-    │   DOCUMENT_DATA = "Sprint retro…"      │
-    │   DOCUMENT_METADATA = {"author":…}     │
-    │                                        │
-    │ TOOLS: search, read, list              │
-    │                                        │
-    │ stdout → JSON:                         │
-    │   {"index_text": "...",                │
-    │    "metadata": {"tags": [...]}}        │
-    └───────┬────────────────────────────────┘
+  Database.execute_commit(sql, params)
             │
             ▼
-  RecordStore.write_record()
-    - Encrypt data with Fernet
-    - Store metadata JSON
-    - Insert FTS index if index_text set
-            │
-            ▼
-  Response: { record_id, created_at, metadata }
+  Response: { rows: [], rowcount: 1 }
 ```
 
 ### Query pipeline (`POST /v1/query`)
@@ -116,16 +99,17 @@ Client sends:
   │ Scope Agent Container                                │
   │                                                      │
   │ ENV: QUERY_PROMPT, QUERY_AGENT_ID                    │
-  │ TOOLS: search, read, list (FULL access, no scope)    │
+  │ TOOLS: execute_sql, get_schema (FULL_READ access)    │
   │        list_query_agent_files, read_query_agent_file  │
   │ BRIDGE EXTRAS:                                       │
   │   POST /sandbox/simulate  ← run nested query          │
   │   GET  /sandbox/agents/{id}/files                      │
   │                                                      │
-  │ stdout → {"record_ids": ["r1", "r2", "r3"]}         │
+  │ stdout → {"scope_fn": "def scope(sql, params, rows): │
+  │   return {'allow': True, 'rows': rows}"}             │
   └─────────────────────────┬────────────────────────────┘
                             │
-                  scope = ["r1","r2","r3"]
+                  scope_fn = compiled Python function
                   remaining_tokens -= scope_usage
                             │
                             ▼
@@ -135,16 +119,16 @@ Client sends:
   │ Query Agent Container                                │
   │                                                      │
   │ ENV: QUERY_PROMPT                                    │
-  │ TOOLS: search, read, list (SCOPED to r1,r2,r3)      │
+  │ TOOLS: execute_sql, get_schema (SCOPED access)       │
   │                                                      │
-  │   search("migration") → only hits from r1,r2,r3     │
-  │   read("r4")          → "Record not found" (scoped) │
-  │   list()              → only shows r1,r2,r3          │
+  │   execute_sql("SELECT * FROM notes")                  │
+  │     → SQL runs, then scope_fn filters results        │
+  │     → Query agent sees only what scope_fn allows     │
   │                                                      │
   │ stdout → "The team decided to migrate to Stripe…"   │
   └─────────────────────────┬────────────────────────────┘
                             │
-                  output + records_accessed = ["r1","r3"]
+                  output text
                   remaining_tokens -= query_usage
                             │
                             ▼
@@ -153,7 +137,7 @@ Client sends:
   ┌──────────────────────────────────────────────────────┐
   │ Mediator Agent Container                             │
   │                                                      │
-  │ ENV: RAW_OUTPUT, QUERY_PROMPT, RECORDS_ACCESSED      │
+  │ ENV: RAW_OUTPUT, QUERY_PROMPT                        │
   │ TOOLS: none (mediator has NO data access)            │
   │                                                      │
   │ stdout → "[filtered] The team decided to migrate…"  │
@@ -162,9 +146,33 @@ Client sends:
                             ▼
   Response:
     { output: "[filtered] The team decided…",
-      records_accessed: ["r1", "r3"],
       mediated: true,
       usage: { total_tokens: 8500, max_tokens: 100000 } }
+```
+
+### Index pipeline (`POST /v1/index`)
+
+```
+Client sends:
+  { data: "Q3 retro: payments migrated from PayPal to Stripe...",
+    metadata: {"team": "payments"},
+    index_agent_id: "idx-1" }          ← optional if default configured
+            │
+            ▼
+  ┌──────────────────────────────────────────────────────┐
+  │ Index Agent Container                                │
+  │                                                      │
+  │ ENV: DOCUMENT_DATA, DOCUMENT_METADATA                │
+  │ TOOLS: execute_sql, get_schema (FULL_READWRITE)      │
+  │                                                      │
+  │ stdout → {"index_text": "...", "metadata": {...}}    │
+  └─────────────────────────┬────────────────────────────┘
+                            │
+                            ▼
+  Response:
+    { index_text: "Title: Q3 Payment Migration\n...",
+      metadata: { title: "...", tags: [...] },
+      usage: { total_tokens: 1234, max_tokens: 200000 } }
 ```
 
 ### What every agent container receives
@@ -179,9 +187,11 @@ Client sends:
 │  BUDGET_MAX_CALLS   remaining call budget for this run    │
 │  OPENAI_BASE_URL    http://host.docker.internal:<port>/v1 │
 │  OPENAI_API_KEY     same as SESSION_TOKEN                 │
+│  ANTHROPIC_BASE_URL http://host.docker.internal:<port>    │
+│  ANTHROPIC_API_KEY  same as SESSION_TOKEN                 │
 │                                                           │
-│  The bridge is the only network exit. OpenAI SDKs         │
-│  auto-route through the bridge with zero code changes.    │
+│  The bridge is the only network exit. OpenAI/Anthropic    │
+│  SDKs auto-route through the bridge with zero code changes│
 └───────────────────────────────────────────────────────────┘
 
 ┌──────────── ADVISORY (role-specific, ignorable) ──────────┐
@@ -189,7 +199,7 @@ Client sends:
 │  Index:    DOCUMENT_DATA, DOCUMENT_METADATA               │
 │  Scope:    QUERY_PROMPT, QUERY_AGENT_ID                   │
 │  Query:    QUERY_PROMPT                                   │
-│  Mediator: RAW_OUTPUT, QUERY_PROMPT, RECORDS_ACCESSED     │
+│  Mediator: RAW_OUTPUT, QUERY_PROMPT                       │
 │                                                           │
 │  Default agents use these. Custom agents may ignore       │
 │  them entirely — the agent is a Docker container that     │
@@ -213,14 +223,15 @@ Client sends:
 │  │  256MB mem limit    │  exit  │  POST /tools/{name}      │  │
 │  │  1 CPU, 256 PIDs    │        │  POST /llm/chat          │  │
 │  │                     │        │  POST /v1/chat/completions│  │
-│  │  ┌───────────────┐  │        │       (OpenAI compat)    │  │
-│  │  │ Agent code    │  │        │                          │  │
-│  │  │ (any language │  │        │  Auth: Bearer token      │  │
-│  │  │  any SDK)     │  │        │  Budget: 429 when out    │  │
-│  │  └───────────────┘  │        │                          │  │
-│  │                     │        │  Scope-only extras:      │  │
-│  │  stdout = output    │        │  POST /sandbox/simulate  │  │
-│  └─────────────────────┘        │  GET  /sandbox/agents/…  │  │
+│  │  ┌───────────────┐  │        │  POST /v1/messages       │  │
+│  │  │ Agent code    │  │        │       (Anthropic compat) │  │
+│  │  │ (any language │  │        │                          │  │
+│  │  │  any SDK)     │  │        │  Auth: Bearer token      │  │
+│  │  └───────────────┘  │        │  Budget: 429 when out    │  │
+│  │                     │        │                          │  │
+│  │  stdout = output    │        │  Scope-only extras:      │  │
+│  └─────────────────────┘        │  POST /sandbox/simulate  │  │
+│                                 │  GET  /sandbox/agents/…  │  │
 │                                 └────────────┬─────────────┘  │
 │       ✗ No internet                          │                │
 │       ✗ No other containers                  │                │
@@ -237,30 +248,28 @@ Client sends:
                                   └───────────────────────────┘
 ```
 
-### Scope enforcement
+### Scope enforcement (scope function query firewall)
 
 ```
-RecordStore has records: r1, r2, r3, r4, r5
-
-scope = ["r1", "r2", "r3"]  (from scope agent or request)
+Query agent calls execute_sql("SELECT * FROM notes WHERE team = %s", ["alpha"])
        │
        ▼
-build_tools(store, scope=["r1","r2","r3"])
-       │  Creates tool handlers with scope baked into closures
+1. SQL is validated (SELECT-only via sqlglot AST parsing)
+2. SQL runs against FULL database → raw results
+       │
        ▼
-search("migration")
-  → SQL: … WHERE records_fts MATCH 'migration'
-         AND r.id IN ('r1','r2','r3')      ← enforced
-  → Only r1, r2, r3 can appear in results
+3. scope_fn(sql, params, rows) is called
+   - Written by scope agent: "def scope(sql, params, rows): ..."
+   - Sees the SQL, parameters, and full result set
+   - Returns {"allow": True, "rows": filtered_rows}
+     or     {"allow": False, "error": "reason"}
+       │
+       ▼
+4. Query agent receives only what scope_fn returned
 
-read("r4")
-  → SQL: … WHERE r.id = 'r4'
-         AND r.id IN ('r1','r2','r3')      ← r4 blocked
-  → "Record not found"
-
-The agent CANNOT bypass this. Scope is baked into the Python
-closure at pipeline construction time. There is no bridge
-endpoint to change it. The SQL WHERE clause is the boundary.
+The agent CANNOT bypass this. The scope function is compiled from
+AST-validated source (no imports, no exec/eval, no dunders) and
+runs in-process with fail-closed semantics (exception → deny).
 ```
 
 ### Budget flow across pipeline stages
@@ -303,13 +312,20 @@ Within each stage, the bridge enforces per-call:
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│  Layer 1: SCOPE (SQL-level, unbypassable)               │
+│  Layer 1: SCOPE FUNCTION FIREWALL (query-level)         │
 │  ───────────────────────────────────────                │
-│  WHERE r.id IN (scope_list)                             │
-│  Agent tools physically cannot access out-of-scope      │
-│  records. Baked into tool closures at pipeline level.    │
+│  scope_fn(sql, params, rows) → allow/deny/transform     │
+│  AST-validated Python (no imports, no exec, no dunders)  │
+│  Fail-closed: exception → deny                          │
+│  Data-aware: sees actual results, enforces k-anonymity   │
+│  Query-aware: distinguishes SELECT COUNT(*) from SELECT *│
 ├─────────────────────────────────────────────────────────┤
-│  Layer 2: DOCKER ISOLATION (runtime-level)              │
+│  Layer 2: SQL VALIDATION (tool-level)                    │
+│  ───────────────────────────────────────                │
+│  sqlglot AST parsing: SELECT-only for query/scope agents│
+│  Index agents get full DML but blocked from _hivemind_* │
+├─────────────────────────────────────────────────────────┤
+│  Layer 3: DOCKER ISOLATION (runtime-level)              │
 │  ───────────────────────────────────────                │
 │  • Read-only root filesystem (+tmpfs for /tmp)          │
 │  • ALL Linux capabilities dropped                       │
@@ -320,19 +336,21 @@ Within each stage, the bridge enforces per-call:
 │  • Linux: iptables DOCKER-USER rules per container      │
 │    allowing ONLY bridge IP:port, DROP everything else   │
 ├─────────────────────────────────────────────────────────┤
-│  Layer 3: BUDGET ENFORCEMENT (bridge-level)             │
+│  Layer 4: BUDGET ENFORCEMENT (bridge-level)             │
 │  ───────────────────────────────────────                │
 │  • max_calls and max_tokens hard caps                   │
 │  • Pre-flight check before each LLM call                │
 │  • 429 rejection when exhausted                         │
 │  • Serialized via asyncio Lock (no races)               │
 ├─────────────────────────────────────────────────────────┤
-│  Layer 4: ENCRYPTION AT REST                            │
+│  Layer 5: ENCRYPTION AT REST (dstack CVM)               │
 │  ───────────────────────────────────────                │
-│  • records.data encrypted with Fernet                   │
-│  • DB file useless without HIVEMIND_ENCRYPTION_KEY      │
+│  • LUKS2 full-disk encryption (AES-XTS-256)             │
+│  • TDX memory encryption                                │
+│  • Operator cannot read disk or RAM                     │
+│  • Key derived from KMS, sealed to attestation          │
 ├─────────────────────────────────────────────────────────┤
-│  Layer 5: MEDIATOR (soft, LLM-based)                    │
+│  Layer 6: MEDIATOR (soft, LLM-based)                    │
 │  ───────────────────────────────────────                │
 │  • Optional agent audits query output                   │
 │  • Has NO tool access (can't exfiltrate data)           │
@@ -346,8 +364,7 @@ All settings are loaded from `.env` with the `HIVEMIND_` prefix.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `HIVEMIND_DB_PATH` | `./hivemind.db` | SQLite database path |
-| `HIVEMIND_ENCRYPTION_KEY` | — | Fernet key for at-rest encryption (empty = plaintext) |
+| `HIVEMIND_DATABASE_URL` | `postgresql://hivemind:dev@localhost:5432/hivemind` | Postgres connection string (required) |
 | `HIVEMIND_API_KEY` | — | Shared secret for HTTP auth. Required when binding non-local host |
 | `HIVEMIND_HOST` | `127.0.0.1` | Server bind host |
 | `HIVEMIND_PORT` | `8100` | Server bind port |
@@ -357,10 +374,10 @@ All settings are loaded from `.env` with the `HIVEMIND_` prefix.
 | `HIVEMIND_LLM_MODEL` | `anthropic/claude-sonnet-4.5` | Default LLM model |
 | `HIVEMIND_LLM_TIMEOUT_SECONDS` | `45` | Timeout for outbound LLM provider calls from bridge |
 | `HIVEMIND_BRIDGE_HOST` | `0.0.0.0` | Bridge bind host (must be reachable from Docker containers) |
-| `HIVEMIND_DOCKER_HOST` | — | Optional Docker daemon host/socket (e.g. `unix:///Users/me/.docker/run/docker.sock`) |
+| `HIVEMIND_DOCKER_HOST` | — | Optional Docker daemon host/socket |
 | `HIVEMIND_DOCKER_NETWORK` | `hivemind-sandbox` | Docker network name used for sandbox containers |
 | `HIVEMIND_DOCKER_NETWORK_INTERNAL` | `true` | Use Docker internal network mode when compatible with host bridge |
-| `HIVEMIND_ENFORCE_BRIDGE_ONLY_EGRESS` | `true` | Linux-only: install per-container `DOCKER-USER` firewall rules allowing only bridge IP:port (ignored on macOS/Windows) |
+| `HIVEMIND_ENFORCE_BRIDGE_ONLY_EGRESS` | `true` | Linux-only: install per-container `DOCKER-USER` firewall rules allowing only bridge IP:port |
 | `HIVEMIND_ENFORCE_BRIDGE_ONLY_EGRESS_FAIL_CLOSED` | `true` | Linux-only: if firewall setup fails, terminate agent run instead of continuing |
 | `HIVEMIND_CONTAINER_MEMORY_MB` | `256` | Max container memory limit (MB) |
 | `HIVEMIND_CONTAINER_CPU_QUOTA` | `1.0` | Container CPU quota (1.0 = one core) |
@@ -372,9 +389,9 @@ All settings are loaded from `.env` with the `HIVEMIND_` prefix.
 | `HIVEMIND_MAX_TOKENS` | `200000` | Global max tokens per agent run |
 | `HIVEMIND_AGENT_TIMEOUT` | `300` | Max agent runtime (seconds) |
 | `HIVEMIND_AUTOLOAD_DEFAULT_AGENTS` | `true` | Auto-register defaults from configured default images using stable IDs |
-| `HIVEMIND_DEFAULT_INDEX_AGENT` | `default-index` (example) | Default index agent ID (empty = caller provides index_text) |
-| `HIVEMIND_DEFAULT_QUERY_AGENT` | `default-query` (example) | Default query agent ID (empty = query_agent_id required) |
-| `HIVEMIND_DEFAULT_SCOPE_AGENT` | `default-scope` (example) | Default scope agent ID (empty = no scoping) |
+| `HIVEMIND_DEFAULT_INDEX_AGENT` | `default-index` | Default index agent ID |
+| `HIVEMIND_DEFAULT_QUERY_AGENT` | `default-query` | Default query agent ID |
+| `HIVEMIND_DEFAULT_SCOPE_AGENT` | `default-scope` | Default scope agent ID |
 | `HIVEMIND_DEFAULT_MEDIATOR_AGENT` | — | Default mediator agent ID (empty = no mediation) |
 | `HIVEMIND_DEFAULT_INDEX_IMAGE` | — | Docker image to autoload into `HIVEMIND_DEFAULT_INDEX_AGENT` |
 | `HIVEMIND_DEFAULT_QUERY_IMAGE` | — | Docker image to autoload into `HIVEMIND_DEFAULT_QUERY_AGENT` |
@@ -382,19 +399,6 @@ All settings are loaded from `.env` with the `HIVEMIND_` prefix.
 | `HIVEMIND_DEFAULT_MEDIATOR_IMAGE` | — | Docker image to autoload into `HIVEMIND_DEFAULT_MEDIATOR_AGENT` |
 
 If `HIVEMIND_HOST` is non-local (not `127.0.0.1`/`localhost`), startup fails unless `HIVEMIND_API_KEY` is set.
-
-The repository's `.env.example` provides a ready-to-run local profile with
-`default-*` agent IDs and `hivemind-default-*:local` image tags. Build those
-images before starting the server.
-
-When `HIVEMIND_AUTOLOAD_DEFAULT_AGENTS=true`, startup upserts defaults by ID from the configured default image fields. This keeps stable IDs across DB resets so `.env` does not need per-run UUID edits.
-If a configured default image is missing, startup now fails fast.
-
-Generate an encryption key:
-
-```bash
-python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
-```
 
 ## Uploading Agents
 
@@ -424,73 +428,18 @@ curl -X POST http://localhost:8100/v1/agents/upload \
 # Returns: {"agent_id": "abc123", "name": "my-agent", "files_extracted": 2}
 ```
 
-No Docker CLI needed on the client. No registry. No auth complexity.
-
 ## Agent Roles
 
 All agents are Docker containers. Core defines four roles:
 
 | Role | Purpose | Tools Available | Bridge Extras |
 |------|---------|-----------------|---------------|
-| **Index** | Extract index_text + metadata from documents | search, read, list | — |
-| **Scope** | Determine record_id whitelist for queries | search, read, list (full access) | `/sandbox/simulate`, query-agent file inspection (same query agent only) |
-| **Query** | Search and answer questions | search, read, list (scoped) | — |
+| **Index** | Process data and write indexes | execute_sql, get_schema (full read/write) | — |
+| **Scope** | Write a scope function (query firewall) | execute_sql, get_schema (full read) | `/sandbox/simulate`, query-agent file inspection |
+| **Query** | Query data and answer questions | execute_sql, get_schema (scoped via scope_fn) | — |
 | **Mediator** | Audit/filter query output | None | — |
 
 Agents write their output to **stdout** and exit with code 0.
-
-## Data Model
-
-```
-┌─────────────────────── SQLite DB ───────────────────────┐
-│                                                         │
-│  records                          records_fts (FTS5)    │
-│  ┌──────────────────────┐         ┌──────────────────┐  │
-│  │ id         TEXT PK   │         │ index_text       │  │
-│  │ data       TEXT      │◄────────│ (virtual table   │  │
-│  │   (Fernet encrypted) │  rowid  │  over records)   │  │
-│  │ metadata   TEXT      │         └──────────────────┘  │
-│  │   (schemaless JSON)  │                               │
-│  │ index_text TEXT      │         agents                │
-│  │   (nullable, FTS)    │         ┌──────────────────┐  │
-│  │ created_at REAL      │         │ agent_id     PK  │  │
-│  └──────────────────────┘         │ name, image      │  │
-│                                   │ memory_mb        │  │
-│  agent_files                      │ max_llm_calls    │  │
-│  ┌──────────────────────┐         │ max_tokens       │  │
-│  │ agent_id   TEXT      │────────►│ timeout_seconds  │  │
-│  │ file_path  TEXT      │         └──────────────────┘  │
-│  │ content    TEXT      │                               │
-│  │ size_bytes INT       │                               │
-│  └──────────────────────┘                               │
-└─────────────────────────────────────────────────────────┘
-```
-
-**What's stored:**
-- `records.data` — encrypted ciphertext (unreadable without `HIVEMIND_ENCRYPTION_KEY`)
-- `records.metadata` — schemaless JSON (app-defined)
-- `records.index_text` — FTS-searchable plaintext (nullable)
-
-**What leaves via the API:**
-- Agent-produced answers, optionally audited by a mediator agent
-- Record metadata + index_text (via `GET /v1/admin/records/{id}`) — never raw data
-
-## Database
-
-SQLite with FTS5 full-text search and WAL mode.
-
-Schema migrations run automatically on startup via Alembic.
-
-```bash
-# Manual migration commands
-uv run alembic -c alembic.ini upgrade head   # upgrade to latest
-uv run alembic -c alembic.ini current        # show current revision
-
-# Inspect directly
-sqlite3 hivemind.db ".schema"
-sqlite3 hivemind.db "SELECT id, metadata, index_text FROM records"
-sqlite3 hivemind.db "SELECT * FROM records_fts WHERE records_fts MATCH 'migration'"
-```
 
 ## Project Structure
 
@@ -499,14 +448,13 @@ hivemind/
   __init__.py          # Public API exports
   version.py           # Version resolution (from package metadata)
   config.py            # Settings (env vars)
-  core.py              # Hivemind class — thin wrapper (store + pipeline + health)
+  core.py              # Hivemind class — thin wrapper (db + pipeline + health)
   server.py            # FastAPI HTTP server
-  models.py            # Pydantic request/response models
-  store.py             # RecordStore — SQLite + FTS5 + Fernet encryption
+  models.py            # Pydantic request/response models (Store, Query, Index, Health)
+  db.py                # Database — thin Postgres wrapper (psycopg, dict_row)
   pipeline.py          # Pipeline orchestrator (store + query pipelines)
-  tools.py             # Agent tools (search, read, list, agent file tools)
-  migrations.py        # Alembic migration runner
-  alembic/             # Alembic env + version scripts
+  tools.py             # Agent tools (execute_sql, get_schema) + access levels
+  scope.py             # Scope function compiler + AST validation
   sandbox/
     __init__.py        # Sandbox exports
     models.py          # AgentConfig, SandboxSettings, bridge models, SimulateRequest/Response
@@ -515,34 +463,43 @@ hivemind/
     bridge.py          # Ephemeral HTTP bridge server (LLM proxy + tools + simulation)
     docker_runner.py   # DockerRunner — container lifecycle, image extraction, cleanup
     backend.py         # SandboxBackend (implements run() interface)
-    agents.py          # Agent registration + source file storage (SQLite)
+    agents.py          # Agent registration + source file storage (Postgres)
+    tape.py            # Tape recorder/replay for LLM call caching
 agents/
+  base/                # Agent SDK base Docker image
+  default-common/      # Shared bridge helper (_bridge.py)
   default-index/       # Default index agent (Docker image)
   default-query/       # Default query agent (Docker image)
   default-scope/       # Default scope agent (Docker image)
   default-mediator/    # Default mediator agent (Docker image)
   examples/            # Example agents — ready to upload (see agents/examples/README.md)
-    simple-query/      # Minimal search + synthesize
+    simple-query/      # Minimal schema + SQL + synthesize
     tool-loop-query/   # Agentic loop with parallel tools + auto-compaction
-    metadata-scope/    # Team-based access control
+    metadata-scope/    # Team-based scope function
+    agent-sdk-query/   # Claude Agent SDK example
     redact-mediator/   # PII redaction
+deploy/
+  boot.sh              # CVM entrypoint with KMS key derivation
+  Dockerfile           # Production app image
+  docker-compose.yaml  # Production dstack deployment
+  docker-compose.dev.yml # Local Postgres for development
+  contracts/           # NotarizedAppAuth.sol (on-chain governance)
+  monitor/             # Monitoring TEE (event watcher + IPFS + notarizer)
+  postgres/            # Production Postgres image (WAL-G backup, supercronic)
+  restore.sh           # Disaster recovery
 tests/
-  conftest.py                # Shared fixtures (tmp_db)
-  test_store.py              # RecordStore + encryption unit tests
-  test_api.py                # FastAPI endpoint unit tests
+  conftest.py                # Shared fixtures
+  test_scope.py              # Scope function AST validation + compilation
   test_pipeline.py           # Pipeline orchestrator tests
+  test_core_store.py         # Database init tests
   test_simulate.py           # Simulation + budget carving tests
-  test_tools.py              # Agent tools + agent file inspection tools
-  test_core_store.py         # Core integration tests
-  test_migrations.py         # Alembic migration tests
   test_sandbox_budget.py     # Budget tracking tests
-  test_sandbox_agents.py     # Agent CRUD + file storage tests
   test_sandbox_backend.py    # Sandbox backend tests
   test_sandbox_bridge.py     # Bridge server tests
   test_docker_runner.py      # Docker runner tests (mocked)
+  test_tape.py               # Tape recorder tests
+  test_anthropic_bridge.py   # Anthropic SDK bridge tests
   test_integration_docker.py # Docker integration tests (real containers)
-  fixtures/
-    Dockerfile.test-agent    # Minimal test image for integration tests
 ```
 
 ## API Reference
@@ -552,8 +509,13 @@ See [API.md](API.md) for the full API reference with all endpoints, request/resp
 ## Tests
 
 ```bash
-# Unit tests
-uv run pytest tests/ -q
+# Unit tests (Postgres-dependent tests skip when HIVEMIND_TEST_DATABASE_URL not set)
+uv run pytest tests/ --ignore=tests/test_integration_docker.py -q
+
+# With Postgres
+docker compose -f deploy/docker-compose.dev.yml up -d
+export HIVEMIND_TEST_DATABASE_URL="postgresql://hivemind:dev@localhost:5432/hivemind"
+uv run pytest tests/ --ignore=tests/test_integration_docker.py -q
 
 # Lint
 uv tool run ruff check .

@@ -1,4 +1,4 @@
-FROM python:3.12-slim
-WORKDIR /app
+FROM hivemind-agent-sdk-base:latest
+COPY _bridge.py .
 COPY agent.py .
 CMD ["python", "agent.py"]

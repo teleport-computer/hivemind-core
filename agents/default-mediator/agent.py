@@ -1,25 +1,25 @@
-"""Default mediator agent: audits query output for policy compliance.
+"""Default mediator agent — fully autonomous Claude Code for output auditing.
 
-Env vars:
+Audits query agent output for policy compliance before returning to the user.
+
+Env vars (set automatically by the sandbox):
   BRIDGE_URL, SESSION_TOKEN — bridge connection
+  ANTHROPIC_BASE_URL, ANTHROPIC_API_KEY — SDK routes LLM calls through bridge
   RAW_OUTPUT — the query agent's raw output to audit
   QUERY_PROMPT — the original question
-  RECORDS_ACCESSED — JSON list of record IDs accessed
-  MEDIATION_POLICY — optional policy instructions
+  MEDIATION_POLICY — optional custom policy instructions
 
 Outputs filtered/audited text to stdout.
 """
 
-import json
+import asyncio
 import os
-import urllib.error
-import urllib.request
+import sys
 
-BRIDGE_URL = os.environ["BRIDGE_URL"]
-SESSION_TOKEN = os.environ["SESSION_TOKEN"]
+from claude_agent_sdk import ClaudeAgentOptions, query
+
 RAW_OUTPUT = os.environ.get("RAW_OUTPUT", "")
 QUERY_PROMPT = os.environ.get("QUERY_PROMPT", "")
-RECORDS_ACCESSED = os.environ.get("RECORDS_ACCESSED", "[]")
 MEDIATION_POLICY = os.environ.get("MEDIATION_POLICY", "")
 
 MEDIATOR_SYSTEM = """\
@@ -54,52 +54,37 @@ Output rules:
 """
 
 
-def llm_call(messages, max_tokens=4096):
-    data = json.dumps({
-        "messages": messages,
-        "max_tokens": max_tokens,
-    }).encode()
-    req = urllib.request.Request(
-        f"{BRIDGE_URL}/llm/chat",
-        data=data,
-        headers={
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {SESSION_TOKEN}",
-        },
-    )
-    try:
-        with urllib.request.urlopen(req) as resp:
-            return json.loads(resp.read())["content"]
-    except urllib.error.HTTPError as e:
-        if e.code == 429:
-            return "Unable to provide a mediated response within budget."
-        return f"Unable to provide a mediated response (HTTP {e.code})."
-    except (urllib.error.URLError, TimeoutError):
-        return "Unable to provide a mediated response."
-    except Exception:
-        return "Unable to provide a mediated response."
-
-
-def main():
+async def main() -> None:
     if not RAW_OUTPUT.strip():
         print("")
         return
 
     user_msg = (
         f"QUERY_PROMPT:\n{QUERY_PROMPT}\n\n"
-        f"RECORDS_ACCESSED:\n{RECORDS_ACCESSED}\n\n"
         f"RESPONSE TO AUDIT:\n{RAW_OUTPUT}"
     )
     if MEDIATION_POLICY:
         user_msg = f"POLICY:\n{MEDIATION_POLICY}\n\n{user_msg}"
 
-    result = llm_call([
-        {"role": "system", "content": MEDIATOR_SYSTEM},
-        {"role": "user", "content": user_msg},
-    ])
+    final_result = ""
+    try:
+        async for message in query(
+            prompt=user_msg,
+            options=ClaudeAgentOptions(
+                system_prompt=MEDIATOR_SYSTEM,
+                permission_mode="bypassPermissions",
+            ),
+        ):
+            if hasattr(message, "result"):
+                final_result = message.result
+    except Exception as e:
+        # Mediator fails closed: if we can't audit, don't pass through raw output
+        print(f"Agent SDK error: {e}", file=sys.stderr)
+        print("Unable to process response due to an internal error.")
+        return
 
-    print(result)
+    print(final_result)
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

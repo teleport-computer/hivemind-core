@@ -1,44 +1,29 @@
-from typing import Any
-
-from pydantic import BaseModel, Field, StrictStr, model_validator
-from datetime import datetime
+from pydantic import BaseModel, Field, model_validator
 
 
 # ── Store ──
 
 
 class StoreRequest(BaseModel):
-    data: str = Field(..., min_length=1)  # content (encrypted at rest)
-    metadata: dict = Field(default_factory=dict)  # app-defined, stored as JSON
-    index_text: str | None = None  # pre-computed FTS text (skip index agent)
-    index_agent_id: str | None = None  # run Docker agent to produce index_text + metadata
+    sql: str = Field(..., min_length=1)
+    params: list = Field(default_factory=list)
 
 
 class StoreResponse(BaseModel):
-    record_id: str
-    created_at: datetime
-    metadata: dict
-
-
-class RecordPatchRequest(BaseModel):
-    metadata: dict[str, Any] | None = None
-    index_text: StrictStr | None = None
+    rows: list[dict] = Field(default_factory=list)
+    rowcount: int = 0
 
 
 # ── Query ──
 
 
 class QueryRequest(BaseModel):
-    query: str = Field(
-        ...,
-        min_length=1,
-    )  # advisory: passed as QUERY_PROMPT env var; custom agents may ignore
+    query: str = Field(..., min_length=1)
     prompt: str | None = None  # deprecated alias for query
-    scope: list[str] | None = None  # record_id whitelist, None = all
-    query_agent_id: str | None = None  # uses default if omitted
-    scope_agent_id: str | None = None  # optional dynamic scoping
-    mediator_agent_id: str | None = None  # optional output filtering
-    max_tokens: int | None = Field(default=None, ge=1)  # per-query budget cap
+    query_agent_id: str | None = None
+    scope_agent_id: str | None = None
+    mediator_agent_id: str | None = None
+    max_tokens: int | None = Field(default=None, ge=1)
 
     @model_validator(mode="before")
     @classmethod
@@ -70,8 +55,23 @@ class QueryRequest(BaseModel):
 
 class QueryResponse(BaseModel):
     output: str
-    records_accessed: list[str]
     mediated: bool
+    usage: dict | None = None
+
+
+# ── Index ──
+
+
+class IndexRequest(BaseModel):
+    data: str = Field(..., min_length=1)
+    metadata: dict = Field(default_factory=dict)
+    index_agent_id: str | None = None
+    max_tokens: int | None = Field(default=None, ge=1)
+
+
+class IndexResponse(BaseModel):
+    index_text: str
+    metadata: dict
     usage: dict | None = None
 
 
@@ -80,5 +80,5 @@ class QueryResponse(BaseModel):
 
 class HealthResponse(BaseModel):
     status: str = "ok"
-    record_count: int
+    table_count: int
     version: str

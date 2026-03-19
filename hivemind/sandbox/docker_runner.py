@@ -479,6 +479,8 @@ class DockerRunner:
             container_env["SESSION_TOKEN"] = session_token
             container_env["OPENAI_BASE_URL"] = f"{container_bridge_url}/v1"
             container_env["OPENAI_API_KEY"] = session_token
+            container_env["ANTHROPIC_BASE_URL"] = container_bridge_url
+            container_env["ANTHROPIC_API_KEY"] = session_token
 
             # Build container kwargs
             run_kwargs: dict = {

@@ -1,10 +1,10 @@
-"""Scope agent that filters records by the caller's team.
+"""Scope agent that writes a team-based scope function.
 
-Only records where metadata.team matches the caller's team are visible
-to the query agent. If no team is specified in caller_context, all
-records are returned (open access).
+Outputs a scope function that filters SQL query results by the caller's
+team. Only rows where a 'team' column matches the caller's team pass
+through. If no team is specified in caller_context, all results are allowed.
 
-This shows how to implement access control using metadata queries.
+This shows how to implement access control using scope functions.
 
 Env vars (set by hivemind):
   BRIDGE_URL       — HTTP endpoint for the bridge server
@@ -17,26 +17,8 @@ Env vars (set by hivemind):
 import json
 import os
 
-import httpx
 
-BRIDGE = os.environ["BRIDGE_URL"]
-TOKEN = os.environ["SESSION_TOKEN"]
 CALLER_CONTEXT = os.environ.get("CALLER_CONTEXT", "{}")
-
-client = httpx.Client(
-    base_url=BRIDGE,
-    headers={"Authorization": f"Bearer {TOKEN}"},
-    timeout=60,
-)
-
-
-def call_tool(name: str, args: dict) -> str:
-    resp = client.post(f"/tools/{name}", json={"arguments": args})
-    resp.raise_for_status()
-    data = resp.json()
-    if data.get("error"):
-        return f"Error: {data['error']}"
-    return data["result"]
 
 
 def main():
@@ -48,32 +30,21 @@ def main():
 
     caller_team = ctx.get("team", "")
 
-    # Paginate through all records
-    allowed_ids = []
-    offset = 0
-    while True:
-        raw = call_tool("list", {"limit": 100, "offset": offset})
-        try:
-            records = json.loads(raw)
-        except json.JSONDecodeError:
-            break
+    if not caller_team:
+        # No team filter — allow everything
+        scope_fn = (
+            "def scope(sql, params, rows):\n"
+            "    return {'allow': True, 'rows': rows}"
+        )
+    else:
+        # Filter results to only rows where 'team' column matches caller's team
+        scope_fn = (
+            f"def scope(sql, params, rows):\n"
+            f"    filtered = [r for r in rows if r.get('team') == {caller_team!r}]\n"
+            f"    return {{'allow': True, 'rows': filtered}}"
+        )
 
-        if not records:
-            break
-
-        for record in records:
-            metadata = record.get("metadata", {})
-            if not caller_team:
-                # No team filter — allow everything
-                allowed_ids.append(record["id"])
-            elif metadata.get("team") == caller_team:
-                allowed_ids.append(record["id"])
-
-        if len(records) < 100:
-            break
-        offset += 100
-
-    print(json.dumps({"record_ids": allowed_ids}))
+    print(json.dumps({"scope_fn": scope_fn}))
 
 
 if __name__ == "__main__":

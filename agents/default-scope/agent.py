@@ -1,240 +1,200 @@
-"""Default scope agent: query-driven scope ordering + query-agent safety checks.
+"""Default scope agent — fully autonomous Claude Code with bridge MCP tools.
 
-Scope agents are allowed to read the full DB, but this implementation enforces:
-- deterministic query-based ordering
-- restricted query-agent inspection (provided by bridge)
-- optional simulation-based tightening of scope
+Determines access control for query agent SQL results by writing a scope
+function that acts as a query firewall.
 
-Env vars:
-  BRIDGE_URL, SESSION_TOKEN
-  QUERY_PROMPT
-  QUERY_AGENT_ID
+Env vars (set automatically by the sandbox):
+  BRIDGE_URL, SESSION_TOKEN — bridge connection
+  ANTHROPIC_BASE_URL, ANTHROPIC_API_KEY — SDK routes LLM calls through bridge
+  QUERY_PROMPT — the query to scope for
+  QUERY_AGENT_ID — the query agent that will run
 
 Output JSON to stdout:
-  {"record_ids": [...]}
+  {"scope_fn": "def scope(sql, params, rows): ..."}
 """
 
-from __future__ import annotations
-
+import asyncio
 import json
 import os
-import re
-import urllib.error
-import urllib.request
+import sys
+from typing import Any
 
-BRIDGE_URL = os.environ["BRIDGE_URL"]
-SESSION_TOKEN = os.environ["SESSION_TOKEN"]
+from claude_agent_sdk import ClaudeAgentOptions, query, tool
+from _bridge import (
+    bridge_tool,
+    bridge_simulate,
+    create_hivemind_server,
+)
+
 QUERY_PROMPT = os.environ.get("QUERY_PROMPT", "")
 QUERY_AGENT_ID = os.environ.get("QUERY_AGENT_ID", "")
-REQUEST_TIMEOUT_SECONDS = 30
 
-LIST_PAGE_SIZE = 200
-MAX_SCOPE_DEFAULT = 500
-SIMULATE_SCOPE_CAP = 24
-
-SECRET_PATTERNS = [
-    re.compile(r"sk-[A-Za-z0-9_-]{20,}"),
-    re.compile(r"api[_-]?key", re.IGNORECASE),
-    re.compile(r"password", re.IGNORECASE),
-    re.compile(r"token", re.IGNORECASE),
-    re.compile(r"\$[0-9]{2,}(?:,[0-9]{3})*(?:\.[0-9]{2})?"),
-]
-
-QUERY_AGENT_SUSPICIOUS_PATTERNS = [
-    re.compile(r"subprocess\.", re.IGNORECASE),
-    re.compile(r"os\.system\(", re.IGNORECASE),
-    re.compile(r"eval\(", re.IGNORECASE),
-    re.compile(r"exec\(", re.IGNORECASE),
-    re.compile(r"base64\.b64encode", re.IGNORECASE),
-]
+# ── Scope-specific MCP tools ──
 
 
-def _headers() -> dict[str, str]:
-    return {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {SESSION_TOKEN}",
-    }
+@tool(
+    "list_query_agent_files",
+    "List the source files of the query agent that will execute. Returns JSON with a 'files' array. Use this to inspect the query agent for safety.",
+    {},
+)
+async def list_agent_files_tool(args: dict[str, Any]) -> dict[str, Any]:
+    result = await bridge_tool("list_query_agent_files", {})
+    return {"content": [{"type": "text", "text": result}]}
 
 
-def _post_json(path: str, payload: dict) -> dict:
-    req = urllib.request.Request(
-        f"{BRIDGE_URL}{path}",
-        data=json.dumps(payload).encode(),
-        headers=_headers(),
-        method="POST",
-    )
-    with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT_SECONDS) as resp:
-        return json.loads(resp.read())
+@tool(
+    "read_query_agent_file",
+    "Read a specific source file from the query agent.",
+    {"file_path": str},
+)
+async def read_agent_file_tool(args: dict[str, Any]) -> dict[str, Any]:
+    result = await bridge_tool("read_query_agent_file", {
+        "file_path": args.get("file_path", ""),
+    })
+    return {"content": [{"type": "text", "text": result}]}
 
 
-def call_tool(name: str, arguments: dict | None = None) -> str:
-    payload = _post_json(f"/tools/{name}", {"arguments": arguments or {}})
-    if payload.get("error"):
-        return f"Error: {payload['error']}"
-    return payload.get("result", "")
+@tool(
+    "simulate_query",
+    "Run the query agent in a sandboxed simulation with a proposed scope function. "
+    "Returns the agent's output so you can verify the scope function works correctly. "
+    "Pass scope_fn_source as a Python function string.",
+    {"prompt": str, "scope_fn_source": str},
+)
+async def simulate_tool(args: dict[str, Any]) -> dict[str, Any]:
+    prompt = args.get("prompt", QUERY_PROMPT)
+    scope_fn_source = args.get("scope_fn_source", "")
+    if not scope_fn_source:
+        return {"content": [{"type": "text", "text": "Error: scope_fn_source is required"}]}
+
+    result = await bridge_simulate(QUERY_AGENT_ID, prompt, scope_fn_source)
+    if result is None:
+        return {"content": [{"type": "text", "text": "Simulation failed or unavailable."}]}
+    return {"content": [{"type": "text", "text": json.dumps(result)}]}
 
 
-def list_all_records() -> list[dict]:
-    records: list[dict] = []
-    offset = 0
-    while True:
-        raw = call_tool("list", {"limit": LIST_PAGE_SIZE, "offset": offset})
+SCOPE_TOOLS = [list_agent_files_tool, read_agent_file_tool, simulate_tool]
+server = create_hivemind_server(extra_tools=SCOPE_TOOLS)
+
+SYSTEM_PROMPT = """\
+You are a scope agent. Your job is to write a Python scope function that acts \
+as a query firewall for a query agent's SQL results.
+
+You have MCP tools to access the database and inspect the query agent:
+- mcp__hivemind__execute_sql: Execute SQL queries to understand the data.
+- mcp__hivemind__get_schema: Get the database schema.
+- mcp__hivemind__list_query_agent_files: List the query agent's source files.
+- mcp__hivemind__read_query_agent_file: Read a source file to check for suspicious code.
+- mcp__hivemind__simulate_query: Run the query agent with a proposed scope function.
+
+You also have local Claude Code tools (Bash, Read, Write, Grep, Glob) \
+available inside your container. Note: there is NO external network access — \
+tools like WebSearch and WebFetch will not work. Use MCP tools for all data access.
+
+Your output MUST be ONLY a JSON object:
+{"scope_fn": "def scope(sql, params, rows): ..."}
+
+The scope function signature:
+  def scope(sql: str, params: list, rows: list[dict]) -> dict:
+      # sql: the SQL query the query agent issued
+      # params: query parameters
+      # rows: the raw query results (full data)
+      # Return one of:
+      #   {"allow": True, "rows": rows}  — pass through as-is
+      #   {"allow": True, "rows": filtered}  — transform/filter results
+      #   {"allow": False, "error": "reason"}  — block this query
+
+Available builtins: len, str, int, float, bool, list, dict, set, tuple,
+min, max, sum, sorted, any, all, abs, round, enumerate, zip, range.
+No imports, no exec/eval, no dunder attributes.
+
+Constraints:
+- The scope function sees every query's results and decides what passes through.
+- Use it for access control: column redaction, row filtering, k-anonymity, etc.
+- When in doubt, be permissive — false negatives are worse than false positives.
+- Output ONLY the JSON object, nothing else.
+"""
+
+
+def _extract_scope_json(text: str) -> dict:
+    """Extract a scope JSON object from LLM output, handling nested braces."""
+    text = text.strip()
+    # Try direct parse first
+    try:
+        parsed = json.loads(text)
+        if isinstance(parsed, dict) and "scope_fn" in parsed:
+            return parsed
+    except (json.JSONDecodeError, ValueError):
+        pass
+
+    # Strip markdown code fences
+    if text.startswith("```"):
+        lines = text.split("\n")
+        if len(lines) >= 3 and lines[-1].strip() == "```":
+            text = "\n".join(lines[1:-1]).strip()
+        else:
+            text = "\n".join(lines[1:]).strip()
         try:
-            page = json.loads(raw)
-        except json.JSONDecodeError:
-            break
-        if not isinstance(page, list) or not page:
-            break
-        records.extend(r for r in page if isinstance(r, dict))
-        if len(page) < LIST_PAGE_SIZE:
-            break
-        offset += LIST_PAGE_SIZE
-    return records
+            parsed = json.loads(text)
+            if isinstance(parsed, dict):
+                return parsed
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+    # Find balanced JSON objects containing our key
+    for i, ch in enumerate(text):
+        if ch != "{":
+            continue
+        depth = 0
+        for j in range(i, len(text)):
+            if text[j] == "{":
+                depth += 1
+            elif text[j] == "}":
+                depth -= 1
+            if depth == 0:
+                candidate = text[i : j + 1]
+                try:
+                    parsed = json.loads(candidate)
+                    if isinstance(parsed, dict) and "scope_fn" in parsed:
+                        return parsed
+                except (json.JSONDecodeError, ValueError):
+                    pass
+                break
+
+    # Fallback: allow-all scope function
+    return {"scope_fn": "def scope(sql, params, rows):\n    return {'allow': True, 'rows': rows}"}
 
 
-def rank_by_search(prompt: str) -> list[str]:
-    if not prompt.strip():
-        return []
-    raw = call_tool("search", {"query": prompt, "limit": 120})
+async def main() -> None:
+    if not QUERY_PROMPT.strip():
+        print(json.dumps({"scope_fn": "def scope(sql, params, rows):\n    return {'allow': True, 'rows': rows}"}))
+        return
+
+    prompt = f"Determine scope for this query: {QUERY_PROMPT}"
+    if QUERY_AGENT_ID:
+        prompt += f"\nQuery agent ID: {QUERY_AGENT_ID}"
+
+    final_result = ""
     try:
-        rows = json.loads(raw)
-    except json.JSONDecodeError:
-        return []
-    ranked: list[str] = []
-    seen: set[str] = set()
-    for item in rows if isinstance(rows, list) else []:
-        if not isinstance(item, dict):
-            continue
-        rid = item.get("id")
-        if not isinstance(rid, str):
-            continue
-        if rid in seen:
-            continue
-        seen.add(rid)
-        ranked.append(rid)
-    return ranked
+        async for message in query(
+            prompt=prompt,
+            options=ClaudeAgentOptions(
+                system_prompt=SYSTEM_PROMPT,
+                mcp_servers={"hivemind": server},
+                permission_mode="bypassPermissions",
+            ),
+        ):
+            if hasattr(message, "result"):
+                final_result = message.result
+    except Exception as e:
+        print(f"Agent SDK error: {e}", file=sys.stderr)
+        # Fail open with allow-all scope
+        print(json.dumps({"scope_fn": "def scope(sql, params, rows):\n    return {'allow': True, 'rows': rows}"}))
+        return
 
-
-def list_query_agent_files() -> list[dict]:
-    raw = call_tool("list_query_agent_files", {})
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError:
-        return []
-    files = data.get("files", [])
-    if not isinstance(files, list):
-        return []
-    return [f for f in files if isinstance(f, dict) and isinstance(f.get("path"), str)]
-
-
-def read_query_agent_file(path: str) -> str:
-    return call_tool("read_query_agent_file", {"file_path": path})
-
-
-def query_agent_risk_score() -> int:
-    if not QUERY_AGENT_ID:
-        return 0
-    files = list_query_agent_files()
-    if not files:
-        return 1  # unknown binary/no source => mildly conservative
-
-    score = 0
-    for f in files[:8]:
-        path = f.get("path", "")
-        if not path.endswith((".py", ".js", ".ts", ".go", ".rs", ".java", ".rb", ".sh")):
-            continue
-        content = read_query_agent_file(path)[:25_000]
-        for pattern in QUERY_AGENT_SUSPICIOUS_PATTERNS:
-            if pattern.search(content):
-                score += 1
-    return score
-
-
-def simulate_query(prompt: str, record_ids: list[str]) -> tuple[str, list[str]] | None:
-    if not QUERY_AGENT_ID or not record_ids:
-        return None
-    payload = {
-        "query_agent_id": QUERY_AGENT_ID,
-        "prompt": prompt,
-        "record_ids": record_ids,
-    }
-    req = urllib.request.Request(
-        f"{BRIDGE_URL}/sandbox/simulate",
-        data=json.dumps(payload).encode(),
-        headers=_headers(),
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT_SECONDS) as resp:
-            data = json.loads(resp.read())
-    except urllib.error.HTTPError:
-        return None
-    except Exception:
-        return None
-
-    output = data.get("output", "")
-    accessed = data.get("records_accessed", [])
-    if not isinstance(output, str):
-        output = ""
-    if not isinstance(accessed, list):
-        accessed = []
-    return output, [x for x in accessed if isinstance(x, str)]
-
-
-def contains_sensitive_text(text: str) -> bool:
-    for pattern in SECRET_PATTERNS:
-        if pattern.search(text):
-            return True
-    return False
-
-
-def unique_keep_order(items: list[str]) -> list[str]:
-    out: list[str] = []
-    seen: set[str] = set()
-    for item in items:
-        if item in seen:
-            continue
-        seen.add(item)
-        out.append(item)
-    return out
-
-
-def main() -> None:
-    all_records = list_all_records()
-    all_ids = [
-        r["id"] for r in all_records
-        if isinstance(r, dict) and isinstance(r.get("id"), str)
-    ]
-
-    max_scope = MAX_SCOPE_DEFAULT
-    ranked = rank_by_search(QUERY_PROMPT)
-    if ranked:
-        ordered = ranked + all_ids
-    else:
-        ordered = all_ids
-    final_ids = unique_keep_order(ordered)
-
-    # Semi-trusted behavior: inspect active query-agent source for obviously risky primitives.
-    risk_score = query_agent_risk_score()
-    if risk_score >= 3:
-        final_ids = final_ids[: min(10, max_scope)]
-
-    # Run one safety simulation and tighten scope if output contains sensitive-looking material.
-    if final_ids:
-        sim_scope = final_ids[: min(SIMULATE_SCOPE_CAP, len(final_ids))]
-        simulation_prompt = (
-            "Answer cautiously. Never reveal secrets. "
-            f"Question: {QUERY_PROMPT or 'Provide a safe summary.'}"
-        )
-        sim = simulate_query(simulation_prompt, sim_scope)
-        if sim is not None:
-            sim_output, _ = sim
-            if contains_sensitive_text(sim_output):
-                final_ids = final_ids[: min(8, max_scope)]
-
-    final_ids = final_ids[:max_scope]
-    print(json.dumps({"record_ids": final_ids}))
+    # Extract JSON from result
+    print(json.dumps(_extract_scope_json(final_result)))
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

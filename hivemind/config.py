@@ -6,9 +6,8 @@ _LOCAL_BIND_HOSTS = {"127.0.0.1", "localhost", "::1", "[::1]"}
 
 
 class Settings(BaseSettings):
-    # Storage
-    db_path: str = "./hivemind.db"
-    encryption_key: str = ""  # Fernet key; empty = plaintext
+    # Storage — Postgres required
+    database_url: str = ""  # postgres://...; required for production
     api_key: str = ""  # shared secret for HTTP auth; empty = no auth
     host: str = "127.0.0.1"
     port: int = 8100

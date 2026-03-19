@@ -1,219 +1,176 @@
 from __future__ import annotations
 
-import sqlite3
-import threading
 import time
+from typing import TYPE_CHECKING
 
 from .models import AgentConfig
+
+if TYPE_CHECKING:
+    from ..db import Database
 
 
 class AgentStore:
     """CRUD for registered agent configurations and extracted source files.
 
-    Stores agent metadata and extracted image files in SQLite.
-    Agents are Docker images. Source files are extracted at registration
-    and stored in a separate table — never exposed via API responses.
+    Backed by Postgres tables _hivemind_agents and _hivemind_agent_files
+    (bootstrapped by Database.__init__).
     """
 
-    def __init__(
-        self,
-        conn: sqlite3.Connection,
-        lock: threading.RLock | None = None,
-    ):
-        self.conn = conn
-        self._lock = lock or threading.RLock()
-        self._init_table()
-
-    def _init_table(self):
-        with self._lock:
-            self.conn.execute("""
-                CREATE TABLE IF NOT EXISTS agents (
-                    agent_id TEXT PRIMARY KEY,
-                    name TEXT NOT NULL,
-                    description TEXT NOT NULL DEFAULT '',
-                    image TEXT NOT NULL,
-                    entrypoint TEXT,
-                    memory_mb INTEGER NOT NULL DEFAULT 256,
-                    max_llm_calls INTEGER NOT NULL DEFAULT 20,
-                    max_tokens INTEGER NOT NULL DEFAULT 100000,
-                    timeout_seconds INTEGER NOT NULL DEFAULT 120,
-                    created_at REAL NOT NULL
-                )
-            """)
-            self.conn.execute("""
-                CREATE TABLE IF NOT EXISTS agent_files (
-                    agent_id TEXT NOT NULL,
-                    file_path TEXT NOT NULL,
-                    content TEXT NOT NULL,
-                    size_bytes INTEGER NOT NULL,
-                    PRIMARY KEY (agent_id, file_path)
-                )
-            """)
-            self.conn.commit()
+    def __init__(self, db: Database):
+        self.db = db
 
     def create(self, config: AgentConfig) -> AgentConfig:
         """Register a new agent."""
-        with self._lock:
-            self.conn.execute(
-                "INSERT INTO agents "
-                "(agent_id, name, description, image, entrypoint, "
-                "memory_mb, max_llm_calls, max_tokens, timeout_seconds, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    config.agent_id,
-                    config.name,
-                    config.description,
-                    config.image,
-                    config.entrypoint,
-                    config.memory_mb,
-                    config.max_llm_calls,
-                    config.max_tokens,
-                    config.timeout_seconds,
-                    time.time(),
-                ),
-            )
-            self.conn.commit()
+        self.db.execute_commit(
+            "INSERT INTO _hivemind_agents "
+            "(agent_id, name, description, image, entrypoint, "
+            "memory_mb, max_llm_calls, max_tokens, timeout_seconds, created_at) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+            [
+                config.agent_id,
+                config.name,
+                config.description,
+                config.image,
+                config.entrypoint,
+                config.memory_mb,
+                config.max_llm_calls,
+                config.max_tokens,
+                config.timeout_seconds,
+                time.time(),
+            ],
+        )
         return config
 
     def upsert(self, config: AgentConfig) -> AgentConfig:
         """Create or update an agent by ID."""
-        with self._lock:
-            self.conn.execute(
-                """
-                INSERT INTO agents
-                (agent_id, name, description, image, entrypoint,
-                 memory_mb, max_llm_calls, max_tokens, timeout_seconds, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(agent_id) DO UPDATE SET
-                    name=excluded.name,
-                    description=excluded.description,
-                    image=excluded.image,
-                    entrypoint=excluded.entrypoint,
-                    memory_mb=excluded.memory_mb,
-                    max_llm_calls=excluded.max_llm_calls,
-                    max_tokens=excluded.max_tokens,
-                    timeout_seconds=excluded.timeout_seconds
-                """,
-                (
-                    config.agent_id,
-                    config.name,
-                    config.description,
-                    config.image,
-                    config.entrypoint,
-                    config.memory_mb,
-                    config.max_llm_calls,
-                    config.max_tokens,
-                    config.timeout_seconds,
-                    time.time(),
-                ),
-            )
-            self.conn.commit()
+        self.db.execute_commit(
+            """
+            INSERT INTO _hivemind_agents
+            (agent_id, name, description, image, entrypoint,
+             memory_mb, max_llm_calls, max_tokens, timeout_seconds, created_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT(agent_id) DO UPDATE SET
+                name=EXCLUDED.name,
+                description=EXCLUDED.description,
+                image=EXCLUDED.image,
+                entrypoint=EXCLUDED.entrypoint,
+                memory_mb=EXCLUDED.memory_mb,
+                max_llm_calls=EXCLUDED.max_llm_calls,
+                max_tokens=EXCLUDED.max_tokens,
+                timeout_seconds=EXCLUDED.timeout_seconds
+            """,
+            [
+                config.agent_id,
+                config.name,
+                config.description,
+                config.image,
+                config.entrypoint,
+                config.memory_mb,
+                config.max_llm_calls,
+                config.max_tokens,
+                config.timeout_seconds,
+                time.time(),
+            ],
+        )
         return config
 
     def get(self, agent_id: str) -> AgentConfig | None:
         """Look up an agent by ID."""
-        with self._lock:
-            row = self.conn.execute(
-                "SELECT agent_id, name, description, image, entrypoint, "
-                "memory_mb, max_llm_calls, max_tokens, timeout_seconds "
-                "FROM agents WHERE agent_id = ?",
-                (agent_id,),
-            ).fetchone()
-        if not row:
+        rows = self.db.execute(
+            "SELECT agent_id, name, description, image, entrypoint, "
+            "memory_mb, max_llm_calls, max_tokens, timeout_seconds "
+            "FROM _hivemind_agents WHERE agent_id = %s",
+            [agent_id],
+        )
+        if not rows:
             return None
+        r = rows[0]
         return AgentConfig(
-            agent_id=row[0],
-            name=row[1],
-            description=row[2],
-            image=row[3],
-            entrypoint=row[4],
-            memory_mb=row[5],
-            max_llm_calls=row[6],
-            max_tokens=row[7],
-            timeout_seconds=row[8],
+            agent_id=r["agent_id"],
+            name=r["name"],
+            description=r["description"],
+            image=r["image"],
+            entrypoint=r["entrypoint"],
+            memory_mb=r["memory_mb"],
+            max_llm_calls=r["max_llm_calls"],
+            max_tokens=r["max_tokens"],
+            timeout_seconds=r["timeout_seconds"],
         )
 
     def list_agents(self) -> list[AgentConfig]:
         """List all registered agents."""
-        with self._lock:
-            rows = self.conn.execute(
-                "SELECT agent_id, name, description, image, entrypoint, "
-                "memory_mb, max_llm_calls, max_tokens, timeout_seconds "
-                "FROM agents ORDER BY created_at DESC"
-            ).fetchall()
+        rows = self.db.execute(
+            "SELECT agent_id, name, description, image, entrypoint, "
+            "memory_mb, max_llm_calls, max_tokens, timeout_seconds "
+            "FROM _hivemind_agents ORDER BY created_at DESC"
+        )
         return [
             AgentConfig(
-                agent_id=r[0],
-                name=r[1],
-                description=r[2],
-                image=r[3],
-                entrypoint=r[4],
-                memory_mb=r[5],
-                max_llm_calls=r[6],
-                max_tokens=r[7],
-                timeout_seconds=r[8],
+                agent_id=r["agent_id"],
+                name=r["name"],
+                description=r["description"],
+                image=r["image"],
+                entrypoint=r["entrypoint"],
+                memory_mb=r["memory_mb"],
+                max_llm_calls=r["max_llm_calls"],
+                max_tokens=r["max_tokens"],
+                timeout_seconds=r["timeout_seconds"],
             )
             for r in rows
         ]
 
     def save_files(self, agent_id: str, files: dict[str, str]) -> int:
-        """Store extracted source files for an agent. Returns file count.
-
-        Called once at registration time after image filesystem extraction.
-        """
-        with self._lock:
-            for path, content in files.items():
-                self.conn.execute(
-                    "INSERT OR REPLACE INTO agent_files "
-                    "(agent_id, file_path, content, size_bytes) VALUES (?, ?, ?, ?)",
-                    (agent_id, path, content, len(content.encode())),
-                )
-            self.conn.commit()
+        """Store extracted source files for an agent. Returns file count."""
+        for path, content in files.items():
+            self.db.execute_commit(
+                "INSERT INTO _hivemind_agent_files "
+                "(agent_id, file_path, content, size_bytes) VALUES (%s, %s, %s, %s) "
+                "ON CONFLICT (agent_id, file_path) DO UPDATE SET "
+                "content=EXCLUDED.content, size_bytes=EXCLUDED.size_bytes",
+                [agent_id, path, content, len(content.encode())],
+            )
         return len(files)
 
     def replace_files(self, agent_id: str, files: dict[str, str]) -> int:
         """Replace all extracted files for an agent."""
-        with self._lock:
-            self.conn.execute(
-                "DELETE FROM agent_files WHERE agent_id = ?",
-                (agent_id,),
+        self.db.execute_commit(
+            "DELETE FROM _hivemind_agent_files WHERE agent_id = %s",
+            [agent_id],
+        )
+        for path, content in files.items():
+            self.db.execute_commit(
+                "INSERT INTO _hivemind_agent_files "
+                "(agent_id, file_path, content, size_bytes) VALUES (%s, %s, %s, %s)",
+                [agent_id, path, content, len(content.encode())],
             )
-            for path, content in files.items():
-                self.conn.execute(
-                    "INSERT OR REPLACE INTO agent_files "
-                    "(agent_id, file_path, content, size_bytes) VALUES (?, ?, ?, ?)",
-                    (agent_id, path, content, len(content.encode())),
-                )
-            self.conn.commit()
         return len(files)
 
     def list_file_paths(self, agent_id: str) -> list[dict]:
         """List extracted files for an agent. Returns [{path, size_bytes}, ...]."""
-        with self._lock:
-            rows = self.conn.execute(
-                "SELECT file_path, size_bytes FROM agent_files "
-                "WHERE agent_id = ? ORDER BY file_path",
-                (agent_id,),
-            ).fetchall()
-        return [{"path": r[0], "size_bytes": r[1]} for r in rows]
+        rows = self.db.execute(
+            "SELECT file_path, size_bytes FROM _hivemind_agent_files "
+            "WHERE agent_id = %s ORDER BY file_path",
+            [agent_id],
+        )
+        return [{"path": r["file_path"], "size_bytes": r["size_bytes"]} for r in rows]
 
     def read_file(self, agent_id: str, file_path: str) -> str | None:
         """Read a single extracted file's content. Returns None if not found."""
-        with self._lock:
-            row = self.conn.execute(
-                "SELECT content FROM agent_files WHERE agent_id = ? AND file_path = ?",
-                (agent_id, file_path),
-            ).fetchone()
-        return row[0] if row else None
+        rows = self.db.execute(
+            "SELECT content FROM _hivemind_agent_files "
+            "WHERE agent_id = %s AND file_path = %s",
+            [agent_id, file_path],
+        )
+        return rows[0]["content"] if rows else None
 
     def delete(self, agent_id: str) -> bool:
         """Delete an agent and its extracted files."""
-        with self._lock:
-            self.conn.execute(
-                "DELETE FROM agent_files WHERE agent_id = ?", (agent_id,)
-            )
-            cursor = self.conn.execute(
-                "DELETE FROM agents WHERE agent_id = ?", (agent_id,)
-            )
-            self.conn.commit()
-            return cursor.rowcount > 0
+        self.db.execute_commit(
+            "DELETE FROM _hivemind_agent_files WHERE agent_id = %s",
+            [agent_id],
+        )
+        rowcount = self.db.execute_commit(
+            "DELETE FROM _hivemind_agents WHERE agent_id = %s",
+            [agent_id],
+        )
+        return rowcount > 0

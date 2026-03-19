@@ -1,19 +1,18 @@
 [project]
 name = "hivemind-core"
-version = "0.2.0"
-description = "Knowledge enclave with recall constraints"
+version = "0.3.0"
+description = "Forkable agent platform with raw Postgres and scope-function query firewall"
 requires-python = ">=3.11"
 dependencies = [
-    "alembic>=1.13",
     "openai>=1.0",
-    "sqlalchemy>=2.0",
     "fastapi>=0.100",
     "uvicorn>=0.20",
     "pydantic>=2.0",
     "pydantic-settings>=2.0",
-    "cryptography>=46.0.5",
     "python-multipart>=0.0.22",
     "docker>=7.0",
+    "psycopg[binary]>=3.1",
+    "sqlglot>=25.0",
 ]
 
 [project.optional-dependencies]

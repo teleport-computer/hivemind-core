@@ -96,16 +96,32 @@ class OpenAIChatRequest(BaseModel):
     tool_choice: str | dict | None = None
 
 
+class AnthropicMessagesRequest(BaseModel):
+    """Anthropic-compatible request for POST /v1/messages on the bridge."""
+
+    model: str
+    max_tokens: int
+    system: str | list[dict] | None = None
+    messages: list[dict]
+    tools: list[dict] | None = None
+    tool_choice: dict | None = None
+    temperature: float | None = None
+    top_p: float | None = None
+    stop_sequences: list[str] | None = None
+    stream: bool = False
+
+
 class SimulateRequest(BaseModel):
     """Request to POST /sandbox/simulate — run a nested query agent."""
 
     query_agent_id: str
     prompt: str
-    record_ids: list[str]
+    scope_fn_source: str  # Python source for def scope(sql, params, rows): ...
+    replay_tape: list[dict] | None = None  # serialized tape entries for replay
 
 
 class SimulateResponse(BaseModel):
     """Response from POST /sandbox/simulate."""
 
     output: str
-    records_accessed: list[str]
+    tape: list[dict] | None = None  # recorded tape from this run

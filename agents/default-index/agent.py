@@ -1,7 +1,10 @@
-"""Default index agent with tool loop + structured JSON output.
+"""Default index agent — fully autonomous Claude Code with SQL tools.
 
-Env vars:
+Processes incoming data and writes structured indexes to the database.
+
+Env vars (set automatically by the sandbox):
   BRIDGE_URL, SESSION_TOKEN — bridge connection
+  ANTHROPIC_BASE_URL, ANTHROPIC_API_KEY — SDK routes LLM calls through bridge
   DOCUMENT_DATA — raw document content to index
   DOCUMENT_METADATA — existing metadata JSON
 
@@ -9,42 +12,30 @@ Output JSON to stdout:
   {"index_text": "...", "metadata": {...}}
 """
 
-from __future__ import annotations
-
-import concurrent.futures
+import asyncio
 import json
 import os
 import re
-import urllib.error
-import urllib.request
+import sys
 
-BRIDGE_URL = os.environ["BRIDGE_URL"]
-SESSION_TOKEN = os.environ["SESSION_TOKEN"]
+from claude_agent_sdk import ClaudeAgentOptions, query
+from _bridge import create_hivemind_server
+
 DOCUMENT_DATA = os.environ.get("DOCUMENT_DATA", "")
 DOCUMENT_METADATA = os.environ.get("DOCUMENT_METADATA", "{}")
-REQUEST_TIMEOUT_SECONDS = 30
-
-MAX_TURNS = 8
-COMPACTION_CHAR_THRESHOLD = 80_000
-COMPACTION_KEEP_RECENT = 4
-TOOL_RESULT_PREVIEW = 4_000
 
 SYSTEM_PROMPT = """\
 You are an indexing agent. Build a high-quality retrieval index for the provided document.
 
-You may use tools to inspect related records:
-- search(query, limit=20)
-- read(record_id, offset=0, limit=20000)
-- list(limit=20, offset=0)
+You have MCP tools to access the database:
+- mcp__hivemind__execute_sql: Query existing data for cross-document consistency.
+- mcp__hivemind__get_schema: Get the database schema.
 
-When calling tools, output one or more blocks in this exact format:
-```tool
-{"name": "search", "arguments": {"query": "payments migration", "limit": 10}}
-```
+You also have local Claude Code tools (Bash, Read, Write, Grep, Glob) \
+available inside your container. Note: there is NO external network access — \
+tools like WebSearch and WebFetch will not work. Use MCP tools for all data access.
 
-You may emit multiple tool blocks in one response; they will run in parallel.
-
-When ready, output ONLY valid JSON with this exact schema:
+Output ONLY valid JSON with this exact schema:
 {
   "title": "<string, <= 100 chars>",
   "summary": "<string, 2-3 sentences>",
@@ -53,215 +44,17 @@ When ready, output ONLY valid JSON with this exact schema:
 }
 
 Rules:
+- Maximum 8 tags, maximum 12 key_claims.
 - Ground claims in the document content.
 - Prefer factual, retrieval-friendly phrasing.
-- Do not include markdown fences in the final answer.
+- Output ONLY the JSON object, nothing else.
 """
 
-
-def _headers() -> dict[str, str]:
-    return {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {SESSION_TOKEN}",
-    }
-
-
-def _post_json(path: str, payload: dict) -> dict:
-    req = urllib.request.Request(
-        f"{BRIDGE_URL}{path}",
-        data=json.dumps(payload).encode(),
-        headers=_headers(),
-        method="POST",
-    )
-    with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT_SECONDS) as resp:
-        return json.loads(resp.read())
-
-
-def llm_call(messages: list[dict], max_tokens: int = 2048) -> str:
-    try:
-        return _post_json(
-            "/llm/chat",
-            {"messages": messages, "max_tokens": max_tokens},
-        ).get("content", "")
-    except urllib.error.HTTPError as e:
-        if e.code == 429:
-            return "(Budget exhausted)"
-        return f"(LLM request failed with HTTP {e.code}.)"
-    except urllib.error.URLError as e:
-        return f"(LLM request failed: {e.reason})"
-    except TimeoutError:
-        return "(LLM request timed out.)"
-    except Exception as e:  # pragma: no cover - defensive
-        return f"(LLM request failed: {e})"
-
-
-def get_tools() -> list[dict]:
-    req = urllib.request.Request(f"{BRIDGE_URL}/tools", headers=_headers())
-    with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT_SECONDS) as resp:
-        return json.loads(resp.read())
-
-
-def call_tool(name: str, arguments: dict) -> str:
-    payload = _post_json(f"/tools/{name}", {"arguments": arguments})
-    if payload.get("error"):
-        return f"Error: {payload['error']}"
-    return payload.get("result", "")
-
-
-def parse_tool_calls(text: str) -> tuple[list[dict], str]:
-    calls: list[dict] = []
-    remaining_lines: list[str] = []
-    in_block = False
-    block_lines: list[str] = []
-
-    for line in text.split("\n"):
-        stripped = line.strip()
-        if stripped == "```tool":
-            in_block = True
-            block_lines = []
-            continue
-        if in_block and stripped == "```":
-            in_block = False
-            raw = "\n".join(block_lines).strip()
-            try:
-                parsed = json.loads(raw)
-                if isinstance(parsed, dict) and "name" in parsed:
-                    calls.append(parsed)
-            except json.JSONDecodeError:
-                remaining_lines.append(f"(failed to parse tool block: {raw[:120]})")
-            continue
-        if in_block:
-            block_lines.append(line)
-        else:
-            remaining_lines.append(line)
-
-    return calls, "\n".join(remaining_lines).strip()
-
-
-def execute_tools_parallel(calls: list[dict]) -> list[dict]:
-    def run_one(call: dict) -> dict:
-        name = str(call.get("name", ""))
-        args = call.get("arguments", {})
-        if not isinstance(args, dict):
-            args = {}
-        try:
-            result = call_tool(name, args)
-        except Exception as e:  # pragma: no cover - defensive
-            result = f"Error: {e}"
-        return {"name": name, "arguments": args, "result": result}
-
-    if not calls:
-        return []
-    workers = max(1, min(6, len(calls)))
-    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
-        return list(pool.map(run_one, calls))
-
-
-def estimate_chars(messages: list[dict]) -> int:
-    return sum(len(str(m.get("content", ""))) for m in messages)
-
-
-def compact_context(messages: list[dict]) -> list[dict]:
-    turn_starts = [i for i, m in enumerate(messages) if m.get("role") == "assistant"]
-    if len(turn_starts) <= COMPACTION_KEEP_RECENT:
-        return messages
-    cutoff = turn_starts[-COMPACTION_KEEP_RECENT]
-    old_section = messages[2:cutoff]
-    recent = messages[cutoff:]
-
-    summary_lines: list[str] = []
-    for msg in old_section:
-        role = msg.get("role", "")
-        content = str(msg.get("content", ""))
-        preview = content[:180] + ("..." if len(content) > 180 else "")
-        if role == "assistant":
-            summary_lines.append(f"- Assistant: {preview}")
-        elif role == "user" and "Tool results:" in content:
-            summary_lines.append(f"- Tool results: {preview}")
-
-    if not summary_lines:
-        return messages
-
-    summary = (
-        "[Earlier steps compacted to preserve context]\n"
-        + "\n".join(summary_lines[:20])
-    )
-    return [
-        messages[0],
-        messages[1],
-        {"role": "assistant", "content": summary},
-        {"role": "user", "content": "(continue indexing from compacted context)"},
-    ] + recent
-
-
-def _strip_fences(text: str) -> str:
-    t = text.strip()
-    if t.startswith("```"):
-        lines = t.split("\n")
-        if len(lines) >= 3 and lines[-1].strip() == "```":
-            return "\n".join(lines[1:-1]).strip()
-        return "\n".join(lines[1:]).strip()
-    return t
-
-
-def _extract_json_obj(text: str) -> dict | None:
-    cleaned = _strip_fences(text)
-    try:
-        parsed = json.loads(cleaned)
-        if isinstance(parsed, dict):
-            return parsed
-    except json.JSONDecodeError:
-        pass
-
-    match = re.search(r"\{.*\}", cleaned, flags=re.DOTALL)
-    if not match:
-        return None
-    try:
-        parsed = json.loads(match.group(0))
-        return parsed if isinstance(parsed, dict) else None
-    except json.JSONDecodeError:
-        return None
-
-
-def _repair_json(candidate: str) -> dict | None:
-    repaired = llm_call(
-        [
-            {
-                "role": "system",
-                "content": (
-                    "Convert the input into strict JSON with keys: "
-                    "title, summary, tags, key_claims. Return JSON only."
-                ),
-            },
-            {"role": "user", "content": candidate[:12_000]},
-        ],
-        max_tokens=900,
-    )
-    return _extract_json_obj(repaired)
-
-
-def _normalize_list(value, max_items: int) -> list[str]:
-    if not isinstance(value, list):
-        return []
-    out: list[str] = []
-    seen: set[str] = set()
-    for item in value:
-        if not isinstance(item, str):
-            continue
-        cleaned = " ".join(item.strip().split())
-        if not cleaned:
-            continue
-        key = cleaned.lower()
-        if key in seen:
-            continue
-        seen.add(key)
-        out.append(cleaned)
-        if len(out) >= max_items:
-            break
-    return out
+server = create_hivemind_server()
 
 
 def _heuristic_index(text: str) -> dict:
+    """Fallback: extract index fields heuristically from raw text."""
     stripped = text.strip()
     first_line = stripped.splitlines()[0] if stripped else "Untitled"
     title = " ".join(first_line.split())[:100] or "Untitled"
@@ -285,12 +78,28 @@ def _heuristic_index(text: str) -> dict:
         if len(claims) >= 6:
             break
 
-    return {
-        "title": title,
-        "summary": summary,
-        "tags": tags,
-        "key_claims": claims,
-    }
+    return {"title": title, "summary": summary, "tags": tags, "key_claims": claims}
+
+
+def _normalize_list(value, max_items: int) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in value:
+        if not isinstance(item, str):
+            continue
+        cleaned = " ".join(item.strip().split())
+        if not cleaned:
+            continue
+        key = cleaned.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(cleaned)
+        if len(out) >= max_items:
+            break
+    return out
 
 
 def _normalize_index(raw: dict, fallback_text: str) -> dict:
@@ -322,7 +131,7 @@ def _normalize_index(raw: dict, fallback_text: str) -> dict:
     }
 
 
-def build_index_text(index: dict) -> str:
+def _build_index_text(index: dict) -> str:
     parts = [index.get("title", ""), index.get("summary", "")]
     tags = index.get("tags", [])
     claims = index.get("key_claims", [])
@@ -333,69 +142,42 @@ def build_index_text(index: dict) -> str:
     return "\n".join(p for p in parts if p).strip()
 
 
-def run_index_loop() -> dict:
-    tools = get_tools()
-    tool_names = {t["function"]["name"] for t in tools}
-
-    prompt = (
-        "Create a structured index for this document.\n\n"
-        f"DOCUMENT:\n{DOCUMENT_DATA[:20_000]}\n\n"
-        "Use tools only if needed (for cross-document consistency). "
-        "Return strict JSON."
-    )
-    messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": prompt},
-    ]
-
-    for _ in range(MAX_TURNS):
-        if estimate_chars(messages) > COMPACTION_CHAR_THRESHOLD:
-            messages = compact_context(messages)
-
-        response = llm_call(messages)
-        tool_calls, remaining = parse_tool_calls(response)
-        valid_calls = [c for c in tool_calls if c.get("name") in tool_names]
-
-        if valid_calls:
-            results = execute_tools_parallel(valid_calls)
-            result_lines: list[str] = []
-            for r in results:
-                result_lines.append(f"[{r['name']}({json.dumps(r['arguments'])})]")
-                result_lines.append(r["result"][:TOOL_RESULT_PREVIEW])
-                result_lines.append("")
-            messages.append({"role": "assistant", "content": response})
-            messages.append({
-                "role": "user",
-                "content": (
-                    "Tool results:\n"
-                    + "\n".join(result_lines)
-                    + "\nNow return final JSON with title, summary, tags, key_claims."
-                ),
-            })
-            continue
-
-        candidate = remaining or response
-        parsed = _extract_json_obj(candidate)
-        if parsed is not None:
+def _extract_json_obj(text: str) -> dict | None:
+    t = text.strip()
+    if t.startswith("```"):
+        lines = t.split("\n")
+        if len(lines) >= 3 and lines[-1].strip() == "```":
+            t = "\n".join(lines[1:-1]).strip()
+        else:
+            t = "\n".join(lines[1:]).strip()
+    try:
+        parsed = json.loads(t)
+        if isinstance(parsed, dict):
             return parsed
+    except json.JSONDecodeError:
+        pass
+    # Find first balanced JSON object
+    for i, ch in enumerate(t):
+        if ch != "{":
+            continue
+        depth = 0
+        for j in range(i, len(t)):
+            if t[j] == "{":
+                depth += 1
+            elif t[j] == "}":
+                depth -= 1
+            if depth == 0:
+                try:
+                    parsed = json.loads(t[i : j + 1])
+                    if isinstance(parsed, dict):
+                        return parsed
+                except json.JSONDecodeError:
+                    pass
+                break
+    return None
 
-        repaired = _repair_json(candidate)
-        if repaired is not None:
-            return repaired
 
-        messages.append({"role": "assistant", "content": response})
-        messages.append({
-            "role": "user",
-            "content": (
-                "Your previous response was not valid JSON. "
-                "Return JSON only with keys: title, summary, tags, key_claims."
-            ),
-        })
-
-    return _heuristic_index(DOCUMENT_DATA)
-
-
-def main() -> None:
+async def main() -> None:
     if not DOCUMENT_DATA.strip():
         print(json.dumps({"index_text": "", "metadata": {}}))
         return
@@ -407,13 +189,38 @@ def main() -> None:
     except json.JSONDecodeError:
         existing_metadata = {}
 
+    prompt = (
+        "Create a structured index for this document.\n\n"
+        f"DOCUMENT:\n{DOCUMENT_DATA[:20_000]}\n\n"
+        "Use tools only if needed (for cross-document consistency). "
+        "Return strict JSON with keys: title, summary, tags, key_claims."
+    )
+
+    raw_index = None
+    final_result = ""
+
     try:
-        raw_index = run_index_loop()
-    except Exception:
+        async for message in query(
+            prompt=prompt,
+            options=ClaudeAgentOptions(
+                system_prompt=SYSTEM_PROMPT,
+                mcp_servers={"hivemind": server},
+                permission_mode="bypassPermissions",
+            ),
+        ):
+            if hasattr(message, "result"):
+                final_result = message.result
+
+        if final_result:
+            raw_index = _extract_json_obj(final_result)
+    except Exception as e:
+        print(f"Agent SDK error, falling back to heuristic: {e}", file=sys.stderr)
+
+    if raw_index is None:
         raw_index = _heuristic_index(DOCUMENT_DATA)
 
     index = _normalize_index(raw_index, DOCUMENT_DATA)
-    index_text = build_index_text(index)
+    index_text = _build_index_text(index)
 
     metadata = dict(existing_metadata)
     metadata.update(index)
@@ -422,4 +229,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

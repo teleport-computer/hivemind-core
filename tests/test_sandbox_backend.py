@@ -122,6 +122,8 @@ async def test_backend_returns_output_and_usage_on_success(monkeypatch):
     assert env["BRIDGE_URL"] == "http://127.0.0.1:9999"
     assert env["OPENAI_BASE_URL"] == "http://127.0.0.1:9999/v1"
     assert env["OPENAI_API_KEY"] == run_kwargs["session_token"]
+    assert env["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:9999"
+    assert env["ANTHROPIC_API_KEY"] == run_kwargs["session_token"]
     assert env["AGENT_ROLE"] == "query"
     assert env["BUDGET_MAX_CALLS"] == "7"
     assert env["BUDGET_MAX_TOKENS"] == "900"

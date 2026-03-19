@@ -1,4 +1,5 @@
-"""Tests for Hivemind core integration with store and pipeline."""
+"""Tests for Hivemind core integration with Database and pipeline."""
+import os
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -6,51 +7,83 @@ import pytest
 import hivemind.core as core_module
 from hivemind.config import Settings
 from hivemind.core import Hivemind
-from hivemind.models import StoreRequest
+from hivemind.db import Database
 from hivemind.version import APP_VERSION
 
 
 @pytest.fixture
-def hivemind(tmp_path):
+def pg_db():
+    """Create a test Postgres Database."""
+    test_dsn = os.environ.get("HIVEMIND_TEST_DATABASE_URL", "")
+    if not test_dsn:
+        pytest.skip("HIVEMIND_TEST_DATABASE_URL not set")
+    db = Database(test_dsn)
+    yield db
+    db.close()
+
+
+@pytest.fixture
+def hivemind_instance():
+    """Create a Hivemind instance with test Postgres."""
+    test_dsn = os.environ.get("HIVEMIND_TEST_DATABASE_URL", "")
+    if not test_dsn:
+        pytest.skip("HIVEMIND_TEST_DATABASE_URL not set")
     settings = Settings(
-        db_path=str(tmp_path / "test.db"),
+        database_url=test_dsn,
         llm_api_key="test",
     )
     hm = Hivemind(settings)
     yield hm
-    hm.store.close()
+    hm.db.close()
+
+
+class TestDatabaseInit:
+    def test_bootstrap_creates_internal_tables(self, pg_db):
+        # Internal tables should exist after Database.__init__
+        rows = pg_db.execute(
+            "SELECT table_name FROM information_schema.tables "
+            "WHERE table_schema = 'public' AND table_name LIKE '_hivemind_%'"
+        )
+        table_names = {r["table_name"] for r in rows}
+        assert "_hivemind_agents" in table_names
+        assert "_hivemind_agent_files" in table_names
+
+    def test_get_schema_excludes_internal(self, pg_db):
+        schema = pg_db.get_schema(exclude_internal=True)
+        for row in schema:
+            assert not row["table_name"].startswith("_hivemind_")
+
+    def test_get_schema_includes_internal_when_requested(self, pg_db):
+        schema = pg_db.get_schema(exclude_internal=False)
+        table_names = {r["table_name"] for r in schema}
+        assert "_hivemind_agents" in table_names
 
 
 class TestHivemindHealth:
-    def test_health_returns_status(self, hivemind):
-        health = hivemind.health()
+    def test_health_returns_status(self, hivemind_instance):
+        health = hivemind_instance.health()
         assert health["status"] == "ok"
         assert health["version"] == APP_VERSION
-        assert health["record_count"] == 0
-
-    def test_health_reflects_record_count(self, hivemind):
-        import time
-        hivemind.store.write_record(
-            id="r1", data="data", metadata={},
-            index_text="test", created_at=time.time(),
-        )
-        health = hivemind.health()
-        assert health["record_count"] == 1
+        assert isinstance(health["table_count"], int)
 
 
 class TestHivemindComponents:
-    def test_store_is_accessible(self, hivemind):
-        assert hivemind.store is not None
+    def test_db_is_accessible(self, hivemind_instance):
+        assert hivemind_instance.db is not None
 
-    def test_agent_store_is_accessible(self, hivemind):
-        assert hivemind.agent_store is not None
+    def test_agent_store_is_accessible(self, hivemind_instance):
+        assert hivemind_instance.agent_store is not None
 
-    def test_pipeline_is_accessible(self, hivemind):
-        assert hivemind.pipeline is not None
+    def test_pipeline_is_accessible(self, hivemind_instance):
+        assert hivemind_instance.pipeline is not None
 
 
 class TestDefaultAgentAutoload:
-    def test_autoload_registers_stable_defaults(self, tmp_path, monkeypatch):
+    def test_autoload_registers_stable_defaults(self, monkeypatch):
+        test_dsn = os.environ.get("HIVEMIND_TEST_DATABASE_URL", "")
+        if not test_dsn:
+            pytest.skip("HIVEMIND_TEST_DATABASE_URL not set")
+
         calls: list[str] = []
 
         class FakeRunner:
@@ -70,7 +103,7 @@ class TestDefaultAgentAutoload:
         monkeypatch.setattr("hivemind.core.DockerRunner", FakeRunner)
 
         settings = Settings(
-            db_path=str(tmp_path / "test.db"),
+            database_url=test_dsn,
             llm_api_key="test",
             autoload_default_agents=True,
             default_index_image="img/default-index:v1",
@@ -96,20 +129,19 @@ class TestDefaultAgentAutoload:
             assert len(hm.agent_store.list_file_paths("default-index")) == 1
             assert len(hm.agent_store.list_file_paths("default-scope")) == 1
             assert len(hm.agent_store.list_file_paths("default-query")) == 1
-            assert set(calls) == {
-                "img/default-index:v1",
-                "img/default-scope:v1",
-                "img/default-query:v1",
-            }
         finally:
-            hm.store.close()
+            hm.db.close()
 
-    def test_autoload_disabled_does_not_register(self, tmp_path, monkeypatch):
+    def test_autoload_disabled_does_not_register(self, monkeypatch):
+        test_dsn = os.environ.get("HIVEMIND_TEST_DATABASE_URL", "")
+        if not test_dsn:
+            pytest.skip("HIVEMIND_TEST_DATABASE_URL not set")
+
         runner = MagicMock()
         monkeypatch.setattr("hivemind.core.DockerRunner", runner)
 
         settings = Settings(
-            db_path=str(tmp_path / "test.db"),
+            database_url=test_dsn,
             llm_api_key="test",
             autoload_default_agents=False,
             default_index_agent="default-index",
@@ -118,105 +150,30 @@ class TestDefaultAgentAutoload:
         hm = Hivemind(settings)
         try:
             assert hm.agent_store.get("default-index") is None
-            runner.assert_called_once()  # cleanup runner only
         finally:
-            hm.store.close()
-
-    def test_autoload_fails_fast_when_default_image_missing(self, tmp_path, monkeypatch):
-        class FakeRunner:
-            def __init__(self, settings):
-                self.settings = settings
-
-            def cleanup_stale_containers(self):
-                return None
-
-            def image_exists(self, image):
-                return False
-
-        monkeypatch.setattr("hivemind.core.DockerRunner", FakeRunner)
-
-        settings = Settings(
-            db_path=str(tmp_path / "test.db"),
-            llm_api_key="test",
-            autoload_default_agents=True,
-            default_query_image="missing:image",
-        )
-        with pytest.raises(RuntimeError, match="image not found"):
-            Hivemind(settings)
-
-
-class TestStoreRequest:
-    @pytest.mark.asyncio
-    async def test_store_with_index_text(self, hivemind):
-        req = StoreRequest(
-            data="The team decided to use Stripe.",
-            metadata={"author": "alice"},
-            index_text="payment stripe migration",
-        )
-        resp = await hivemind.pipeline.run_store(req)
-        assert resp.record_id
-        assert resp.metadata["author"] == "alice"
-
-        record = hivemind.store.read(resp.record_id)
-        assert record["data"] == "The team decided to use Stripe."
-        assert record["index_text"] == "payment stripe migration"
-
-    @pytest.mark.asyncio
-    async def test_store_without_index(self, hivemind):
-        req = StoreRequest(data="Plain data", metadata={"type": "note"})
-        resp = await hivemind.pipeline.run_store(req)
-        assert resp.record_id
-
-        record = hivemind.store.read(resp.record_id)
-        assert record["data"] == "Plain data"
-        assert record["index_text"] is None
+            hm.db.close()
 
 
 @pytest.mark.asyncio
-async def test_hivemind_close_closes_llm_client_and_store(tmp_path):
+async def test_hivemind_close_closes_llm_client_and_db():
+    test_dsn = os.environ.get("HIVEMIND_TEST_DATABASE_URL", "")
+    if not test_dsn:
+        pytest.skip("HIVEMIND_TEST_DATABASE_URL not set")
+
     settings = Settings(
-        db_path=str(tmp_path / "test.db"),
+        database_url=test_dsn,
         llm_api_key="test",
     )
     hm = Hivemind(settings)
 
-    original_store_close = hm.store.close
-    hm.store.close = MagicMock()
+    original_db_close = hm.db.close
+    hm.db.close = MagicMock()
     hm.pipeline.llm_client = AsyncMock()
 
     try:
         await hm.close()
     finally:
-        # Ensure the real connection is released for the test process.
-        original_store_close()
+        original_db_close()
 
     hm.pipeline.llm_client.close.assert_awaited_once()
-    hm.store.close.assert_called_once()
-
-
-def test_hivemind_init_failure_closes_store(tmp_path, monkeypatch):
-    close_calls = {"count": 0}
-    original_close = core_module.RecordStore.close
-
-    def tracking_close(self):
-        close_calls["count"] += 1
-        return original_close(self)
-
-    def raise_bootstrap_error(self):
-        raise RuntimeError("bootstrap exploded")
-
-    monkeypatch.setattr(core_module.RecordStore, "close", tracking_close)
-    monkeypatch.setattr(
-        core_module.Hivemind,
-        "_bootstrap_default_agents",
-        raise_bootstrap_error,
-    )
-
-    settings = Settings(
-        db_path=str(tmp_path / "test.db"),
-        llm_api_key="test",
-    )
-    with pytest.raises(RuntimeError, match="bootstrap exploded"):
-        Hivemind(settings)
-
-    assert close_calls["count"] == 1
+    hm.db.close.assert_called_once()
