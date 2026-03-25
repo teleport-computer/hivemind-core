@@ -24,17 +24,17 @@ set -euo pipefail
 PGDATA="${PGDATA:-/var/lib/postgresql/data}"
 DSTACK_SOCK="${DSTACK_SOCKET:-/var/run/dstack.sock}"
 BACKUP_NAME="${1:-LATEST}"
+KMS_HELPER="/usr/local/bin/kms.py"
 
 # --- Derive decryption key ---
 if [ -z "${WALG_LIBSODIUM_KEY:-}" ]; then
     if [ -S "$DSTACK_SOCK" ]; then
         echo "[restore] Deriving backup key from dstack KMS..."
-        RAW_KEY=$(curl -sf --unix-socket "$DSTACK_SOCK" \
-            -X POST "http://dstack/GetKey" \
-            -H "Content-Type: application/json" \
-            -d '{"path": "/hivemind/backup", "purpose": "encryption"}' \
-            | python3 -c "import sys, json; print(json.load(sys.stdin)['key'])")
-        export WALG_LIBSODIUM_KEY="${RAW_KEY:0:64}"
+        export WALG_LIBSODIUM_KEY=$(python3 "$KMS_HELPER" /hivemind/backup --purpose encryption --first 64)
+        if [ ${#WALG_LIBSODIUM_KEY} -ne 64 ]; then
+            echo "[restore] FATAL: Backup key must be 64 hex chars, got ${#WALG_LIBSODIUM_KEY}"
+            exit 1
+        fi
         echo "[restore] Key derived (${#WALG_LIBSODIUM_KEY} hex chars)"
     else
         echo "[restore] ERROR: No WALG_LIBSODIUM_KEY set and no dstack socket at $DSTACK_SOCK"

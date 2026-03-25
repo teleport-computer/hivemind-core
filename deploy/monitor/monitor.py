@@ -9,7 +9,6 @@ Environment variables:
     RPC_URL             — Base RPC endpoint (default: https://mainnet.base.org)
     IPFS_API            — IPFS HTTP API endpoint for pinning logs
     NOTIFY_WEBHOOK      — Webhook URL for notifications (Telegram, Slack, etc.)
-    DSTACK_SOCKET       — dstack guest agent socket (default: /var/run/dstack.sock)
     POLL_INTERVAL       — Seconds between event polls (default: 5)
 """
 
@@ -32,7 +31,6 @@ CONTRACT = os.environ["CONTRACT_ADDRESS"]
 RPC_URL = os.environ.get("RPC_URL", "https://mainnet.base.org")
 IPFS_API = os.environ.get("IPFS_API", "http://127.0.0.1:5001")
 NOTIFY_WEBHOOK = os.environ.get("NOTIFY_WEBHOOK", "")
-DSTACK_SOCK = os.environ.get("DSTACK_SOCKET", "/var/run/dstack.sock")
 POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL", "5"))
 
 # DeployRequested(bytes32 indexed composeHash, uint256 timestamp)
@@ -82,23 +80,18 @@ def eth_rpc(method: str, params: list) -> dict:
 
 
 def get_notary_key() -> bytes:
-    """Derive the notary signing key from dstack KMS."""
-    import socket
-    import http.client
+    """Derive the notary signing key from dstack KMS via dstack-sdk."""
+    from dstack_sdk import DstackClient
 
-    conn = http.client.HTTPConnection("dstack", 80)
-    # Use unix socket
-    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    sock.connect(DSTACK_SOCK)
-    conn.sock = sock
+    client = DstackClient()
+    result = client.get_key("/notary/signer", purpose="signing")
 
-    body = json.dumps({"path": "/notary/signer", "purpose": "signing"})
-    conn.request("POST", "/GetKey", body=body,
-                 headers={"Content-Type": "application/json"})
-    resp = conn.getresponse()
-    data = json.loads(resp.read())
-    conn.close()
-    return bytes.fromhex(data["key"][:64])
+    key_hex = result.key
+    if not key_hex or not isinstance(key_hex, str):
+        raise RuntimeError(f"KMS returned invalid key (type={type(key_hex).__name__})")
+    if len(key_hex) < 64:
+        raise RuntimeError(f"KMS key too short: {len(key_hex)} hex chars (need >=64)")
+    return bytes.fromhex(key_hex[:64])
 
 
 def pin_to_ipfs(log_entry: dict) -> str:
@@ -191,8 +184,19 @@ def main():
     log.info("Contract: %s", CONTRACT)
     log.info("RPC: %s", RPC_URL)
 
-    # Derive notary key
-    private_key = get_notary_key()
+    # Derive notary key (retry up to 3 times)
+    private_key = None
+    for attempt in range(3):
+        try:
+            private_key = get_notary_key()
+            break
+        except Exception as e:
+            log.error("KMS key derivation failed (attempt %d/3): %s", attempt + 1, e)
+            if attempt < 2:
+                time.sleep(5)
+    if private_key is None:
+        log.error("FATAL: Could not derive notary key after 3 attempts — exiting")
+        sys.exit(1)
     log.info("Notary key derived from KMS")
 
     # Start from latest block

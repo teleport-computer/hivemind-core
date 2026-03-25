@@ -6,7 +6,9 @@ RUN apk add --no-cache \
     jq \
     bash \
     python3 \
+    py3-pip \
     supercronic \
+    && pip install --no-cache-dir --break-system-packages dstack-sdk \
     && rm -rf /var/cache/apk/*
 
 # Install wal-g binary
@@ -27,9 +29,11 @@ ENV AWS_REGION="auto"
 # Cron job for daily base backups (runs as postgres user)
 RUN echo "0 3 * * * /usr/local/bin/backup-push.sh >> /var/log/walg-backup.log 2>&1" > /etc/crontab
 
-COPY backup-push.sh /usr/local/bin/backup-push.sh
-COPY init-archive.sh /docker-entrypoint-initdb.d/init-archive.sh
-COPY entrypoint-wrapper.sh /usr/local/bin/entrypoint-wrapper.sh
+# Build context is deploy/ (set in docker-compose.yaml)
+COPY postgres/backup-push.sh /usr/local/bin/backup-push.sh
+COPY postgres/init-archive.sh /docker-entrypoint-initdb.d/init-archive.sh
+COPY postgres/entrypoint-wrapper.sh /usr/local/bin/entrypoint-wrapper.sh
+COPY kms.py /usr/local/bin/kms.py
 
 RUN chmod +x /usr/local/bin/backup-push.sh \
     /docker-entrypoint-initdb.d/init-archive.sh \

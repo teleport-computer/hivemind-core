@@ -9,6 +9,7 @@ set -euo pipefail
 #   3. Start hivemind-core
 
 DSTACK_SOCK="${DSTACK_SOCKET:-/var/run/dstack.sock}"
+KMS_HELPER="/app/deploy/kms.py"
 
 # --- Derive DB password from KMS ---
 # Both db and hivemind containers derive the same password from KMS,
@@ -16,12 +17,12 @@ DSTACK_SOCK="${DSTACK_SOCKET:-/var/run/dstack.sock}"
 if [ -z "${DB_PASS:-}" ]; then
     if [ -S "$DSTACK_SOCK" ]; then
         echo "[boot] Deriving DB password from dstack KMS..."
-        DB_PASS=$(curl -sf --unix-socket "$DSTACK_SOCK" \
-            -X POST "http://dstack/GetKey" \
-            -H "Content-Type: application/json" \
-            -d '{"path": "/hivemind/db-password", "purpose": "authentication"}' \
-            | python3 -c "import sys, json; print(json.load(sys.stdin)['key'][:32])")
+        DB_PASS=$(python3 "$KMS_HELPER" /hivemind/db-password --purpose authentication --first 32)
         export DB_PASS
+        if [ -z "$DB_PASS" ]; then
+            echo "[boot] FATAL: KMS returned empty DB password"
+            exit 1
+        fi
         echo "[boot] DB password derived from KMS"
     else
         echo "[boot] No dstack socket — using random DB_PASS (local dev)"

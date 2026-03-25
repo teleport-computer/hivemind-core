@@ -18,14 +18,14 @@
 services:
   db:
     build:
-      context: postgres
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: postgres/Dockerfile
     environment:
       POSTGRES_DB: hivemind
       POSTGRES_USER: hivemind
       # POSTGRES_PASSWORD derived from KMS by entrypoint-wrapper.sh
-      # Fallback for local dev:
-      POSTGRES_PASSWORD: ${DB_PASS:-hivemind-local-dev}
+      # For local dev: set DB_PASS in .env or shell
+      POSTGRES_PASSWORD: ${DB_PASS:?DB_PASS must be set (derived from KMS or provided)}
 
       # R2/S3 backup config
       WALG_S3_PREFIX: ${WALG_S3_PREFIX:-}
@@ -50,8 +50,8 @@ services:
         condition: service_healthy
     environment:
       # DB_PASS derived from KMS by boot.sh (same path as db container)
-      # Fallback for local dev:
-      DB_PASS: ${DB_PASS:-hivemind-local-dev}
+      # For local dev: set DB_PASS in .env or shell
+      DB_PASS: ${DB_PASS:?DB_PASS must be set (derived from KMS or provided)}
 
       # Server config
       HIVEMIND_HOST: "0.0.0.0"
