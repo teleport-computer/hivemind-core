@@ -2,15 +2,27 @@ import logging
 from inspect import isawaitable
 
 from .config import Settings
-from .db import Database
+from .db import Database, connect
 from .pipeline import Pipeline
 from .sandbox.agents import AgentStore
-from .sandbox.docker_runner import DockerRunner
 from .sandbox.models import AgentConfig, SandboxSettings
+from .sandbox.run_store import RunStore
 from .sandbox.settings import build_sandbox_settings
 from .version import APP_VERSION
 
 logger = logging.getLogger(__name__)
+
+
+def _create_runner(sandbox_settings: SandboxSettings):
+    """Create the appropriate runner for the configured backend."""
+    if sandbox_settings.backend == "phala":
+        from .sandbox.phala_runner import PhalaRunner
+
+        return PhalaRunner(sandbox_settings)
+    else:
+        from .sandbox.docker_runner import DockerRunner
+
+        return DockerRunner(sandbox_settings)
 
 
 class Hivemind:
@@ -18,19 +30,25 @@ class Hivemind:
 
     def __init__(self, settings: Settings):
         self.settings = settings
-        self.db = Database(settings.database_url)
+        self.db = connect(settings.database_url, proxy_key=settings.sql_proxy_key)
         self.agent_store = AgentStore(self.db)
+        self.run_store = RunStore(self.db)
+        self.s3_uploader = None
         self.pipeline: Pipeline | None = None
         try:
+            if settings.s3_bucket:
+                from .s3 import S3Uploader
+                self.s3_uploader = S3Uploader(settings)
+
             self._bootstrap_default_agents()
             self.pipeline = Pipeline(settings, self.db, self.agent_store)
 
             # Cleanup stale containers from previous crashes
             try:
                 sandbox_settings = self._build_sandbox_settings()
-                DockerRunner(sandbox_settings).cleanup_stale_containers()
+                _create_runner(sandbox_settings).cleanup_stale_containers()
             except Exception as e:
-                logger.debug("Docker cleanup skipped: %s", e)
+                logger.debug("Container cleanup skipped: %s", e)
         except Exception:
             try:
                 self.db.close()
@@ -82,7 +100,7 @@ class Hivemind:
                 continue
 
             if runner is None:
-                runner = DockerRunner(self._build_sandbox_settings())
+                runner = _create_runner(self._build_sandbox_settings())
             if not runner.image_exists(image):
                 raise RuntimeError(
                     f"Default {role} image not found locally: {image}. "

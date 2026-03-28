@@ -82,6 +82,14 @@ docker build -t hivemind-agent-sdk-query agents/examples/agent-sdk-query/
 
 **Role:** query | **Tools:** execute_sql, get_schema (via MCP) | **LLM calls:** variable (up to budget)
 
+### `tiktok-analytics/` — TikTok Watch-History Analytics + S3 Upload
+
+Queries the `data_xordi_tiktok_oauth_watch_history` table, computes per-user and hashtag statistics, asks the LLM to summarise content themes, and uploads a JSON report to R2 via the bridge `POST /sandbox/s3-upload` endpoint.
+
+**Role:** query | **Tools:** execute_sql, get_schema | **LLM calls:** 1 (analysis) | **S3 upload:** yes
+
+Shows the full async submit → poll → R2 result flow. See `tiktok-analytics/USAGE.md` for the end-to-end walkthrough.
+
 ### `redact-mediator/` — PII Redaction Mediator
 
 Uses an LLM to strip emails, phone numbers, API keys, and other sensitive data from query output before it reaches the caller.

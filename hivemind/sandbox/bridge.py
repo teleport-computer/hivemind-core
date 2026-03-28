@@ -16,6 +16,8 @@ from .models import (
     AnthropicMessagesRequest,
     BridgeLLMRequest,
     BridgeLLMResponse,
+    BridgeS3UploadRequest,
+    BridgeS3UploadResponse,
     BridgeToolRequest,
     BridgeToolResponse,
     OpenAIChatRequest,
@@ -121,7 +123,6 @@ def _anthropic_to_internal(req: AnthropicMessagesRequest) -> dict:
     kwargs: dict = {
         "messages": messages,
         "max_tokens": req.max_tokens,
-        "model": req.model,
     }
     if req.temperature is not None:
         kwargs["temperature"] = req.temperature
@@ -241,6 +242,10 @@ class BridgeServer:
         run_query_fn: Callable | None = None,
         scope_query_agent_id: str | None = None,
         replay_tape: list[dict] | None = None,
+        s3_uploader=None,
+        run_id: str | None = None,
+        run_store=None,
+        mode: str = "standalone",  # "standalone" (uvicorn) or "mounted" (dispatcher)
     ):
         self.session_token = session_token
         self.tools = {t.name: t for t in tools}
@@ -252,6 +257,10 @@ class BridgeServer:
         self.agent_store = agent_store
         self.run_query_fn = run_query_fn
         self.scope_query_agent_id = scope_query_agent_id
+        self.s3_uploader = s3_uploader
+        self.run_id = run_id
+        self.run_store = run_store
+        self.mode = mode
         self._server: uvicorn.Server | None = None
         self._task: asyncio.Task | None = None
         self._sock: socket.socket | None = None
@@ -350,8 +359,6 @@ class BridgeServer:
                     "messages": req.messages,
                     "max_tokens": req.max_tokens,
                 }
-                if req.model is not None:
-                    kwargs["model"] = req.model
                 if req.temperature is not None:
                     kwargs["temperature"] = req.temperature
                 if req.top_p is not None:
@@ -377,8 +384,6 @@ class BridgeServer:
                     "messages": req.messages,
                     "max_tokens": max_tokens,
                 }
-                if req.model is not None:
-                    kwargs["model"] = req.model
                 if req.temperature is not None:
                     kwargs["temperature"] = req.temperature
                 if req.top_p is not None:
@@ -440,16 +445,49 @@ class BridgeServer:
 
             Anthropic SDKs route here via ANTHROPIC_BASE_URL env var.
             Translates to internal format, same budget/tape enforcement.
+            Streaming requests are handled by making a non-streaming call
+            and wrapping the result in SSE format.
             """
-            if req.stream:
-                raise HTTPException(
-                    status_code=400,
-                    detail="Streaming is not supported by the bridge",
-                )
             async with bridge._llm_lock:
                 kwargs = _anthropic_to_internal(req)
                 result = await bridge._handle_llm_call(kwargs)
-                return _internal_to_anthropic(result, req.model)
+                anthropic_resp = _internal_to_anthropic(result, req.model)
+
+            if not req.stream:
+                return anthropic_resp
+
+            # Wrap non-streaming result as SSE events for streaming clients
+            from starlette.responses import StreamingResponse
+
+            async def _sse_events():
+                msg_id = anthropic_resp["id"]
+                model = anthropic_resp["model"]
+                usage = anthropic_resp.get("usage", {})
+                input_tokens = usage.get("input_tokens", 0)
+                output_tokens = usage.get("output_tokens", 0)
+
+                # message_start
+                yield f"event: message_start\ndata: {json.dumps({'type': 'message_start', 'message': {'id': msg_id, 'type': 'message', 'role': 'assistant', 'content': [], 'model': model, 'stop_reason': None, 'stop_sequence': None, 'usage': {'input_tokens': input_tokens, 'output_tokens': 0}}})}\n\n"
+
+                # content blocks
+                for idx, block in enumerate(anthropic_resp.get("content", [])):
+                    if block["type"] == "text":
+                        yield f"event: content_block_start\ndata: {json.dumps({'type': 'content_block_start', 'index': idx, 'content_block': {'type': 'text', 'text': ''}})}\n\n"
+                        yield f"event: content_block_delta\ndata: {json.dumps({'type': 'content_block_delta', 'index': idx, 'delta': {'type': 'text_delta', 'text': block['text']}})}\n\n"
+                        yield f"event: content_block_stop\ndata: {json.dumps({'type': 'content_block_stop', 'index': idx})}\n\n"
+                    elif block["type"] == "tool_use":
+                        yield f"event: content_block_start\ndata: {json.dumps({'type': 'content_block_start', 'index': idx, 'content_block': {'type': 'tool_use', 'id': block['id'], 'name': block['name'], 'input': {}}})}\n\n"
+                        yield f"event: content_block_delta\ndata: {json.dumps({'type': 'content_block_delta', 'index': idx, 'delta': {'type': 'input_json_delta', 'partial_json': json.dumps(block['input'])}})}\n\n"
+                        yield f"event: content_block_stop\ndata: {json.dumps({'type': 'content_block_stop', 'index': idx})}\n\n"
+
+                # message_delta + message_stop
+                yield f"event: message_delta\ndata: {json.dumps({'type': 'message_delta', 'delta': {'stop_reason': anthropic_resp.get('stop_reason', 'end_turn'), 'stop_sequence': None}, 'usage': {'output_tokens': output_tokens}})}\n\n"
+                yield f"event: message_stop\ndata: {json.dumps({'type': 'message_stop'})}\n\n"
+
+            return StreamingResponse(
+                _sse_events(),
+                media_type="text/event-stream",
+            )
 
         @app.post("/tools/{tool_name}", dependencies=[Depends(_check_token)])
         async def call_tool(
@@ -529,7 +567,10 @@ class BridgeServer:
                         tape=tape,
                     )
                 except Exception as e:
-                    logger.warning("Simulation failed: %s", e)
+                    import traceback, sys
+                    print(f"SIMULATION_ERROR: {type(e).__name__}: {e}", flush=True)
+                    traceback.print_exc()
+                    sys.stdout.flush()
                     raise HTTPException(500, f"Simulation failed: {e}")
 
             @app.get(
@@ -560,12 +601,68 @@ class BridgeServer:
                     raise HTTPException(404, "File not found")
                 return {"content": content}
 
+        # ── S3 upload endpoint (query agents with run tracking) ──
+
+        if bridge.run_id and bridge.s3_uploader:
+
+            @app.post(
+                "/sandbox/s3-upload",
+                dependencies=[Depends(_check_token)],
+                response_model=BridgeS3UploadResponse,
+            )
+            async def s3_upload(req: BridgeS3UploadRequest) -> BridgeS3UploadResponse:
+                import base64
+
+                try:
+                    data = base64.b64decode(req.content_base64)
+                except Exception:
+                    raise HTTPException(400, "Invalid base64 content")
+
+                key = f"{bridge.run_id}/{req.filename}"
+                try:
+                    s3_url = await asyncio.to_thread(
+                        bridge.s3_uploader.upload_bytes,
+                        key,
+                        data,
+                        req.content_type,
+                    )
+                except Exception as e:
+                    logger.warning("S3 upload failed for run %s: %s", bridge.run_id, e)
+                    raise HTTPException(500, f"S3 upload failed: {e}")
+
+                # Update run record
+                if bridge.run_store:
+                    try:
+                        await asyncio.to_thread(
+                            bridge.run_store.update_status,
+                            bridge.run_id,
+                            "completed",
+                            s3_url=s3_url,
+                        )
+                    except Exception as e:
+                        logger.warning("Failed to update run record: %s", e)
+
+                return BridgeS3UploadResponse(s3_url=s3_url)
+
         return app
 
     async def start(self) -> int:
-        """Start the bridge server. Returns the port it's listening on."""
+        """Start the bridge server. Returns the port it's listening on.
+
+        In "mounted" mode, registers the ASGI app with the global
+        BridgeDispatcher (no uvicorn). The return value is 0 — callers
+        should use the dispatcher's public URL instead.
+        """
         app = self._build_app()
 
+        if self.mode == "mounted":
+            from .bridge_dispatch import get_dispatcher
+
+            get_dispatcher().register(self.session_token, app)
+            logger.info("Bridge session registered (mounted mode, token=...%s)", self.session_token[-6:])
+            return 0
+
+        # Standalone mode — start uvicorn on an ephemeral port
         config = uvicorn.Config(
             app,
             host=self.host,
@@ -599,6 +696,13 @@ class BridgeServer:
 
     async def stop(self):
         """Shut down the bridge server."""
+        if self.mode == "mounted":
+            from .bridge_dispatch import get_dispatcher
+
+            get_dispatcher().unregister(self.session_token)
+            logger.info("Bridge session unregistered (mounted mode)")
+            return
+
         if self._server:
             self._server.should_exit = True
         if self._task:

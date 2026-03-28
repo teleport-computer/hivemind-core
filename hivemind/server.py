@@ -26,6 +26,7 @@ from .models import (
     StoreRequest,
     StoreResponse,
 )
+from .sandbox.bridge_dispatch import get_dispatcher
 from .sandbox.settings import build_sandbox_settings
 from .version import APP_VERSION
 
@@ -137,6 +138,24 @@ def _safe_extract_tar(
             os.chmod(target, file_mode or 0o644)
 
 
+def _read_extracted_files(tmpdir: str) -> dict[str, str]:
+    """Read all extracted source files from a directory as {path: content}."""
+    files: dict[str, str] = {}
+    base = Path(tmpdir)
+    for fpath in sorted(base.rglob("*")):
+        if not fpath.is_file():
+            continue
+        rel = str(fpath.relative_to(base))
+        # Skip hidden files and __pycache__
+        if any(part.startswith(".") or part == "__pycache__" for part in rel.split("/")):
+            continue
+        try:
+            files[rel] = fpath.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+    return files
+
+
 def create_app(settings: Settings | None = None) -> FastAPI:
     if settings is None:
         settings = Settings()
@@ -149,6 +168,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         await hm.close()
 
     app = FastAPI(title="Hivemind Core", version=APP_VERSION, lifespan=lifespan)
+
+    # Mount bridge dispatcher for Phala mode (remote CVMs route bridge
+    # requests through the main server, dispatched by session token).
+    if settings.sandbox_backend == "phala":
+        app.mount("/bridge", get_dispatcher())
 
     cors_origins = [
         origin.strip()
@@ -200,6 +224,43 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
 
+    # ── Async query (submit + poll) ──
+    # For deployments behind reverse proxies with short timeouts (e.g. Phala 60s).
+
+    _pending_queries: dict[str, dict] = {}
+
+    @app.post("/v1/query/submit", dependencies=[Depends(check_auth)])
+    async def submit_query(req: QueryRequest, hm: Hivemind = Depends(get_hivemind)):
+        """Submit a query for async processing. Returns a run_id to poll."""
+        run_id = uuid4().hex[:12]
+        _pending_queries[run_id] = {"status": "running", "result": None, "error": None}
+
+        async def _run():
+            try:
+                result = await hm.pipeline.run_query(req)
+                _pending_queries[run_id] = {
+                    "status": "completed",
+                    "result": result.model_dump(),
+                    "error": None,
+                }
+            except Exception as e:
+                _pending_queries[run_id] = {
+                    "status": "failed",
+                    "result": None,
+                    "error": str(e),
+                }
+
+        asyncio.create_task(_run())
+        return {"run_id": run_id, "status": "running"}
+
+    @app.get("/v1/query/runs/{run_id}", dependencies=[Depends(check_auth)])
+    async def get_query_status(run_id: str):
+        """Poll the status of an async query."""
+        entry = _pending_queries.get(run_id)
+        if not entry:
+            raise HTTPException(404, "Query run not found")
+        return {"run_id": run_id, **entry}
+
     @app.post(
         "/v1/index",
         response_model=IndexResponse,
@@ -230,23 +291,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         req: AgentCreateRequest,
         hm: Hivemind = Depends(get_hivemind),
     ):
-        from .sandbox.docker_runner import DockerRunner
+        from .core import _create_runner
 
         sandbox_settings = build_sandbox_settings(settings)
-        runner = DockerRunner(sandbox_settings)
+        runner = _create_runner(sandbox_settings)
         try:
             if not runner.image_exists(req.image):
                 raise HTTPException(
                     status_code=400,
-                    detail=f"Docker image not found locally: {req.image}",
+                    detail=f"Image not found: {req.image}",
                 )
         except HTTPException:
             raise
         except Exception as e:
-            logger.warning("Docker image preflight failed for %s: %s", req.image, e)
+            logger.warning("Image preflight failed for %s: %s", req.image, e)
             raise HTTPException(
                 status_code=503,
-                detail="Docker daemon unavailable for image validation",
+                detail="Container backend unavailable for image validation",
             )
 
         agent_id = uuid4().hex[:12]
@@ -263,7 +324,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
         await asyncio.to_thread(hm.agent_store.create, config)
 
-        # Extract source files from Docker image (non-fatal)
+        # Extract source files from image (non-fatal, no-op for Phala)
         file_count = 0
         try:
             files = await runner.extract_image_files_async(config.image)
@@ -342,23 +403,32 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 )
 
             agent_id = uuid4().hex[:12]
-            image_tag = f"hivemind-agent-{agent_id}:latest"
+            is_phala = settings.sandbox_backend == "phala"
 
-            from .sandbox.docker_runner import DockerRunner
+            if is_phala:
+                # Phala mode: store source files directly, no Docker build.
+                # PhalaRunner will bundle them into CVM env at runtime.
+                from .sandbox.backend import PHALA_QUERY_BASE_IMAGE
 
-            sandbox_settings = build_sandbox_settings(settings)
-            runner = DockerRunner(sandbox_settings)
+                image_tag = PHALA_QUERY_BASE_IMAGE
+            else:
+                # Docker mode: build image locally
+                from .core import _create_runner
 
-            try:
-                await runner.build_image_async(tmpdir, image_tag)
-            except ValueError as e:
-                raise HTTPException(status_code=400, detail=str(e))
-            except Exception:
-                logger.exception("Docker build failed for uploaded agent")
-                raise HTTPException(
-                    status_code=500,
-                    detail="Docker build failed",
-                )
+                sandbox_settings = build_sandbox_settings(settings)
+                runner = _create_runner(sandbox_settings)
+
+                image_tag = f"hivemind-agent-{agent_id}:latest"
+                try:
+                    await runner.build_image_async(tmpdir, image_tag)
+                except ValueError as e:
+                    raise HTTPException(status_code=400, detail=str(e))
+                except Exception:
+                    logger.exception("Image build failed for uploaded agent")
+                    raise HTTPException(
+                        status_code=500,
+                        detail="Image build failed",
+                    )
 
             try:
                 config = AgentConfig(
@@ -379,16 +449,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 )
             await asyncio.to_thread(hm.agent_store.create, config)
 
+            # Save source files to DB
             file_count = 0
             try:
-                files = await runner.extract_image_files_async(image_tag)
+                if is_phala:
+                    # Read files directly from extracted archive
+                    files = _read_extracted_files(tmpdir)
+                else:
+                    # Extract from built Docker image
+                    files = await runner.extract_image_files_async(image_tag)
                 await asyncio.to_thread(
                     hm.agent_store.save_files, agent_id, files
                 )
                 file_count = len(files)
             except Exception as e:
                 logger.warning(
-                    "Failed to extract files from %s: %s", image_tag, e
+                    "Failed to save agent files for %s: %s", agent_id, e
                 )
 
             return {
@@ -398,6 +474,128 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             }
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
+
+    # ── Query agent submit + run tracking ──
+
+    @app.post("/v1/query-agents/submit", dependencies=[Depends(check_auth)])
+    async def submit_query_agent(
+        name: str = Form(...),
+        archive: UploadFile = File(...),
+        prompt: str = Form(""),
+        description: str = Form(""),
+        entrypoint: str | None = Form(None),
+        memory_mb: Annotated[int, Form(ge=16)] = 256,
+        max_llm_calls: Annotated[int, Form(ge=1)] = 20,
+        max_tokens: Annotated[int, Form(ge=1)] = 100_000,
+        timeout_seconds: Annotated[int, Form(ge=1)] = 120,
+        scope_agent_id: str | None = Form(None),
+        mediator_agent_id: str | None = Form(None),
+        hm: Hivemind = Depends(get_hivemind),
+    ):
+        """Upload query agent source, create a run record, and kick off execution."""
+        try:
+            content = await _read_upload_bytes_limited(
+                archive, max_bytes=MAX_UPLOAD_SIZE,
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
+        tmpdir = tempfile.mkdtemp(prefix="hivemind-upload-")
+        try:
+            try:
+                _safe_extract_tar(content, tmpdir)
+            except (tarfile.TarError, ValueError) as e:
+                raise HTTPException(status_code=400, detail=f"Invalid archive: {e}")
+
+            agent_id = uuid4().hex[:12]
+            is_phala = settings.sandbox_backend == "phala"
+
+            if is_phala:
+                from .sandbox.backend import PHALA_QUERY_BASE_IMAGE
+
+                image_tag = PHALA_QUERY_BASE_IMAGE
+            else:
+                from .core import _create_runner
+
+                sandbox_settings = build_sandbox_settings(settings)
+                runner = _create_runner(sandbox_settings)
+
+                image_tag = f"hivemind-agent-{agent_id}:latest"
+                try:
+                    await runner.build_image_async(tmpdir, image_tag)
+                except ValueError as e:
+                    raise HTTPException(status_code=400, detail=str(e))
+                except Exception:
+                    logger.exception("Image build failed for uploaded query agent")
+                    raise HTTPException(status_code=500, detail="Image build failed")
+
+            try:
+                config = AgentConfig(
+                    agent_id=agent_id,
+                    name=name,
+                    description=description,
+                    image=image_tag,
+                    entrypoint=entrypoint,
+                    memory_mb=min(memory_mb, settings.container_memory_mb),
+                    max_llm_calls=max_llm_calls,
+                    max_tokens=max_tokens,
+                    timeout_seconds=timeout_seconds,
+                )
+            except ValidationError as e:
+                raise HTTPException(status_code=422, detail=e.errors())
+
+            await asyncio.to_thread(hm.agent_store.create, config)
+
+            # Save source files to DB
+            try:
+                if is_phala:
+                    files = _read_extracted_files(tmpdir)
+                else:
+                    files = await runner.extract_image_files_async(image_tag)
+                await asyncio.to_thread(hm.agent_store.save_files, agent_id, files)
+            except Exception as e:
+                logger.warning("Failed to save agent files for %s: %s", agent_id, e)
+
+            # Create run record
+            run_id = uuid4().hex[:12]
+            await asyncio.to_thread(hm.run_store.create, run_id, agent_id)
+
+            # Kick off background execution (full 3-stage pipeline)
+            asyncio.create_task(
+                hm.pipeline.run_query_agent_tracked(
+                    agent_id=agent_id,
+                    run_id=run_id,
+                    run_store=hm.run_store,
+                    s3_uploader=hm.s3_uploader,
+                    prompt=prompt,
+                    scope_agent_id=scope_agent_id,
+                    mediator_agent_id=mediator_agent_id,
+                    max_tokens=max_tokens,
+                )
+            )
+
+            return {
+                "run_id": run_id,
+                "agent_id": agent_id,
+                "status": "pending",
+            }
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    @app.get("/v1/query-agents/runs/{run_id}", dependencies=[Depends(check_auth)])
+    async def get_query_run(
+        run_id: str, hm: Hivemind = Depends(get_hivemind)
+    ):
+        """Get the status and result of a query agent run."""
+        run = await asyncio.to_thread(hm.run_store.get, run_id)
+        if not run:
+            raise HTTPException(404, "Run not found")
+        run["download_url"] = None
+        if run.get("s3_url") and hm.s3_uploader:
+            run["download_url"] = await asyncio.to_thread(
+                hm.s3_uploader.presign_url, run["s3_url"]
+            )
+        return run
 
     # ── Health ──
 
@@ -432,8 +630,14 @@ app = _LazyApp()
 def main():
     import uvicorn
 
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     settings = Settings()
-    uvicorn.run(create_app(settings), host=settings.host, port=settings.port)
+    uvicorn.run(
+        create_app(settings),
+        host=settings.host,
+        port=settings.port,
+        log_level="info",
+    )
 
 
 if __name__ == "__main__":

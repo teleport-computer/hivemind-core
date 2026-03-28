@@ -80,17 +80,30 @@ def eth_rpc(method: str, params: list) -> dict:
 
 
 def get_notary_key() -> bytes:
-    """Derive the notary signing key from dstack KMS via dstack-sdk."""
-    from dstack_sdk import DstackClient
+    """Get the notary signing key.
 
-    client = DstackClient()
-    result = client.get_key("/notary/signer", purpose="signing")
+    KMS integration temporarily disabled. The key must be provided via
+    the NOTARY_PRIVATE_KEY environment variable (64 hex chars).
+    """
+    # --- KMS temporarily disabled ---
+    # from dstack_sdk import DstackClient
+    #
+    # client = DstackClient()
+    # result = client.get_key("/notary/signer", purpose="signing")
+    #
+    # key_hex = result.key
+    # if not key_hex or not isinstance(key_hex, str):
+    #     raise RuntimeError(f"KMS returned invalid key (type={type(key_hex).__name__})")
+    # if len(key_hex) < 64:
+    #     raise RuntimeError(f"KMS key too short: {len(key_hex)} hex chars (need >=64)")
+    # return bytes.fromhex(key_hex[:64])
 
-    key_hex = result.key
-    if not key_hex or not isinstance(key_hex, str):
-        raise RuntimeError(f"KMS returned invalid key (type={type(key_hex).__name__})")
-    if len(key_hex) < 64:
-        raise RuntimeError(f"KMS key too short: {len(key_hex)} hex chars (need >=64)")
+    key_hex = os.environ.get("NOTARY_PRIVATE_KEY", "")
+    if not key_hex or len(key_hex) < 64:
+        raise RuntimeError(
+            "NOTARY_PRIVATE_KEY env var not set or too short (need >=64 hex chars). "
+            "KMS is temporarily disabled."
+        )
     return bytes.fromhex(key_hex[:64])
 
 

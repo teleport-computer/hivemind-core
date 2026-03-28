@@ -183,6 +183,7 @@ class Pipeline:
             self.llm_model,
             self._sandbox_settings,
             agent_config,
+            agent_store=self.agent_store,
         )
 
         return await backend.run(
@@ -335,6 +336,7 @@ class Pipeline:
             self.llm_model,
             self._sandbox_settings,
             agent_config,
+            agent_store=self.agent_store,
         )
 
         run_result = await backend.run(
@@ -385,6 +387,7 @@ class Pipeline:
             self.llm_model,
             self._sandbox_settings,
             agent_config,
+            agent_store=self.agent_store,
         )
 
         async def noop_tool_call(name: str, args: dict) -> str:
@@ -471,3 +474,157 @@ class Pipeline:
             raise ValueError(f"Index agent failed: {e}")
         except ValueError:
             raise
+
+    # -- Tracked query agent run (background) --
+
+    async def run_query_agent_tracked(
+        self,
+        agent_id: str,
+        run_id: str,
+        run_store,
+        s3_uploader=None,
+        prompt: str = "",
+        scope_agent_id: str | None = None,
+        mediator_agent_id: str | None = None,
+        max_tokens: int | None = None,
+    ) -> None:
+        """Run the full 3-stage pipeline with run tracking and S3 upload.
+
+        Stage 0: Scope agent   → produces scope_fn to filter SQL results
+        Stage 1: Query agent   → executes with scoped DB access + S3 upload
+        Stage 2: Mediator agent → audits/redacts query output
+
+        Updates run_store status through the lifecycle:
+          pending → running → completed/failed
+        """
+        try:
+            await asyncio.to_thread(
+                run_store.update_status, run_id, "running"
+            )
+
+            global_max = self._sandbox_settings.global_max_tokens
+            effective_max = min(max_tokens or global_max, global_max)
+            remaining = effective_max
+
+            # -- Stage 0: Scope resolution --
+            scope_fn = None
+            resolved_scope_id = scope_agent_id or self.settings.default_scope_agent
+            if resolved_scope_id:
+                req_for_scope = QueryRequest(
+                    query=prompt or "analyse data",
+                    query_agent_id=agent_id,
+                    scope_agent_id=resolved_scope_id,
+                )
+                try:
+                    scope_fn, scope_usage = await self._run_scope_agent(
+                        req_for_scope, max_tokens=remaining,
+                    )
+                    used = scope_usage.get("total_tokens", 0)
+                    remaining = max(1, remaining - used)
+                except ValueError as e:
+                    logger.warning(
+                        "Scope agent '%s' failed for tracked run %s; "
+                        "continuing without scope: %s",
+                        resolved_scope_id, run_id, e,
+                    )
+
+            # -- Stage 1: Query agent --
+            agent_config = await asyncio.to_thread(
+                self.agent_store.get, agent_id
+            )
+            if agent_config is None:
+                raise ValueError(f"Query agent '{agent_id}' not found")
+
+            resolved_mediator_id = (
+                mediator_agent_id or self.settings.default_mediator_agent
+            )
+            query_max_tokens = remaining
+            if resolved_mediator_id and remaining > MEDIATOR_MIN_TOKENS:
+                reserve = min(
+                    MEDIATOR_TOKEN_RESERVE,
+                    max(0, remaining - MEDIATOR_MIN_TOKENS),
+                )
+                query_max_tokens = max(1, remaining - reserve)
+
+            tools = build_sql_tools(
+                self.db, AccessLevel.SCOPED, scope_fn=scope_fn,
+            )
+            tool_handlers = {t.name: t.handler for t in tools}
+
+            async def on_tool_call(name: str, args: dict) -> str:
+                if name not in tool_handlers:
+                    return (
+                        f"Error: unknown tool '{name}'. "
+                        f"Available: {', '.join(tool_handlers)}"
+                    )
+                return await asyncio.to_thread(tool_handlers[name], **args)
+
+            env: dict[str, str] = {}
+            if prompt:
+                env["QUERY_PROMPT"] = prompt
+
+            backend = SandboxBackend(
+                self.llm_client,
+                self.llm_model,
+                self._sandbox_settings,
+                agent_config,
+            )
+
+            result = await backend.run(
+                role="query",
+                env=env,
+                tools=tools,
+                on_tool_call=on_tool_call,
+                max_tokens=query_max_tokens,
+                s3_uploader=s3_uploader,
+                run_id=run_id,
+                run_store=run_store,
+                return_budget_summary=True,
+            )
+            query_output, query_usage = result
+            used = query_usage.get("total_tokens", 0)
+            remaining = max(1, remaining - used)
+
+            # -- Stage 2: Mediator --
+            if resolved_mediator_id and query_output:
+                if remaining < MEDIATOR_MIN_TOKENS:
+                    logger.info(
+                        "Skipping mediator '%s' for run %s: "
+                        "insufficient budget (%d < %d)",
+                        resolved_mediator_id, run_id,
+                        remaining, MEDIATOR_MIN_TOKENS,
+                    )
+                else:
+                    try:
+                        query_output, _ = await self._run_mediator_agent(
+                            mediator_agent_id=resolved_mediator_id,
+                            raw_output=query_output,
+                            prompt=prompt,
+                            max_tokens=remaining,
+                        )
+                    except ValueError as e:
+                        if "not found" in str(e).lower():
+                            raise
+                        logger.warning(
+                            "Mediator '%s' failed for run %s; "
+                            "returning unmediated output: %s",
+                            resolved_mediator_id, run_id, e,
+                        )
+
+            # If agent didn't upload to S3 (run_store still "running"),
+            # mark completed without S3 URL.
+            current = await asyncio.to_thread(run_store.get, run_id)
+            if current and current["status"] == "running":
+                await asyncio.to_thread(
+                    run_store.update_status, run_id, "completed"
+                )
+
+        except Exception as e:
+            logger.error("Tracked query run %s failed: %s", run_id, e)
+            try:
+                await asyncio.to_thread(
+                    run_store.update_status, run_id, "failed",
+                    error=str(e)[:500],
+                )
+            except Exception:
+                logger.warning("Failed to update run %s to failed", run_id)

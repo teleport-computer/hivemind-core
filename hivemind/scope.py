@@ -95,15 +95,28 @@ def compile_scope_fn(source: str) -> Callable[[str, list, list[dict]], dict]:
             "Scope function must define 'def scope(sql, params, rows): ...'"
         )
 
-    # Validate signature has 3 parameters
+    # Validate / fix signature to exactly 3 parameters (sql, params, rows)
     scope_def = func_defs[0]
     args = scope_def.args
     n_params = len(args.args)
     if n_params != 3:
-        raise ValueError(
-            f"Scope function must accept exactly 3 arguments (sql, params, rows), "
-            f"got {n_params}"
+        # Auto-fix: pad missing params or trim extras so the function is callable
+        desired = ["sql", "params", "rows"]
+        scope_def.args.args = [ast.arg(arg=name) for name in desired]
+        source = ast.unparse(tree)
+        logger.info(
+            "Auto-fixed scope function signature from %d to 3 params", n_params
         )
+        # Re-parse to ensure the fix is valid
+        try:
+            tree = ast.parse(source)
+        except SyntaxError as e:
+            raise ValueError(f"Scope function syntax error after auto-fix: {e}")
+        func_defs = [
+            n for n in ast.iter_child_nodes(tree)
+            if isinstance(n, ast.FunctionDef) and n.name == "scope"
+        ]
+        scope_def = func_defs[0]
 
     # Safety checks
     for node in ast.walk(tree):

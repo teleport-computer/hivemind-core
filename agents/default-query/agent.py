@@ -62,6 +62,7 @@ async def main() -> None:
                 system_prompt=SYSTEM_PROMPT,
                 mcp_servers={"hivemind": server},
                 permission_mode="bypassPermissions",
+                cwd="/tmp",
             ),
         ):
             if hasattr(message, "result"):

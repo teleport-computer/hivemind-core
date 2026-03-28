@@ -1,0 +1,12 @@
+# docker-compose.mediator.yaml — Persistent mediator agent CVM
+#
+# Deploy: phala deploy -n hivemind-mediator -c deploy/phala/docker-compose.mediator.yaml
+
+services:
+  agent:
+    image: ghcr.io/account-link/hivemind-mediator:latest
+    environment:
+      AGENT_COMMAND: "python agent.py"
+      RUNNER_PORT: "8080"
+    ports:
+      - "8080:8080"

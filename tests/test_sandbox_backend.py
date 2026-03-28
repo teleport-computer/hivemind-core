@@ -55,6 +55,15 @@ class _BridgeStub:
         return None
 
 
+def _patch_runner(monkeypatch, runner_cls):
+    """Patch _create_runner to return instances of runner_cls."""
+    monkeypatch.setattr(
+        backend_module,
+        "_create_runner",
+        lambda settings, role="query": runner_cls(settings),
+    )
+
+
 @pytest.mark.asyncio
 async def test_backend_returns_output_and_usage_on_success(monkeypatch):
     runner_instances = []
@@ -87,7 +96,7 @@ async def test_backend_returns_output_and_usage_on_success(monkeypatch):
             bridge_events["stopped"] += 1
             return None
 
-    monkeypatch.setattr(backend_module, "DockerRunner", _Runner)
+    _patch_runner(monkeypatch, _Runner)
     monkeypatch.setattr(backend_module, "BridgeServer", _Bridge)
 
     backend = backend_module.SandboxBackend(
@@ -148,7 +157,7 @@ async def test_backend_empty_output_uses_sentinel(monkeypatch):
                 timed_out=False,
             )
 
-    monkeypatch.setattr(backend_module, "DockerRunner", _Runner)
+    _patch_runner(monkeypatch, _Runner)
     monkeypatch.setattr(backend_module, "BridgeServer", _BridgeStub)
 
     backend = backend_module.SandboxBackend(
@@ -184,7 +193,7 @@ async def test_backend_raises_on_agent_failure(monkeypatch):
                 timed_out=False,
             )
 
-    monkeypatch.setattr(backend_module, "DockerRunner", _Runner)
+    _patch_runner(monkeypatch, _Runner)
     monkeypatch.setattr(backend_module, "BridgeServer", _BridgeStub)
 
     backend = backend_module.SandboxBackend(
@@ -220,7 +229,7 @@ async def test_backend_raises_on_agent_timeout(monkeypatch):
                 timed_out=True,
             )
 
-    monkeypatch.setattr(backend_module, "DockerRunner", _Runner)
+    _patch_runner(monkeypatch, _Runner)
     monkeypatch.setattr(backend_module, "BridgeServer", _BridgeStub)
 
     backend = backend_module.SandboxBackend(

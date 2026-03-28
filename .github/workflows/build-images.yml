@@ -1,0 +1,332 @@
+name: Build & Push Images
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version (e.g. 1.0.0). Images will be tagged with this version."
+        required: true
+      targets:
+        description: "Images to build (comma-separated: core,postgres,sql-proxy,scope,index,mediator,query-base or all)"
+        required: false
+        default: "all"
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  # ---------- compute lowercase namespace (Docker requires lowercase tags) ----------
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      ns: ${{ steps.lower.outputs.ns }}
+      version: ${{ steps.ver.outputs.version }}
+    steps:
+      - id: lower
+        run: echo "ns=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+      - id: ver
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "version=${{ github.event.inputs.version }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=" >> "$GITHUB_OUTPUT"
+          fi
+
+  # ---------- base SDK (shared layer for all agent images) ----------
+  base-sdk:
+    needs: prepare
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GA_GHCR_TOKEN }}
+
+      - uses: docker/metadata-action@v5
+        id: meta
+        with:
+          images: ${{ env.REGISTRY }}/${{ needs.prepare.outputs.ns }}/hivemind-agent-sdk-base
+          tags: |
+            type=raw,value=${{ needs.prepare.outputs.version }},enable=${{ needs.prepare.outputs.version != '' }}
+            type=sha,prefix=
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - uses: docker/build-push-action@v6
+        id: build
+        with:
+          context: agents/base
+          file: agents/base/Dockerfile.agent-sdk
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=base-sdk
+          cache-to: type=gha,mode=max,scope=base-sdk
+
+      - name: Print image info
+        run: |
+          echo "### hivemind-agent-sdk-base" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Digest:** \`${{ steps.build.outputs.digest }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Tags:** ${{ steps.meta.outputs.tags }}" >> "$GITHUB_STEP_SUMMARY"
+
+  # ---------- hivemind-core ----------
+  core:
+    needs: prepare
+    if: >-
+      github.event_name != 'workflow_dispatch' ||
+      contains(github.event.inputs.targets, 'core') ||
+      github.event.inputs.targets == 'all'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GA_GHCR_TOKEN }}
+
+      - uses: docker/metadata-action@v5
+        id: meta
+        with:
+          images: ${{ env.REGISTRY }}/${{ needs.prepare.outputs.ns }}/hivemind-core
+          tags: |
+            type=raw,value=${{ needs.prepare.outputs.version }},enable=${{ needs.prepare.outputs.version != '' }}
+            type=sha,prefix=
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - uses: docker/build-push-action@v6
+        id: build
+        with:
+          context: .
+          file: deploy/Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=core
+          cache-to: type=gha,mode=max,scope=core
+
+      - name: Print image info
+        run: |
+          echo "### hivemind-core" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Digest:** \`${{ steps.build.outputs.digest }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Tags:** ${{ steps.meta.outputs.tags }}" >> "$GITHUB_STEP_SUMMARY"
+
+  # ---------- hivemind-postgres ----------
+  postgres:
+    needs: prepare
+    if: >-
+      github.event_name != 'workflow_dispatch' ||
+      contains(github.event.inputs.targets, 'postgres') ||
+      github.event.inputs.targets == 'all'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GA_GHCR_TOKEN }}
+
+      - uses: docker/metadata-action@v5
+        id: meta
+        with:
+          images: ${{ env.REGISTRY }}/${{ needs.prepare.outputs.ns }}/hivemind-postgres
+          tags: |
+            type=raw,value=${{ needs.prepare.outputs.version }},enable=${{ needs.prepare.outputs.version != '' }}
+            type=sha,prefix=
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - uses: docker/build-push-action@v6
+        id: build
+        with:
+          context: deploy
+          file: deploy/postgres/Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=postgres
+          cache-to: type=gha,mode=max,scope=postgres
+
+      - name: Print image info
+        run: |
+          echo "### hivemind-postgres" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Digest:** \`${{ steps.build.outputs.digest }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Tags:** ${{ steps.meta.outputs.tags }}" >> "$GITHUB_STEP_SUMMARY"
+
+  # ---------- sql-proxy (sidecar for postgres CVM) ----------
+  sql-proxy:
+    needs: prepare
+    if: >-
+      github.event_name != 'workflow_dispatch' ||
+      contains(github.event.inputs.targets, 'sql-proxy') ||
+      github.event.inputs.targets == 'all'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GA_GHCR_TOKEN }}
+
+      - uses: docker/metadata-action@v5
+        id: meta
+        with:
+          images: ${{ env.REGISTRY }}/${{ needs.prepare.outputs.ns }}/hivemind-sql-proxy
+          tags: |
+            type=raw,value=${{ needs.prepare.outputs.version }},enable=${{ needs.prepare.outputs.version != '' }}
+            type=sha,prefix=
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - uses: docker/build-push-action@v6
+        id: build
+        with:
+          context: deploy
+          file: deploy/postgres/Dockerfile.sql-proxy
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=sql-proxy
+          cache-to: type=gha,mode=max,scope=sql-proxy
+
+      - name: Print image info
+        run: |
+          echo "### hivemind-sql-proxy" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Digest:** \`${{ steps.build.outputs.digest }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Tags:** ${{ steps.meta.outputs.tags }}" >> "$GITHUB_STEP_SUMMARY"
+
+  # ---------- persistent agent images (scope / index / mediator) ----------
+  agents:
+    needs: [prepare, base-sdk]
+    if: >-
+      github.event_name != 'workflow_dispatch' ||
+      contains(github.event.inputs.targets, 'scope') ||
+      contains(github.event.inputs.targets, 'index') ||
+      contains(github.event.inputs.targets, 'mediator') ||
+      github.event.inputs.targets == 'all'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      matrix:
+        agent:
+          - { role: scope,    dir: default-scope }
+          - { role: index,    dir: default-index }
+          - { role: mediator, dir: default-mediator }
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GA_GHCR_TOKEN }}
+
+      - uses: docker/metadata-action@v5
+        id: meta
+        with:
+          images: ${{ env.REGISTRY }}/${{ needs.prepare.outputs.ns }}/hivemind-${{ matrix.agent.role }}
+          tags: |
+            type=raw,value=${{ needs.prepare.outputs.version }},enable=${{ needs.prepare.outputs.version != '' }}
+            type=sha,prefix=
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - uses: docker/build-push-action@v6
+        id: build
+        with:
+          context: .
+          file: deploy/phala/Dockerfile.persistent-agent
+          build-args: |
+            AGENT=${{ matrix.agent.dir }}
+            BASE_IMAGE=${{ env.REGISTRY }}/${{ needs.prepare.outputs.ns }}/hivemind-agent-sdk-base:latest
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=agent-${{ matrix.agent.role }}
+          cache-to: type=gha,mode=max,scope=agent-${{ matrix.agent.role }}
+
+      - name: Print image info
+        run: |
+          echo "### hivemind-${{ matrix.agent.role }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Digest:** \`${{ steps.build.outputs.digest }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Tags:** ${{ steps.meta.outputs.tags }}" >> "$GITHUB_STEP_SUMMARY"
+
+  # ---------- query-base (ephemeral query agent base image) ----------
+  query-base:
+    needs: [prepare, base-sdk]
+    if: >-
+      github.event_name != 'workflow_dispatch' ||
+      contains(github.event.inputs.targets, 'query-base') ||
+      github.event.inputs.targets == 'all'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GA_GHCR_TOKEN }}
+
+      - uses: docker/metadata-action@v5
+        id: meta
+        with:
+          images: ${{ env.REGISTRY }}/${{ needs.prepare.outputs.ns }}/hivemind-query-base
+          tags: |
+            type=raw,value=${{ needs.prepare.outputs.version }},enable=${{ needs.prepare.outputs.version != '' }}
+            type=sha,prefix=
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - uses: docker/build-push-action@v6
+        id: build
+        with:
+          context: .
+          file: deploy/phala/Dockerfile.query-base
+          build-args: |
+            BASE_IMAGE=${{ env.REGISTRY }}/${{ needs.prepare.outputs.ns }}/hivemind-agent-sdk-base:latest
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=query-base
+          cache-to: type=gha,mode=max,scope=query-base
+
+      - name: Print image info
+        run: |
+          echo "### hivemind-query-base" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Digest:** \`${{ steps.build.outputs.digest }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Tags:** ${{ steps.meta.outputs.tags }}" >> "$GITHUB_STEP_SUMMARY"

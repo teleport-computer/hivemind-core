@@ -1,0 +1,40 @@
+# Dockerfile.persistent-agent — wraps a default agent for persistent CVM mode
+#
+# Instead of running once and exiting, the agent runs as a long-lived HTTP
+# service that accepts job requests from hivemind-core.
+#
+# Build with --build-arg to select which agent to package:
+#   docker build --build-arg AGENT=default-scope -t ghcr.io/account-link/hivemind-scope:latest \
+#     -f deploy/phala/Dockerfile.persistent-agent .
+
+ARG AGENT=default-scope
+ARG BASE_IMAGE=hivemind-agent-sdk-base:latest
+
+FROM ${BASE_IMAGE}
+
+# Re-declare ARG after FROM (FROM resets ARG scope)
+ARG AGENT=default-scope
+
+# Switch to root for file operations, then back to agent
+USER root
+
+# Copy the agent runner server (zero-dependency HTTP wrapper)
+COPY --chown=agent:agent hivemind/sandbox/agent_runner.py /app/_runner.py
+
+# Copy the agent code
+COPY --chown=agent:agent agents/${AGENT}/_bridge.py /app/_bridge.py
+COPY --chown=agent:agent agents/${AGENT}/agent.py /app/agent.py
+
+# Copy common utilities if present
+COPY --chown=agent:agent agents/default-common/ /app/default-common/
+
+USER agent
+
+# Agent command — the runner will execute this for each job
+ENV AGENT_COMMAND="python agent.py"
+ENV RUNNER_PORT=8080
+
+EXPOSE 8080
+
+# Run the HTTP runner server instead of the agent directly
+CMD ["python", "/app/_runner.py"]

@@ -1,0 +1,49 @@
+# docker-compose.postgres.yaml — Phala CVM deployment for Postgres + SQL proxy
+#
+# Deploy:
+#   phala deploy -n hivemind-pg -c deploy/phala/docker-compose.postgres.yaml -e deploy/phala/.env.postgres --wait
+#
+# After deploy:
+#   - SQL proxy exposed at https://<cvm_id>-8080.app.phala.network
+#   - Set HIVEMIND_DATABASE_URL=http+pg://<cvm_id>-8080.app.phala.network in core CVM
+#   - Authenticate with SQL_PROXY_KEY header
+#   - Data is encrypted at rest by dstack FDE (LUKS2)
+
+services:
+  db:
+    image: ghcr.io/account-link/hivemind-postgres:latest
+    environment:
+      POSTGRES_DB: hivemind
+      POSTGRES_USER: hivemind
+      POSTGRES_PASSWORD: ${DB_PASS:?DB_PASS must be set}
+
+      # R2/S3 backup config (WAL-G) — optional
+      WALG_S3_PREFIX: ${WALG_S3_PREFIX:-}
+      WALG_LIBSODIUM_KEY: ${WALG_LIBSODIUM_KEY:-}
+      AWS_ENDPOINT: ${R2_ENDPOINT:-}
+      AWS_ACCESS_KEY_ID: ${R2_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${R2_SECRET_ACCESS_KEY:-}
+      AWS_S3_FORCE_PATH_STYLE: "true"
+      AWS_REGION: "auto"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hivemind"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  sql-proxy:
+    image: ghcr.io/account-link/hivemind-sql-proxy:latest
+    environment:
+      DATABASE_URL: "postgresql://hivemind:${DB_PASS}@db:5432/hivemind"
+      SQL_PROXY_KEY: ${SQL_PROXY_KEY:?SQL_PROXY_KEY must be set}
+      SQL_PROXY_PORT: "8080"
+    ports:
+      - "8080:8080"
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  pgdata:

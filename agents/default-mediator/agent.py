@@ -72,7 +72,10 @@ async def main() -> None:
             prompt=user_msg,
             options=ClaudeAgentOptions(
                 system_prompt=MEDIATOR_SYSTEM,
+                tools=[],
+                max_turns=1,
                 permission_mode="bypassPermissions",
+                cwd="/tmp",
             ),
         ):
             if hasattr(message, "result"):

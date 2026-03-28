@@ -3,43 +3,35 @@ set -euo pipefail
 
 # restore.sh — Restore a hivemind Postgres database from R2 backup.
 #
-# Usage (inside a CVM with dstack socket):
-#   ./restore.sh
-#
-# Usage (local, with key provided):
+# Usage:
 #   WALG_LIBSODIUM_KEY=<hex> \
 #   WALG_S3_PREFIX=s3://hivemind-backups \
 #   AWS_ENDPOINT=https://xxx.r2.cloudflarestorage.com \
 #   AWS_ACCESS_KEY_ID=... \
 #   AWS_SECRET_ACCESS_KEY=... \
-#   ./restore.sh
+#   ./restore.sh [BACKUP_NAME]
 #
 # What this does:
-#   1. Derives the WAL-G decryption key from dstack KMS (if available)
+#   1. Validates required environment variables
 #   2. Lists available backups
-#   3. Fetches the latest base backup
+#   3. Fetches the specified (or latest) base backup
 #   4. Replays WAL segments to reach consistency
-#   5. Starts Postgres in recovery mode
+#   5. Configures Postgres for recovery mode
 
 PGDATA="${PGDATA:-/var/lib/postgresql/data}"
-DSTACK_SOCK="${DSTACK_SOCKET:-/var/run/dstack.sock}"
 BACKUP_NAME="${1:-LATEST}"
-KMS_HELPER="/usr/local/bin/kms.py"
 
-# --- Derive decryption key ---
-if [ -z "${WALG_LIBSODIUM_KEY:-}" ]; then
-    if [ -S "$DSTACK_SOCK" ]; then
-        echo "[restore] Deriving backup key from dstack KMS..."
-        export WALG_LIBSODIUM_KEY=$(python3 "$KMS_HELPER" /hivemind/backup --purpose encryption --first 64)
-        if [ ${#WALG_LIBSODIUM_KEY} -ne 64 ]; then
-            echo "[restore] FATAL: Backup key must be 64 hex chars, got ${#WALG_LIBSODIUM_KEY}"
-            exit 1
-        fi
-        echo "[restore] Key derived (${#WALG_LIBSODIUM_KEY} hex chars)"
-    else
-        echo "[restore] ERROR: No WALG_LIBSODIUM_KEY set and no dstack socket at $DSTACK_SOCK"
+# --- Validate encryption key ---
+# WALG_LIBSODIUM_KEY is optional — if backups were created without encryption,
+# it can be omitted. If set, it must be exactly 64 hex chars.
+if [ -n "${WALG_LIBSODIUM_KEY:-}" ]; then
+    if [ ${#WALG_LIBSODIUM_KEY} -ne 64 ]; then
+        echo "[restore] FATAL: WALG_LIBSODIUM_KEY must be 64 hex chars, got ${#WALG_LIBSODIUM_KEY}"
         exit 1
     fi
+    echo "[restore] Encryption key provided (${#WALG_LIBSODIUM_KEY} hex chars)"
+else
+    echo "[restore] No WALG_LIBSODIUM_KEY — assuming unencrypted backups"
 fi
 
 # --- Validate R2 config ---

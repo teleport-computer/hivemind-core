@@ -2,7 +2,15 @@
 set -euo pipefail
 
 # backup-push.sh — called by cron daily to push a base backup.
-# Runs as root via supercronic, uses gosu to run as postgres.
+
+# Source WAL-G env vars (exported by entrypoint-wrapper.sh for cron)
+if [ -f /etc/environment.walg ]; then
+    set -a
+    . /etc/environment.walg
+    set +a
+fi
+
+: "${PGDATA:=/var/lib/postgresql/data}"
 
 echo "[backup] Starting daily base backup at $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 

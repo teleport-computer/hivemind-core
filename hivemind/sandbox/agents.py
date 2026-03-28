@@ -163,6 +163,15 @@ class AgentStore:
         )
         return rows[0]["content"] if rows else None
 
+    def get_files(self, agent_id: str) -> dict[str, str]:
+        """Get all extracted files for an agent as {path: content}."""
+        rows = self.db.execute(
+            "SELECT file_path, content FROM _hivemind_agent_files "
+            "WHERE agent_id = %s ORDER BY file_path",
+            [agent_id],
+        )
+        return {r["file_path"]: r["content"] for r in rows}
+
     def delete(self, agent_id: str) -> bool:
         """Delete an agent and its extracted files."""
         self.db.execute_commit(

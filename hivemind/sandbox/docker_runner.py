@@ -501,9 +501,12 @@ class DockerRunner:
             if self.settings.container_read_only_fs:
                 run_kwargs["read_only"] = True
                 run_kwargs["tmpfs"] = {
-                    "/tmp": "rw,noexec,nosuid,size=64m",
+                    "/tmp": "rw,exec,nosuid,size=64m",
                     "/var/tmp": "rw,noexec,nosuid,size=32m",
+                    "/home/agent": "rw,exec,nosuid,size=64m,uid=1000,gid=1000",
                 }
+                # Claude Code CLI requires a writable cwd for session files
+                run_kwargs["working_dir"] = "/tmp"
             if self.settings.container_drop_all_caps:
                 run_kwargs["cap_drop"] = ["ALL"]
             if security_opt:

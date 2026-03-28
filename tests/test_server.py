@@ -5,8 +5,10 @@ from unittest.mock import patch
 
 import httpx
 import pytest
+import pytest_asyncio
 
 from hivemind.config import Settings
+from hivemind.core import Hivemind
 from hivemind.server import create_app
 
 
@@ -41,20 +43,26 @@ def settings_with_auth(test_dsn):
     )
 
 
-@pytest.fixture
+@pytest_asyncio.fixture
 async def client(settings):
     app = create_app(settings)
+    hm = Hivemind(settings)
+    app.state.hivemind = hm
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
         yield c
+    await hm.close()
 
 
-@pytest.fixture
+@pytest_asyncio.fixture
 async def auth_client(settings_with_auth):
     app = create_app(settings_with_auth)
+    hm = Hivemind(settings_with_auth)
+    app.state.hivemind = hm
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
         yield c
+    await hm.close()
 
 
 # ── Health ──

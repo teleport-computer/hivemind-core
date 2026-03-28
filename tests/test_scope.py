@@ -116,9 +116,18 @@ class TestCompileScopeFnRejections:
         with pytest.raises(ValueError, match="must define"):
             compile_scope_fn("def other(sql, params, rows):\n    return True")
 
-    def test_wrong_number_of_args(self):
-        with pytest.raises(ValueError, match="3 arguments"):
-            compile_scope_fn("def scope(record):\n    return True")
+    def test_wrong_number_of_args_auto_fixed(self):
+        """Scope functions with wrong param count are auto-fixed to (sql, params, rows)."""
+        # Common LLM mistake: def scope(sql, rows) — missing params
+        fn = compile_scope_fn(
+            "def scope(sql, rows):\n"
+            "    return {'allow': True, 'rows': rows}"
+        )
+        # After auto-fix, the function accepts 3 args (sql, params, rows)
+        # Note: 'rows' in the body now refers to the 3rd param (correctly)
+        result = fn("SELECT 1", [], [{"id": 1}])
+        assert result["allow"] is True
+        assert result["rows"] == [{"id": 1}]
 
     def test_import_rejected(self):
         with pytest.raises(ValueError, match="imports"):

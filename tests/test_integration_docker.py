@@ -8,15 +8,18 @@ Build it with:
     docker build -t hivemind-test-agent:latest -f tests/fixtures/Dockerfile.test-agent tests/fixtures/
 """
 import json
-import sqlite3
+import os
 import subprocess
 
+import httpx
 import pytest
-from fastapi.testclient import TestClient
+import pytest_asyncio
 
 from hivemind.config import Settings
+from hivemind.db import Database
+from hivemind.sandbox.agents import AgentStore
 from hivemind.sandbox.docker_runner import DockerRunner
-from hivemind.sandbox.models import SandboxSettings
+from hivemind.sandbox.models import AgentConfig, SandboxSettings
 from hivemind.server import create_app
 from hivemind.tools import build_agent_file_tools
 
@@ -182,22 +185,30 @@ class TestExtractImageFiles:
 
 @skip_no_image
 class TestAgentRegistrationAPI:
-    @pytest.fixture
-    def sandbox_client(self, tmp_path):
+    @pytest_asyncio.fixture
+    async def sandbox_client(self):
+        test_dsn = os.environ.get("HIVEMIND_TEST_DATABASE_URL", "")
+        if not test_dsn:
+            pytest.skip("HIVEMIND_TEST_DATABASE_URL not set")
         settings = Settings(
-            db_path=str(tmp_path / "test.db"),
+            database_url=test_dsn,
             api_key="",
-            llm_api_key="test",
-            bridge_host="0.0.0.0",
-            docker_network="hivemind-test-net",
+            autoload_default_agents=False,
         )
-        app = create_app(settings)
-        with TestClient(app) as c:
-            yield c
+        from hivemind.core import Hivemind
 
-    def test_register_extracts_files(self, sandbox_client):
+        app = create_app(settings)
+        hm = Hivemind(settings)
+        app.state.hivemind = hm
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            yield c
+        await hm.close()
+
+    @pytest.mark.asyncio
+    async def test_register_extracts_files(self, sandbox_client):
         """POST /v1/agents extracts files and returns count."""
-        resp = sandbox_client.post(
+        resp = await sandbox_client.post(
             "/v1/agents",
             json={
                 "name": "test-agent",
@@ -210,15 +221,16 @@ class TestAgentRegistrationAPI:
         assert "agent_id" in data
         assert data["files_extracted"] > 0
 
-    def test_get_agent_does_not_leak_source(self, sandbox_client):
+    @pytest.mark.asyncio
+    async def test_get_agent_does_not_leak_source(self, sandbox_client):
         """GET /v1/agents/{id} returns config but no source files."""
-        resp = sandbox_client.post(
+        resp = await sandbox_client.post(
             "/v1/agents",
             json={"name": "test-agent", "image": TEST_IMAGE},
         )
         agent_id = resp.json()["agent_id"]
 
-        resp = sandbox_client.get(f"/v1/agents/{agent_id}")
+        resp = await sandbox_client.get(f"/v1/agents/{agent_id}")
         assert resp.status_code == 200
         data = resp.json()
 
@@ -229,34 +241,36 @@ class TestAgentRegistrationAPI:
         assert "content" not in data
         assert "agent.py" not in json.dumps(data)
 
-    def test_list_agents_does_not_leak_source(self, sandbox_client):
+    @pytest.mark.asyncio
+    async def test_list_agents_does_not_leak_source(self, sandbox_client):
         """GET /v1/agents returns configs but no source files."""
-        sandbox_client.post(
+        await sandbox_client.post(
             "/v1/agents",
             json={"name": "test-agent", "image": TEST_IMAGE},
         )
 
-        resp = sandbox_client.get("/v1/agents")
+        resp = await sandbox_client.get("/v1/agents")
         assert resp.status_code == 200
         data = resp.json()
-        assert len(data) == 1
+        assert len(data) >= 1
 
         serialized = json.dumps(data)
         assert "import" not in serialized
         assert "def helper" not in serialized
 
-    def test_delete_agent_removes_files(self, sandbox_client):
+    @pytest.mark.asyncio
+    async def test_delete_agent_removes_files(self, sandbox_client):
         """DELETE /v1/agents/{id} removes both config and extracted files."""
-        resp = sandbox_client.post(
+        resp = await sandbox_client.post(
             "/v1/agents",
             json={"name": "test-agent", "image": TEST_IMAGE},
         )
         agent_id = resp.json()["agent_id"]
 
-        resp = sandbox_client.delete(f"/v1/agents/{agent_id}")
+        resp = await sandbox_client.delete(f"/v1/agents/{agent_id}")
         assert resp.status_code == 200
 
-        resp = sandbox_client.get(f"/v1/agents/{agent_id}")
+        resp = await sandbox_client.get(f"/v1/agents/{agent_id}")
         assert resp.status_code == 404
 
 
@@ -268,13 +282,13 @@ class TestScopingToolsWithRealFiles:
     @pytest.fixture
     def store_with_real_agent(self):
         """Register an agent and extract real files from the Docker image."""
-        conn = sqlite3.connect(":memory:")
-        conn.row_factory = sqlite3.Row
-        from hivemind.sandbox.agents import AgentStore
-        from hivemind.sandbox.models import AgentConfig
+        test_dsn = os.environ.get("HIVEMIND_TEST_DATABASE_URL", "")
+        if not test_dsn:
+            pytest.skip("HIVEMIND_TEST_DATABASE_URL not set")
 
-        store = AgentStore(conn)
-        store.create(AgentConfig(
+        db = Database(test_dsn)
+        store = AgentStore(db)
+        store.upsert(AgentConfig(
             agent_id="real-qa",
             name="Real Query Agent",
             image=TEST_IMAGE,
@@ -282,9 +296,10 @@ class TestScopingToolsWithRealFiles:
 
         runner = DockerRunner(_make_settings())
         files = runner.extract_image_files(TEST_IMAGE)
-        store.save_files("real-qa", files)
+        store.replace_files("real-qa", files)
 
-        return store
+        yield store
+        db.close()
 
     def test_list_shows_real_files(self, store_with_real_agent):
         tools = build_agent_file_tools(store_with_real_agent, "real-qa")

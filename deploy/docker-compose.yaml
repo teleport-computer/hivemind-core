@@ -1,19 +1,19 @@
-# docker-compose.yaml — dstack CVM deployment for hivemind-core
+# docker-compose.yaml — CVM deployment for hivemind-core
 #
 # Deploy: phala deploy -n hivemind -c docker-compose.yaml --disk 50G
 #
 # Inside the CVM:
-#   - Postgres stores plaintext on LUKS2-encrypted disk (dstack handles FDE)
-#   - WAL-G archives WAL segments to Cloudflare R2 (encrypted with KMS-derived key)
+#   - Postgres stores data on LUKS2-encrypted disk (dstack handles FDE)
+#   - WAL-G archives WAL segments to Cloudflare R2
 #   - hivemind talks to Postgres over localhost
 #
-# Key derivation (all from dstack KMS, deterministic per app_id):
-#   disk_crypt_key: KDF(root, [app_id, instance_id, "app-disk-crypt-key"]) — dstack auto
-#   db_password:    getKey("/hivemind/db-password") — derived by both containers
-#   backup_key:     getKey("/hivemind/backup") — WAL-G libsodium encryption
-#
-# Local dev (no dstack socket):
-#   Set DB_PASS, POSTGRES_PASSWORD in .env or let boot scripts use random values.
+# Required environment variables:
+#   DB_PASS              — shared Postgres password (set in .env or shell)
+#   WALG_S3_PREFIX       — R2/S3 bucket prefix for WAL-G (optional, enables backups)
+#   WALG_LIBSODIUM_KEY   — 64 hex char encryption key for WAL-G (optional, enables encrypted backups)
+#   R2_ENDPOINT          — Cloudflare R2 endpoint URL
+#   R2_ACCESS_KEY_ID     — R2 access key
+#   R2_SECRET_ACCESS_KEY — R2 secret key
 
 services:
   db:
@@ -23,18 +23,18 @@ services:
     environment:
       POSTGRES_DB: hivemind
       POSTGRES_USER: hivemind
-      # POSTGRES_PASSWORD derived from KMS by entrypoint-wrapper.sh
-      # For local dev: set DB_PASS in .env or shell
-      POSTGRES_PASSWORD: ${DB_PASS:?DB_PASS must be set (derived from KMS or provided)}
+      POSTGRES_PASSWORD: ${DB_PASS:?DB_PASS must be set}
 
-      # R2/S3 backup config
+      # R2/S3 backup config (WAL-G)
       WALG_S3_PREFIX: ${WALG_S3_PREFIX:-}
+      WALG_LIBSODIUM_KEY: ${WALG_LIBSODIUM_KEY:-}
       AWS_ENDPOINT: ${R2_ENDPOINT:-}
       AWS_ACCESS_KEY_ID: ${R2_ACCESS_KEY_ID:-}
       AWS_SECRET_ACCESS_KEY: ${R2_SECRET_ACCESS_KEY:-}
+      AWS_S3_FORCE_PATH_STYLE: "true"
+      AWS_REGION: "auto"
     volumes:
       - pgdata:/var/lib/postgresql/data
-      - /var/run/dstack.sock:/var/run/dstack.sock
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U hivemind"]
       interval: 5s
@@ -49,9 +49,7 @@ services:
       db:
         condition: service_healthy
     environment:
-      # DB_PASS derived from KMS by boot.sh (same path as db container)
-      # For local dev: set DB_PASS in .env or shell
-      DB_PASS: ${DB_PASS:?DB_PASS must be set (derived from KMS or provided)}
+      DB_PASS: ${DB_PASS:?DB_PASS must be set}
 
       # Server config
       HIVEMIND_HOST: "0.0.0.0"
@@ -63,13 +61,19 @@ services:
       HIVEMIND_LLM_BASE_URL: ${HIVEMIND_LLM_BASE_URL:-https://openrouter.ai/api/v1}
       HIVEMIND_LLM_MODEL: ${HIVEMIND_LLM_MODEL:-anthropic/claude-sonnet-4.5}
 
+      # R2 for query agent result uploads (reuses same R2 credentials)
+      HIVEMIND_S3_BUCKET: ${R2_BUCKET:-}
+      HIVEMIND_S3_ENDPOINT_URL: ${R2_ENDPOINT:-}
+      HIVEMIND_S3_ACCESS_KEY_ID: ${R2_ACCESS_KEY_ID:-}
+      HIVEMIND_S3_SECRET_ACCESS_KEY: ${R2_SECRET_ACCESS_KEY:-}
+      HIVEMIND_S3_REGION: "auto"
+      HIVEMIND_S3_PREFIX: "query-agent-runs"
+
       # Sandbox
       HIVEMIND_AUTOLOAD_DEFAULT_AGENTS: "false"
       HIVEMIND_ENFORCE_BRIDGE_ONLY_EGRESS: "true"
     ports:
       - "8100:8100"
-    volumes:
-      - /var/run/dstack.sock:/var/run/dstack.sock
 
 volumes:
   pgdata:

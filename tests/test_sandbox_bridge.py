@@ -144,6 +144,8 @@ async def test_llm_chat(bridge):
 
 @pytest.mark.asyncio
 async def test_llm_chat_model_override(bridge):
+    """Model is NOT forwarded from /llm/chat — the bridge uses its configured model.
+    Temperature IS forwarded."""
     server, client, budget = bridge
     headers = {"Authorization": "Bearer test-token-123"}
     resp = await client.post(
@@ -157,7 +159,6 @@ async def test_llm_chat_model_override(bridge):
     )
     assert resp.status_code == 200
     data = resp.json()
-    assert "claude-haiku" in data["content"]
     assert "0.7" in data["content"]
 
 

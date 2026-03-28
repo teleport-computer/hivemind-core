@@ -33,7 +33,8 @@ class TestAnthropicToInternal:
         kwargs = _anthropic_to_internal(req)
         assert kwargs["messages"] == [{"role": "user", "content": "Hello"}]
         assert kwargs["max_tokens"] == 1024
-        assert kwargs["model"] == "claude-sonnet-4-20250514"
+        # model is passed separately by the bridge caller, not included in kwargs
+        assert "model" not in kwargs
 
     def test_system_string(self):
         req = _make_req(system="You are helpful.")
@@ -411,8 +412,9 @@ async def test_stream_rejected(bridge_app):
             },
             headers={"x-api-key": token},
         )
-        assert resp.status_code == 400
-        assert "Streaming" in resp.json()["detail"]
+        # Streaming is now supported — wraps non-streaming response as SSE
+        assert resp.status_code == 200
+        assert resp.headers["content-type"].startswith("text/event-stream")
 
 
 @pytest.mark.asyncio

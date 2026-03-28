@@ -1,0 +1,26 @@
+# Dockerfile.query-base — Base image for ephemeral query agent CVMs
+#
+# Contains all SDK dependencies + boot script. Agent source code is injected
+# at runtime via AGENT_SOURCE_B64 env var (base64-encoded tar.gz).
+#
+# Build:
+#   docker build -t ghcr.io/account-link/hivemind-query-base:latest \
+#     -f deploy/phala/Dockerfile.query-base .
+
+ARG BASE_IMAGE=hivemind-agent-sdk-base:latest
+
+FROM ${BASE_IMAGE}
+
+# Switch to root for file operations, then back to agent
+USER root
+
+# Copy the boot script
+COPY --chmod=755 deploy/phala/query-boot.sh /app/boot.sh
+
+# Copy the default _bridge.py (agents may override via their source archive)
+COPY --chown=agent:agent agents/default-query/_bridge.py /app/_bridge.py
+
+USER agent
+WORKDIR /app
+
+ENTRYPOINT ["/app/boot.sh"]

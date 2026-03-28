@@ -16,8 +16,11 @@ class AgentConfig(BaseModel):
 
 
 class SandboxSettings(BaseModel):
-    """Sandbox configuration for Docker-based agent execution."""
+    """Sandbox configuration for agent execution (Docker or Phala)."""
 
+    backend: str = "docker"  # "docker" or "phala"
+
+    # Docker settings (backend=docker)
     bridge_host: str = "0.0.0.0"  # containers need to reach bridge
     docker_host: str = ""  # optional explicit Docker daemon socket/URL
     docker_network_name: str = "hivemind-sandbox"
@@ -30,9 +33,20 @@ class SandboxSettings(BaseModel):
     container_read_only_fs: bool = True
     container_drop_all_caps: bool = True
     container_no_new_privileges: bool = True
+
+    # Phala Cloud settings (backend=phala)
+    phala_api_key: str = ""
+    phala_public_url: str = ""  # public URL of hivemind-core for bridge access
+
+    # Persistent agent CVM URLs (role → URL mapping)
+    phala_scope_url: str = ""
+    phala_index_url: str = ""
+    phala_mediator_url: str = ""
+
+    # Shared limits
     global_max_llm_calls: int = Field(default=50, ge=1)
     global_max_tokens: int = Field(default=200_000, ge=1)
-    global_timeout_seconds: int = Field(default=300, ge=1)
+    global_timeout_seconds: int = Field(default=600, ge=1)
 
 
 # ── Bridge request/response models ──
@@ -125,3 +139,21 @@ class SimulateResponse(BaseModel):
 
     output: str
     tape: list[dict] | None = None  # recorded tape from this run
+
+
+# ── S3 upload models (query agents with run tracking) ──
+
+
+class BridgeS3UploadRequest(BaseModel):
+    """Request from agent container to bridge POST /sandbox/s3-upload."""
+
+    filename: str
+    content_base64: str  # Base64-encoded file content
+    content_type: str = "application/octet-stream"
+
+
+class BridgeS3UploadResponse(BaseModel):
+    """Response from bridge POST /sandbox/s3-upload."""
+
+    s3_url: str
+    error: str | None = None

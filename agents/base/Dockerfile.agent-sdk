@@ -13,4 +13,10 @@ RUN npm install -g @anthropic-ai/claude-code
 # Install Python Agent SDK + aiohttp for bridge tool calls
 RUN pip install --no-cache-dir claude-agent-sdk aiohttp
 
+RUN useradd -m -s /bin/bash agent
+
 WORKDIR /app
+RUN chown agent:agent /app
+ENV PYTHONPATH=/app
+
+USER agent

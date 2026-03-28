@@ -7,7 +7,9 @@ _LOCAL_BIND_HOSTS = {"127.0.0.1", "localhost", "::1", "[::1]"}
 
 class Settings(BaseSettings):
     # Storage — Postgres required
-    database_url: str = ""  # postgres://...; required for production
+    # Direct: postgres://...  |  Via HTTP proxy: https://<cvm>-8080.app.phala.network
+    database_url: str = ""
+    sql_proxy_key: str = ""  # shared secret for SQL proxy (Phala split deploy)
     api_key: str = ""  # shared secret for HTTP auth; empty = no auth
     host: str = "127.0.0.1"
     port: int = 8100
@@ -19,7 +21,10 @@ class Settings(BaseSettings):
     llm_model: str = "anthropic/claude-sonnet-4.5"
     llm_timeout_seconds: int = 45
 
-    # Docker sandbox
+    # Sandbox backend: "docker" (local dev) or "phala" (production TEE)
+    sandbox_backend: str = "docker"
+
+    # Docker sandbox (used when sandbox_backend=docker)
     bridge_host: str = "0.0.0.0"
     docker_host: str = ""
     docker_network: str = "hivemind-sandbox"
@@ -34,7 +39,26 @@ class Settings(BaseSettings):
     container_no_new_privileges: bool = True
     max_llm_calls: int = 50
     max_tokens: int = 200_000
-    agent_timeout: int = 300
+    agent_timeout: int = 600  # Phala CVMs need 2-3min boot + agent execution time
+
+    # Phala Cloud (used when sandbox_backend=phala)
+    phala_api_key: str = ""  # Phala Cloud API key (phak_...)
+    phala_public_url: str = ""  # Public URL of this hivemind-core instance
+
+    # Persistent agent CVM URLs (Phala mode only)
+    # Scope, index, and mediator agents run as long-lived HTTP services.
+    # Set to the CVM's public URL, e.g. https://<cvm_id>-8080.app.phala.network
+    phala_scope_url: str = ""
+    phala_index_url: str = ""
+    phala_mediator_url: str = ""
+
+    # S3 configuration for query agent result uploads
+    s3_bucket: str = ""
+    s3_region: str = ""
+    s3_access_key_id: str = ""
+    s3_secret_access_key: str = ""
+    s3_endpoint_url: str = ""  # For S3-compatible services (MinIO, R2, etc.)
+    s3_prefix: str = "query-agent-runs"  # Key prefix for uploaded results
 
     # Default agents (Docker images) — empty = not available
     autoload_default_agents: bool = True

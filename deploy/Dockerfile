@@ -8,11 +8,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 COPY pyproject.toml ./
-RUN pip install --no-cache-dir . dstack-sdk
+RUN pip install --no-cache-dir .
 
 COPY hivemind/ ./hivemind/
 COPY deploy/boot.sh /app/deploy/boot.sh
-COPY deploy/kms.py /app/deploy/kms.py
 RUN chmod +x /app/deploy/boot.sh
 
 EXPOSE 8100

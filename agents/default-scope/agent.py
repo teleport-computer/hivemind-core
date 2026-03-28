@@ -73,7 +73,8 @@ async def simulate_tool(args: dict[str, Any]) -> dict[str, Any]:
     return {"content": [{"type": "text", "text": json.dumps(result)}]}
 
 
-SCOPE_TOOLS = [list_agent_files_tool, read_agent_file_tool, simulate_tool]
+# simulate_tool disabled — Phala ephemeral CVMs too slow for nested simulation
+SCOPE_TOOLS = [list_agent_files_tool, read_agent_file_tool]
 server = create_hivemind_server(extra_tools=SCOPE_TOOLS)
 
 SYSTEM_PROMPT = """\
@@ -85,20 +86,36 @@ You have MCP tools to access the database and inspect the query agent:
 - mcp__hivemind__get_schema: Get the database schema.
 - mcp__hivemind__list_query_agent_files: List the query agent's source files.
 - mcp__hivemind__read_query_agent_file: Read a source file to check for suspicious code.
-- mcp__hivemind__simulate_query: Run the query agent with a proposed scope function.
 
 You also have local Claude Code tools (Bash, Read, Write, Grep, Glob) \
 available inside your container. Note: there is NO external network access — \
 tools like WebSearch and WebFetch will not work. Use MCP tools for all data access.
 
+IMPORTANT: Work quickly. Inspect the schema, check the query agent code, \
+then output your scope function. Do not run extensive analysis — just enough \
+to determine appropriate access control.
+
 Your output MUST be ONLY a JSON object:
-{"scope_fn": "def scope(sql, params, rows): ..."}
+{"scope_fn": "def scope(sql, params, rows):\\n    return {\\"allow\\": True, \\"rows\\": rows}"}
+
+CRITICAL — The scope function MUST have EXACTLY 3 parameters: sql, params, rows.
+If you use fewer or more parameters, the system WILL reject it.
+
+Correct example:
+
+  def scope(sql, params, rows):
+      return {"allow": True, "rows": rows}
+
+WRONG (will be rejected):
+
+  def scope(sql, rows):       # WRONG — missing params
+  def scope(query, results):  # WRONG — must be sql, params, rows
 
 The scope function signature:
   def scope(sql: str, params: list, rows: list[dict]) -> dict:
       # sql: the SQL query the query agent issued
-      # params: query parameters
-      # rows: the raw query results (full data)
+      # params: query parameters (list of bind values)
+      # rows: the raw query results (list of dicts)
       # Return one of:
       #   {"allow": True, "rows": rows}  — pass through as-is
       #   {"allow": True, "rows": filtered}  — transform/filter results
@@ -112,6 +129,8 @@ Constraints:
 - The scope function sees every query's results and decides what passes through.
 - Use it for access control: column redaction, row filtering, k-anonymity, etc.
 - When in doubt, be permissive — false negatives are worse than false positives.
+- Do NOT use simulate_query — it is very slow. Just return your scope function directly.
+- Keep it simple: inspect the schema and query agent code, then output the JSON.
 - Output ONLY the JSON object, nothing else.
 """
 
@@ -182,6 +201,7 @@ async def main() -> None:
                 system_prompt=SYSTEM_PROMPT,
                 mcp_servers={"hivemind": server},
                 permission_mode="bypassPermissions",
+                cwd="/tmp",
             ),
         ):
             if hasattr(message, "result"):
