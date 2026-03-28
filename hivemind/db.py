@@ -109,20 +109,28 @@ class Database:
     def execute(self, sql: str, params: list | tuple | None = None) -> list[dict]:
         """Run a SELECT query and return rows as list of dicts."""
         with self._lock:
-            with self._conn.cursor() as cur:
-                cur.execute(sql, params or [])
-                if cur.description is None:
-                    return []
-                return [dict(row) for row in cur.fetchall()]
+            try:
+                with self._conn.cursor() as cur:
+                    cur.execute(sql, params or [])
+                    if cur.description is None:
+                        return []
+                    return [dict(row) for row in cur.fetchall()]
+            except Exception:
+                self._conn.rollback()
+                raise
 
     def execute_commit(self, sql: str, params: list | tuple | None = None) -> int:
         """Run a write query, commit, and return rowcount."""
         with self._lock:
-            with self._conn.cursor() as cur:
-                cur.execute(sql, params or [])
-                rowcount = cur.rowcount
-            self._conn.commit()
-            return rowcount
+            try:
+                with self._conn.cursor() as cur:
+                    cur.execute(sql, params or [])
+                    rowcount = cur.rowcount
+                self._conn.commit()
+                return rowcount
+            except Exception:
+                self._conn.rollback()
+                raise
 
     def get_schema(self, exclude_internal: bool = True) -> list[dict]:
         """Introspect information_schema for table/column metadata."""
