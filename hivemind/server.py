@@ -78,6 +78,7 @@ button:disabled{opacity:.4;cursor:wait}
 .stage-label{width:100px;text-align:right;color:#778ca3;font-weight:bold}
 .stage-bar-wrap{flex:1;height:22px;background:rgba(255,255,255,.05);border-radius:5px;position:relative;overflow:hidden}
 .stage-bar{height:100%;border-radius:5px;transition:width .3s ease;display:flex;align-items:center;padding-left:8px;font-size:.85em;color:rgba(0,0,0,.5)}
+.stage-bar.build{background:rgba(119,140,163,.3)}
 .stage-bar.scope{background:rgba(255,177,66,.3)}
 .stage-bar.query{background:rgba(84,160,255,.3)}
 .stage-bar.mediator{background:rgba(165,94,234,.3)}
@@ -141,6 +142,12 @@ button:disabled{opacity:.4;cursor:wait}
 <div class="card" id="status-panel">
   <h2>Run <span id="run-id-display"></span></h2>
   <div class="stages">
+    <div class="stage-row">
+      <span class="stage-label">Build</span>
+      <div class="stage-bar-wrap"><div class="stage-bar build" id="bar-build"></div></div>
+      <span class="stage-time" id="time-build">--</span>
+      <span class="stage-status" id="icon-build">&#9679;</span>
+    </div>
     <div class="stage-row">
       <span class="stage-label">Scope</span>
       <div class="stage-bar-wrap"><div class="stage-bar scope" id="bar-scope"></div></div>
@@ -234,7 +241,7 @@ async function submitAgent() {
 }
 
 function resetBars() {
-  for (const s of ['scope','query','mediator','total']) {
+  for (const s of ['build','scope','query','mediator','total']) {
     $('bar-'+s).style.width = '0%';
     $('bar-'+s).textContent = '';
     $('time-'+s).textContent = '--';
@@ -281,7 +288,7 @@ function updateStages(d) {
   const totalElapsed = (d.updated_at || Date.now()/1000) - d.created_at;
   const maxBar = Math.max(totalElapsed, 1);
 
-  for (const stage of ['scope','query','mediator']) {
+  for (const stage of ['build','scope','query','mediator']) {
     const info = stageDuration(d, stage);
     if (!info) {
       // not started yet
@@ -850,8 +857,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         hm: Hivemind = Depends(get_hivemind),
     ):
         """Upload query agent source, create a run record, and kick off execution."""
-        from .sandbox.backend import _create_runner
-
         try:
             content = await _read_upload_bytes_limited(
                 archive, max_bytes=MAX_UPLOAD_SIZE,
@@ -861,74 +866,133 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         tmpdir = tempfile.mkdtemp(prefix="hivemind-upload-")
         try:
-            try:
-                _safe_extract_tar(content, tmpdir)
-            except (tarfile.TarError, ValueError) as e:
-                raise HTTPException(status_code=400, detail=f"Invalid archive: {e}")
+            _safe_extract_tar(content, tmpdir)
+        except (tarfile.TarError, ValueError) as e:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+            raise HTTPException(status_code=400, detail=f"Invalid archive: {e}")
 
-            agent_id = uuid4().hex[:12]
+        # Create run record immediately, return fast
+        agent_id = uuid4().hex[:12]
+        run_id = uuid4().hex[:12]
+        await asyncio.to_thread(hm.run_store.create, run_id, agent_id)
+
+        # Everything else runs in background
+        asyncio.create_task(
+            _build_and_run(
+                hm=hm,
+                settings=settings,
+                tmpdir=tmpdir,
+                agent_id=agent_id,
+                run_id=run_id,
+                name=name,
+                description=description,
+                entrypoint=entrypoint,
+                memory_mb=memory_mb,
+                max_llm_calls=max_llm_calls,
+                max_tokens=max_tokens,
+                timeout_seconds=timeout_seconds,
+                prompt=prompt,
+                scope_agent_id=scope_agent_id,
+                mediator_agent_id=mediator_agent_id,
+            )
+        )
+
+        return {
+            "run_id": run_id,
+            "agent_id": agent_id,
+            "status": "pending",
+        }
+
+    async def _build_and_run(
+        hm: Hivemind,
+        settings: Settings,
+        tmpdir: str,
+        agent_id: str,
+        run_id: str,
+        name: str,
+        description: str,
+        entrypoint: str | None,
+        memory_mb: int,
+        max_llm_calls: int,
+        max_tokens: int,
+        timeout_seconds: int,
+        prompt: str,
+        scope_agent_id: str | None,
+        mediator_agent_id: str | None,
+    ) -> None:
+        """Background task: build image, register agent, run pipeline."""
+        from .sandbox.backend import _create_runner
+
+        try:
+            # -- Build Docker image --
+            import time as _time
+
+            build_t0 = _time.time()
+            await asyncio.to_thread(
+                hm.run_store.update_stage, run_id, "build", started_at=build_t0,
+            )
 
             sandbox_settings = build_sandbox_settings(settings)
             runner = _create_runner(sandbox_settings)
-
             image_tag = f"hivemind-agent-{agent_id}:latest"
+
             try:
                 await runner.build_image_async(tmpdir, image_tag)
-            except ValueError as e:
-                raise HTTPException(status_code=400, detail=str(e))
-            except Exception:
-                logger.exception("Image build failed for uploaded query agent")
-                raise HTTPException(status_code=500, detail="Image build failed")
-
-            try:
-                config = AgentConfig(
-                    agent_id=agent_id,
-                    name=name,
-                    description=description,
-                    image=image_tag,
-                    entrypoint=entrypoint,
-                    memory_mb=min(memory_mb, settings.container_memory_mb),
-                    max_llm_calls=max_llm_calls,
-                    max_tokens=max_tokens,
-                    timeout_seconds=timeout_seconds,
+            except Exception as e:
+                logger.exception("Image build failed for agent %s", agent_id)
+                await asyncio.to_thread(
+                    hm.run_store.update_status, run_id, "failed",
+                    error=f"Image build failed: {e}",
                 )
-            except ValidationError as e:
-                raise HTTPException(status_code=422, detail=e.errors())
+                return
+            finally:
+                shutil.rmtree(tmpdir, ignore_errors=True)
+                await asyncio.to_thread(
+                    hm.run_store.update_stage, run_id, "build",
+                    ended_at=_time.time(),
+                )
 
+            # -- Register agent --
+            config = AgentConfig(
+                agent_id=agent_id,
+                name=name,
+                description=description,
+                image=image_tag,
+                entrypoint=entrypoint,
+                memory_mb=min(memory_mb, settings.container_memory_mb),
+                max_llm_calls=max_llm_calls,
+                max_tokens=max_tokens,
+                timeout_seconds=timeout_seconds,
+            )
             await asyncio.to_thread(hm.agent_store.create, config)
 
-            # Save source files to DB
             try:
                 files = await runner.extract_image_files_async(image_tag)
                 await asyncio.to_thread(hm.agent_store.save_files, agent_id, files)
             except Exception as e:
                 logger.warning("Failed to save agent files for %s: %s", agent_id, e)
 
-            # Create run record
-            run_id = uuid4().hex[:12]
-            await asyncio.to_thread(hm.run_store.create, run_id, agent_id)
-
-            # Kick off background execution (full 3-stage pipeline)
-            asyncio.create_task(
-                hm.pipeline.run_query_agent_tracked(
-                    agent_id=agent_id,
-                    run_id=run_id,
-                    run_store=hm.run_store,
-                    s3_uploader=hm.s3_uploader,
-                    prompt=prompt,
-                    scope_agent_id=scope_agent_id,
-                    mediator_agent_id=mediator_agent_id,
-                    max_tokens=max_tokens,
-                )
+            # -- Run pipeline --
+            await hm.pipeline.run_query_agent_tracked(
+                agent_id=agent_id,
+                run_id=run_id,
+                run_store=hm.run_store,
+                s3_uploader=hm.s3_uploader,
+                prompt=prompt,
+                scope_agent_id=scope_agent_id,
+                mediator_agent_id=mediator_agent_id,
+                max_tokens=max_tokens,
             )
 
-            return {
-                "run_id": run_id,
-                "agent_id": agent_id,
-                "status": "pending",
-            }
-        finally:
-            shutil.rmtree(tmpdir, ignore_errors=True)
+        except Exception as e:
+            logger.error("Background build+run %s failed: %s", run_id, e)
+            try:
+                await asyncio.to_thread(
+                    hm.run_store.update_status, run_id, "failed",
+                    error=str(e)[:500],
+                )
+            except Exception:
+                pass
 
     @app.get("/v1/query-agents/runs/{run_id}", dependencies=[Depends(check_auth)])
     async def get_query_run(

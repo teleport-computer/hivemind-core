@@ -74,6 +74,8 @@ class Database:
                         error TEXT,
                         created_at DOUBLE PRECISION NOT NULL,
                         updated_at DOUBLE PRECISION NOT NULL,
+                        build_started_at DOUBLE PRECISION,
+                        build_ended_at DOUBLE PRECISION,
                         scope_started_at DOUBLE PRECISION,
                         scope_ended_at DOUBLE PRECISION,
                         query_started_at DOUBLE PRECISION,
@@ -85,6 +87,8 @@ class Database:
                 """)
                 # Migrate existing tables: add columns if missing
                 for col, coltype in [
+                    ("build_started_at", "DOUBLE PRECISION"),
+                    ("build_ended_at", "DOUBLE PRECISION"),
                     ("scope_started_at", "DOUBLE PRECISION"),
                     ("scope_ended_at", "DOUBLE PRECISION"),
                     ("query_started_at", "DOUBLE PRECISION"),
@@ -211,6 +215,8 @@ class HttpDatabase:
             self.execute_commit(ddl)
         # Migrate existing tables
         for col, coltype in [
+            ("build_started_at", "DOUBLE PRECISION"),
+            ("build_ended_at", "DOUBLE PRECISION"),
             ("scope_started_at", "DOUBLE PRECISION"),
             ("scope_ended_at", "DOUBLE PRECISION"),
             ("query_started_at", "DOUBLE PRECISION"),

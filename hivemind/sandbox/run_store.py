@@ -13,6 +13,7 @@ from ..db import Database
 _COLUMNS = (
     "run_id, agent_id, status, s3_url, error, "
     "created_at, updated_at, "
+    "build_started_at, build_ended_at, "
     "scope_started_at, scope_ended_at, "
     "query_started_at, query_ended_at, "
     "mediator_started_at, mediator_ended_at, "
@@ -76,7 +77,7 @@ class RunStore:
         ended_at: float | None = None,
     ) -> bool:
         """Update timing for a pipeline stage (scope/query/mediator)."""
-        if stage not in ("scope", "query", "mediator"):
+        if stage not in ("build", "scope", "query", "mediator"):
             raise ValueError(f"Invalid stage: {stage}")
         now = time.time()
         sets = ["updated_at = %s"]
