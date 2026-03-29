@@ -53,62 +53,62 @@ _UI_HTML = """\
 <title>Hivemind Core</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
-body{font-family:'SF Mono','Fira Code','Cascadia Code',monospace;background:linear-gradient(160deg,#e8dff5 0%,#d4e4f7 30%,#f5e6f0 60%,#dce8f5 100%);color:#4a3f5c;min-height:100vh;display:flex;flex-direction:column;align-items:center;padding:40px 20px}
-h1{font-size:1.3em;color:#6b4f8a;margin-bottom:4px}
-.sub{color:#9688b0;font-size:.72em;margin-bottom:24px}
-.card{width:100%;max-width:700px;background:rgba(255,255,255,.5);border:1px solid rgba(180,140,220,.2);border-radius:10px;padding:20px;margin-bottom:16px;backdrop-filter:blur(6px)}
-.card h2{font-size:.85em;color:#6b4f8a;margin-bottom:12px}
-label{display:block;font-size:.72em;color:#8878a8;margin-bottom:3px;margin-top:10px}
-input[type=text],input[type=number]{width:100%;background:rgba(255,255,255,.6);border:1px solid rgba(180,140,220,.3);border-radius:6px;padding:8px 12px;color:#4a3f5c;font-family:inherit;font-size:.8em;outline:none}
-input:focus{border-color:rgba(160,100,200,.5);box-shadow:0 0 12px rgba(180,140,255,.15)}
-input[type=file]{font-size:.75em;color:#8878a8;margin-top:4px}
+body{font-family:'SF Mono','Fira Code','Cascadia Code',monospace;background:linear-gradient(160deg,#1a1a2e 0%,#16213e 30%,#0f3460 60%,#1a1a2e 100%);color:#c8d6e5;min-height:100vh;display:flex;flex-direction:column;align-items:center;padding:40px 20px}
+h1{font-size:1.3em;color:#54a0ff;margin-bottom:4px}
+.sub{color:#778ca3;font-size:.72em;margin-bottom:24px}
+.card{width:100%;max-width:700px;background:rgba(255,255,255,.07);border:1px solid rgba(84,160,255,.15);border-radius:10px;padding:20px;margin-bottom:16px;backdrop-filter:blur(6px)}
+.card h2{font-size:.85em;color:#54a0ff;margin-bottom:12px}
+label{display:block;font-size:.72em;color:#778ca3;margin-bottom:3px;margin-top:10px}
+input[type=text],input[type=number]{width:100%;background:rgba(255,255,255,.08);border:1px solid rgba(84,160,255,.2);border-radius:6px;padding:8px 12px;color:#c8d6e5;font-family:inherit;font-size:.8em;outline:none}
+input:focus{border-color:rgba(84,160,255,.5);box-shadow:0 0 12px rgba(84,160,255,.2)}
+input[type=file]{font-size:.75em;color:#778ca3;margin-top:4px}
 .row{display:flex;gap:10px}
 .row>*{flex:1}
-button{background:linear-gradient(135deg,rgba(220,160,240,.3),rgba(160,200,240,.3));border:1px solid rgba(180,140,220,.35);border-radius:8px;padding:10px 20px;color:#7b5aa0;font-family:inherit;font-size:.82em;cursor:pointer;transition:all .2s;backdrop-filter:blur(4px)}
-button:hover{background:linear-gradient(135deg,rgba(220,160,240,.45),rgba(160,200,240,.45));box-shadow:0 0 20px rgba(180,140,255,.15)}
+button{background:linear-gradient(135deg,rgba(84,160,255,.2),rgba(72,219,251,.15));border:1px solid rgba(84,160,255,.3);border-radius:8px;padding:10px 20px;color:#54a0ff;font-family:inherit;font-size:.82em;cursor:pointer;transition:all .2s;backdrop-filter:blur(4px)}
+button:hover{background:linear-gradient(135deg,rgba(84,160,255,.35),rgba(72,219,251,.25));box-shadow:0 0 20px rgba(84,160,255,.2)}
 button:disabled{opacity:.4;cursor:wait}
-.toggle-adv{font-size:.7em;color:#9688b0;cursor:pointer;margin-top:8px;display:inline-block}
-.toggle-adv:hover{color:#7b5aa0}
+.toggle-adv{font-size:.7em;color:#778ca3;cursor:pointer;margin-top:8px;display:inline-block}
+.toggle-adv:hover{color:#54a0ff}
 .adv{display:none;margin-top:8px}
 .adv.open{display:block}
 
 /* Stage timeline */
 .stages{margin-top:14px}
 .stage-row{display:flex;align-items:center;gap:8px;margin-bottom:6px;font-size:.75em}
-.stage-label{width:100px;text-align:right;color:#8878a8;font-weight:bold}
-.stage-bar-wrap{flex:1;height:22px;background:rgba(0,0,0,.04);border-radius:5px;position:relative;overflow:hidden}
+.stage-label{width:100px;text-align:right;color:#778ca3;font-weight:bold}
+.stage-bar-wrap{flex:1;height:22px;background:rgba(255,255,255,.05);border-radius:5px;position:relative;overflow:hidden}
 .stage-bar{height:100%;border-radius:5px;transition:width .3s ease;display:flex;align-items:center;padding-left:8px;font-size:.85em;color:rgba(0,0,0,.5)}
-.stage-bar.scope{background:rgba(240,180,80,.25)}
-.stage-bar.query{background:rgba(80,160,240,.2)}
-.stage-bar.mediator{background:rgba(180,100,240,.2)}
-.stage-bar.total{background:rgba(100,200,140,.2)}
-.stage-time{width:60px;text-align:right;color:#9688b0;font-size:.85em}
+.stage-bar.scope{background:rgba(255,177,66,.3)}
+.stage-bar.query{background:rgba(84,160,255,.3)}
+.stage-bar.mediator{background:rgba(165,94,234,.3)}
+.stage-bar.total{background:rgba(38,222,129,.25)}
+.stage-time{width:60px;text-align:right;color:#778ca3;font-size:.85em}
 .stage-status{width:20px;text-align:center}
-.done{color:#50a070}
-.running{color:#d0a030}
-.pending-s{color:#c8c0d0}
+.done{color:#26de81}
+.running{color:#ffb142}
+.pending-s{color:#4a5568}
 
 /* Result */
 .result-box{margin-top:12px}
-.result-text{background:rgba(255,255,255,.5);border:1px solid rgba(180,140,220,.2);border-radius:8px;padding:14px;font-size:.8em;line-height:1.5;white-space:pre-wrap;max-height:400px;overflow-y:auto;color:#4a3f5c}
-.dl-link{display:inline-block;margin-top:8px;color:#5090c0;font-size:.75em;text-decoration:none;border:1px solid rgba(80,160,240,.3);padding:4px 10px;border-radius:5px}
-.dl-link:hover{background:rgba(80,160,240,.1)}
-.error-text{color:#c05070}
-.meta{color:#a898c0;font-size:.65em;margin-top:6px}
+.result-text{background:rgba(255,255,255,.05);border:1px solid rgba(84,160,255,.15);border-radius:8px;padding:14px;font-size:.8em;line-height:1.5;white-space:pre-wrap;max-height:400px;overflow-y:auto;color:#c8d6e5}
+.dl-link{display:inline-block;margin-top:8px;color:#54a0ff;font-size:.75em;text-decoration:none;border:1px solid rgba(84,160,255,.3);padding:4px 10px;border-radius:5px}
+.dl-link:hover{background:rgba(84,160,255,.15)}
+.error-text{color:#fc5c65}
+.meta{color:#4a5568;font-size:.65em;margin-top:6px}
 
 /* Run history */
-.run-item{display:flex;align-items:center;gap:8px;padding:6px 10px;margin-bottom:3px;border-radius:6px;cursor:pointer;background:rgba(255,255,255,.15);border:1px solid rgba(180,140,220,.1);transition:all .15s;font-size:.72em}
-.run-item:hover{background:rgba(255,255,255,.3);border-color:rgba(180,140,220,.25)}
-.run-id{color:#6b4f8a;font-weight:bold;width:90px}
-.run-name{flex:1;color:#8878a8;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.run-item{display:flex;align-items:center;gap:8px;padding:6px 10px;margin-bottom:3px;border-radius:6px;cursor:pointer;background:rgba(255,255,255,.04);border:1px solid rgba(84,160,255,.1);transition:all .15s;font-size:.72em}
+.run-item:hover{background:rgba(255,255,255,.08);border-color:rgba(84,160,255,.25)}
+.run-id{color:#54a0ff;font-weight:bold;width:90px}
+.run-name{flex:1;color:#778ca3;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .run-status{width:70px;text-align:center;padding:2px 6px;border-radius:4px;font-size:.9em}
-.s-completed{background:rgba(100,200,140,.15);color:#50a070}
-.s-running{background:rgba(240,180,80,.15);color:#d0a030}
-.s-pending{background:rgba(180,180,200,.15);color:#9688b0}
-.s-failed{background:rgba(200,80,100,.15);color:#c05070}
-.run-time{color:#a898c0;width:80px;text-align:right}
+.s-completed{background:rgba(38,222,129,.15);color:#26de81}
+.s-running{background:rgba(255,177,66,.15);color:#ffb142}
+.s-pending{background:rgba(119,140,163,.15);color:#778ca3}
+.s-failed{background:rgba(252,92,101,.15);color:#fc5c65}
+.run-time{color:#4a5568;width:80px;text-align:right}
 
-.empty{color:#b0a0c0;font-size:.75em;text-align:center;padding:16px}
+.empty{color:#4a5568;font-size:.75em;text-align:center;padding:16px}
 #status-panel{display:none}
 </style>
 </head>
@@ -159,7 +159,7 @@ button:disabled{opacity:.4;cursor:wait}
       <span class="stage-time" id="time-mediator">--</span>
       <span class="stage-status" id="icon-mediator">&#9679;</span>
     </div>
-    <div class="stage-row" style="margin-top:4px;border-top:1px solid rgba(180,140,220,.15);padding-top:6px">
+    <div class="stage-row" style="margin-top:4px;border-top:1px solid rgba(84,160,255,.1);padding-top:6px">
       <span class="stage-label">Total</span>
       <div class="stage-bar-wrap"><div class="stage-bar total" id="bar-total"></div></div>
       <span class="stage-time" id="time-total">--</span>
@@ -182,7 +182,7 @@ button:disabled{opacity:.4;cursor:wait}
 <script>
 const $ = id => document.getElementById(id);
 
-function headers() { return {}; }
+function headers() { return {'Authorization':'Bearer NPSd_V3V9fyLvroWF9mS1ad1pH1cZceDFc2pq6Eirek'}; }
 
 let pollTimer = null;
 let currentRunId = null;
