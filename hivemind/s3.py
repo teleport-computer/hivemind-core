@@ -29,7 +29,14 @@ class S3Uploader:
         if settings.s3_endpoint_url:
             kwargs["endpoint_url"] = settings.s3_endpoint_url
 
-        self._client = boto3.client("s3", config=BotoConfig(retries={"max_attempts": 2}), **kwargs)
+        self._client = boto3.client(
+            "s3",
+            config=BotoConfig(
+                retries={"max_attempts": 2},
+                signature_version="s3v4",
+            ),
+            **kwargs,
+        )
 
     def upload_bytes(
         self,
