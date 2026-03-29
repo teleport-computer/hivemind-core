@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import time
 from typing import Callable
 
 from openai import AsyncOpenAI
@@ -510,6 +511,10 @@ class Pipeline:
             scope_fn = None
             resolved_scope_id = scope_agent_id or self.settings.default_scope_agent
             if resolved_scope_id:
+                scope_t0 = time.time()
+                await asyncio.to_thread(
+                    run_store.update_stage, run_id, "scope", started_at=scope_t0,
+                )
                 req_for_scope = QueryRequest(
                     query=prompt or "analyse data",
                     query_agent_id=agent_id,
@@ -527,8 +532,17 @@ class Pipeline:
                         "continuing without scope: %s",
                         resolved_scope_id, run_id, e,
                     )
+                finally:
+                    await asyncio.to_thread(
+                        run_store.update_stage, run_id, "scope",
+                        ended_at=time.time(),
+                    )
 
             # -- Stage 1: Query agent --
+            query_t0 = time.time()
+            await asyncio.to_thread(
+                run_store.update_stage, run_id, "query", started_at=query_t0,
+            )
             agent_config = await asyncio.to_thread(
                 self.agent_store.get, agent_id
             )
@@ -584,8 +598,13 @@ class Pipeline:
             query_output, query_usage = result
             used = query_usage.get("total_tokens", 0)
             remaining = max(1, remaining - used)
+            await asyncio.to_thread(
+                run_store.update_stage, run_id, "query",
+                ended_at=time.time(),
+            )
 
             # -- Stage 2: Mediator --
+            mediator_ran = False
             if resolved_mediator_id and query_output:
                 if remaining < MEDIATOR_MIN_TOKENS:
                     logger.info(
@@ -595,6 +614,12 @@ class Pipeline:
                         remaining, MEDIATOR_MIN_TOKENS,
                     )
                 else:
+                    mediator_t0 = time.time()
+                    await asyncio.to_thread(
+                        run_store.update_stage, run_id, "mediator",
+                        started_at=mediator_t0,
+                    )
+                    mediator_ran = True
                     try:
                         query_output, _ = await self._run_mediator_agent(
                             mediator_agent_id=resolved_mediator_id,
@@ -610,13 +635,26 @@ class Pipeline:
                             "returning unmediated output: %s",
                             resolved_mediator_id, run_id, e,
                         )
+                    finally:
+                        await asyncio.to_thread(
+                            run_store.update_stage, run_id, "mediator",
+                            ended_at=time.time(),
+                        )
 
-            # If agent didn't upload to S3 (run_store still "running"),
-            # mark completed without S3 URL.
+            # Mark completed + save output.
+            # If agent already uploaded to S3 (bridge set status=completed),
+            # just update output. Otherwise mark completed.
             current = await asyncio.to_thread(run_store.get, run_id)
             if current and current["status"] == "running":
                 await asyncio.to_thread(
-                    run_store.update_status, run_id, "completed"
+                    run_store.update_status, run_id, "completed",
+                    output=(query_output or "")[:10000],
+                )
+            elif current and query_output:
+                # S3 upload already marked completed; just save output
+                await asyncio.to_thread(
+                    run_store.update_status, run_id, current["status"],
+                    output=(query_output or "")[:10000],
                 )
 
         except Exception as e:

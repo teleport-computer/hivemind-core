@@ -528,9 +528,6 @@ uv run pytest tests/test_integration_docker.py -v
 ## PRODUCTION
 
 hivemind-pg: https://2181af2d134123a46613f62a0311dd1f5af984be-8080.dstack-pha-prod5.phala.network
-hivemind-scope: https://2808148521da8034770fecb39f556d76a7948b2f-8080.dstack-pha-prod5.phala.network
-hivemind-index: https://573e7dca64e67f874e25ffa4dca2add5754d8ca7-8080.dstack-pha-prod5.phala.network
-hivemind-mediator: https://849dfb7f617c14050123e7c44644702e50f2b99d-8080.dstack-pha-prod5.phala.network
 hivemind-core: https://37d4e4242a99cde0b9066dd81f854cb09e164f38-8100.dstack-pha-prod5.phala.network
 
 
@@ -539,10 +536,5 @@ hivemind-core: https://37d4e4242a99cde0b9066dd81f854cb09e164f38-8100.dstack-pha-
 # 1. Postgres
 phala deploy -n hivemind-pg -c deploy/phala/docker-compose.postgres.yaml -e deploy/phala/.env.postgres --wait
 
-# 2. Agent
-phala deploy -n hivemind-scope    -c deploy/phala/docker-compose.scope.yaml    --wait
-phala deploy -n hivemind-index    -c deploy/phala/docker-compose.index.yaml    --wait
-phala deploy -n hivemind-mediator -c deploy/phala/docker-compose.mediator.yaml --wait
-
-# 3. Core
+# 2. Core
 phala deploy -n hivemind-core -c deploy/phala/docker-compose.core.yaml -e deploy/phala/.env.core --wait

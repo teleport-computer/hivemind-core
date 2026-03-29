@@ -73,9 +73,33 @@ class Database:
                         s3_url TEXT,
                         error TEXT,
                         created_at DOUBLE PRECISION NOT NULL,
-                        updated_at DOUBLE PRECISION NOT NULL
+                        updated_at DOUBLE PRECISION NOT NULL,
+                        scope_started_at DOUBLE PRECISION,
+                        scope_ended_at DOUBLE PRECISION,
+                        query_started_at DOUBLE PRECISION,
+                        query_ended_at DOUBLE PRECISION,
+                        mediator_started_at DOUBLE PRECISION,
+                        mediator_ended_at DOUBLE PRECISION,
+                        output TEXT
                     )
                 """)
+                # Migrate existing tables: add columns if missing
+                for col, coltype in [
+                    ("scope_started_at", "DOUBLE PRECISION"),
+                    ("scope_ended_at", "DOUBLE PRECISION"),
+                    ("query_started_at", "DOUBLE PRECISION"),
+                    ("query_ended_at", "DOUBLE PRECISION"),
+                    ("mediator_started_at", "DOUBLE PRECISION"),
+                    ("mediator_ended_at", "DOUBLE PRECISION"),
+                    ("output", "TEXT"),
+                ]:
+                    try:
+                        cur.execute(
+                            f"ALTER TABLE _hivemind_query_runs "
+                            f"ADD COLUMN IF NOT EXISTS {col} {coltype}"
+                        )
+                    except Exception:
+                        pass  # column already exists
             self._conn.commit()
 
     def execute(self, sql: str, params: list | tuple | None = None) -> list[dict]:
@@ -173,11 +197,35 @@ class HttpDatabase:
                 s3_url TEXT,
                 error TEXT,
                 created_at DOUBLE PRECISION NOT NULL,
-                updated_at DOUBLE PRECISION NOT NULL
+                updated_at DOUBLE PRECISION NOT NULL,
+                scope_started_at DOUBLE PRECISION,
+                scope_ended_at DOUBLE PRECISION,
+                query_started_at DOUBLE PRECISION,
+                query_ended_at DOUBLE PRECISION,
+                mediator_started_at DOUBLE PRECISION,
+                mediator_ended_at DOUBLE PRECISION,
+                output TEXT
             )
             """,
         ]:
             self.execute_commit(ddl)
+        # Migrate existing tables
+        for col, coltype in [
+            ("scope_started_at", "DOUBLE PRECISION"),
+            ("scope_ended_at", "DOUBLE PRECISION"),
+            ("query_started_at", "DOUBLE PRECISION"),
+            ("query_ended_at", "DOUBLE PRECISION"),
+            ("mediator_started_at", "DOUBLE PRECISION"),
+            ("mediator_ended_at", "DOUBLE PRECISION"),
+            ("output", "TEXT"),
+        ]:
+            try:
+                self.execute_commit(
+                    f"ALTER TABLE _hivemind_query_runs "
+                    f"ADD COLUMN IF NOT EXISTS {col} {coltype}"
+                )
+            except Exception:
+                pass
 
     def _check(self, resp) -> dict:
         if resp.status_code >= 400:
