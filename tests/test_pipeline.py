@@ -35,6 +35,8 @@ def pg_db(tmp_path):
         pytest.skip("HIVEMIND_TEST_DATABASE_URL not set")
     db = Database(test_dsn)
     yield db
+    db.execute_commit("DELETE FROM _hivemind_agent_files")
+    db.execute_commit("DELETE FROM _hivemind_agents")
     db.close()
 
 

@@ -19,6 +19,7 @@ def _make_settings(**overrides):
         "global_max_llm_calls": 50,
         "global_max_tokens": 200_000,
         "global_timeout_seconds": 300,
+        "enforce_bridge_only_egress": False,
     }
     defaults.update(overrides)
     return SandboxSettings(**defaults)

@@ -1,0 +1,539 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Hivemind-Core Architecture</title>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@viz-js/viz@3.4.0/lib/viz-standalone.js"></script>
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; max-width: 1200px; margin: 0 auto; padding: 2rem; background: #0d1117; color: #c9d1d9; }
+  h1, h2, h3 { color: #e6edf3; }
+  h1 { border-bottom: 1px solid #30363d; padding-bottom: 0.5rem; }
+  h2 { margin-top: 2.5rem; }
+  h3 { margin-top: 1.5rem; color: #8b949e; }
+  hr { border: none; border-top: 1px solid #30363d; margin: 2rem 0; }
+  .mermaid { background: #161b22; border-radius: 8px; padding: 1.5rem; margin: 1rem 0; }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
+  th, td { border: 1px solid #30363d; padding: 0.5rem 1rem; text-align: left; }
+  th { background: #161b22; }
+  code { background: #161b22; padding: 0.2rem 0.4rem; border-radius: 4px; font-size: 0.9em; }
+  pre { background: #161b22; border-radius: 8px; padding: 1rem; overflow-x: auto; }
+  .graphviz-container { background: #161b22; border-radius: 8px; padding: 1.5rem; margin: 1rem 0; overflow-x: auto; }
+  .graphviz-container svg { max-width: 100%; height: auto; }
+  .graphviz-container svg text { fill: #c9d1d9 !important; }
+  .graphviz-container svg polygon[fill="white"] { fill: #161b22 !important; }
+  .example-trace { background: #1c2333; border: 1px solid #30363d; border-radius: 8px; padding: 1.2rem; margin: 1rem 0; font-size: 0.9em; line-height: 1.6; }
+  .example-trace .stage-label { color: #58a6ff; font-weight: 600; }
+  .example-trace .data-in { color: #7ee787; }
+  .example-trace .data-out { color: #f0883e; }
+  .example-trace .llm-call { color: #d2a8ff; }
+  .example-trace .tool-call { color: #79c0ff; }
+  .example-trace .security { color: #f85149; }
+</style>
+</head>
+<body>
+<h1>Hivemind-Core Architecture</h1>
+<p>Privacy-preserving Postgres inside a TEE. Users write raw SQL. Reads go through sandboxed agents. Nobody -- including the operator -- sees individual rows. Only agent-mediated, scope-constrained, mediator-audited answers leave.</p>
+
+<hr>
+<h2>1. System Overview</h2>
+<pre class="mermaid">
+graph TB
+    Client["Client Application"]
+
+    subgraph CVM["dstack Confidential VM (Intel TDX)"]
+        direction TB
+        subgraph App["Hivemind Application"]
+            API["FastAPI Server :8100"]
+            Pipeline["Pipeline Orchestrator"]
+            RunStore["RunStore (stage timing, output)"]
+            Tools["SQL Tools + Scope Engine"]
+        end
+
+        subgraph DinD["Docker-in-Docker"]
+            Sandbox["Docker Sandbox Network (internal)"]
+            Bridge["Bridge Server (ephemeral, per-agent)"]
+            Agents["Agent Containers (scope / query / index / mediator)"]
+        end
+
+        Postgres["Postgres 16"]
+        WALG["WAL-G Archiver"]
+    end
+
+    LLM["LLM Provider (OpenRouter / Venice / Anthropic)"]
+    S3["S3-compatible Storage (Cloudflare R2 / AWS)"]
+    KMS["dstack KMS (Key Derivation)"]
+
+    Client -->|"REST API"| API
+    API --> Pipeline
+    Pipeline --> RunStore
+    Pipeline --> Tools
+    Pipeline --> Bridge
+    Bridge -->|"LLM Proxy"| LLM
+    Bridge -->|"Tool Calls"| Tools
+    Tools --> Postgres
+    Agents -->|"only exit point"| Bridge
+    WALG --> S3
+    KMS -.->|"DB password + backup key"| App
+</pre>
+
+<hr>
+<h2>2. Query Pipeline (Async, Multi-Stage)</h2>
+<p>Clients submit agent archives via <code>POST /v1/query-agents/submit</code>. The server returns a <code>run_id</code> immediately. Build + pipeline stages execute in the background. Clients poll <code>GET /v1/query-agents/runs/{run_id}</code> for per-stage progress.</p>
+<pre class="mermaid">
+sequenceDiagram
+    participant C as Client
+    participant API as FastAPI
+    participant P as Pipeline
+    participant RS as RunStore
+    participant S as Scope Agent
+    participant Q as Query Agent
+    participant M as Mediator Agent
+    participant DB as Postgres
+    participant LLM as LLM Provider
+
+    C->>API: POST /v1/query-agents/submit (archive)
+    API->>RS: create run (status=pending)
+    API-->>C: {run_id, agent_id, status: pending}
+
+    rect rgb(50, 50, 60)
+        Note over API,P: Stage 0 -- Build (background)
+        API->>RS: update_stage(build, started)
+        API->>API: Extract archive, build Docker image
+        API->>RS: update_stage(build, ended)
+    end
+
+    rect rgb(40, 40, 70)
+        Note over P,S: Stage 1 -- Scope (optional)
+        P->>RS: update_stage(scope, started)
+        P->>S: Start container (FULL_READ access)
+        S->>LLM: Chat completions (via bridge)
+        S->>DB: execute_sql (inspect schema + data)
+        S->>P: simulate_query (test proposed scope_fn)
+        S-->>P: scope_fn source code
+        P->>P: Compile + AST-validate scope_fn
+        P->>RS: update_stage(scope, ended)
+    end
+
+    rect rgb(40, 70, 40)
+        Note over P,Q: Stage 2 -- Query
+        P->>RS: update_stage(query, started)
+        P->>Q: Start container (SCOPED access)
+        Q->>LLM: Chat completions (via bridge)
+        Q->>DB: execute_sql(SELECT ...)
+        DB-->>P: Raw rows
+        P->>P: scope_fn filters results
+        P-->>Q: Filtered rows
+        Q-->>P: Answer text
+        P->>RS: update_stage(query, ended)
+    end
+
+    rect rgb(70, 40, 40)
+        Note over P,M: Stage 3 -- Mediation (optional)
+        P->>RS: update_stage(mediator, started)
+        P->>M: Start container (NO data access)
+        M->>LLM: Chat completions (via bridge)
+        Note over M: Output wrapped in response tags, reasoning stripped
+        M-->>P: Sanitized output
+        P->>RS: update_stage(mediator, ended)
+    end
+
+    P->>RS: update status=completed, output
+    C->>API: GET /v1/query-agents/runs/{run_id}
+    API-->>C: {output, stage timings, usage}
+</pre>
+
+<hr>
+<h2>3. Sandbox Isolation</h2>
+<pre class="mermaid">
+graph TB
+    subgraph Host["Hivemind Host Process"]
+        Pipeline["Pipeline"]
+        BridgeSrv["Bridge Server (ephemeral per agent)"]
+        Budget["Budget Tracker (max_tokens, max_calls)"]
+        Tape["Tape Recorder (LLM call cache)"]
+        ScopeFn["Scope Function (compiled Python)"]
+        SQLTools["SQL Tools (access-level gated)"]
+    end
+
+    subgraph DockerNet["Docker Internal Network (via DinD)"]
+        Container["Agent Container\nread-only rootfs | all caps dropped\nno-new-privileges | 256MB mem\n1 CPU | 256 PIDs\niptables: bridge-only egress"]
+    end
+
+    LLM["LLM Provider"]
+    DB["Postgres"]
+
+    Container -->|"Bearer SESSION_TOKEN"| BridgeSrv
+    BridgeSrv --> Budget
+    BridgeSrv --> Tape
+    BridgeSrv -->|"proxy"| LLM
+    BridgeSrv -->|"tool call"| SQLTools
+    SQLTools --> ScopeFn
+    SQLTools --> DB
+</pre>
+
+<hr>
+<h2>4. Access Levels per Agent Type</h2>
+<pre class="mermaid">
+graph LR
+    subgraph Agents
+        SA["Scope Agent"]
+        QA["Query Agent"]
+        IA["Index Agent"]
+        MA["Mediator Agent"]
+    end
+
+    subgraph Access["Database Access"]
+        FR["FULL_READ\nSELECT all tables"]
+        SC["SCOPED\nSELECT, filtered by scope_fn"]
+        RW["FULL_READWRITE\nAll DML"]
+        NO["NONE"]
+    end
+
+    subgraph Extra["Extra Capabilities"]
+        SIM["simulate_query\nlist/read agent files"]
+    end
+
+    SA --> FR
+    SA --> SIM
+    QA --> SC
+    IA --> RW
+    MA --> NO
+</pre>
+
+<hr>
+<h2>5. Deployment (2-CVM Model)</h2>
+<p>Consolidated from a 5-CVM architecture (one per agent type + postgres) to 2 CVMs: Postgres CVM and a single App CVM with Docker-in-Docker for agent containers.</p>
+<pre class="mermaid">
+graph TB
+    subgraph Operator
+        CLI["Operator CLI"]
+    end
+
+    subgraph Base["Base L2 Blockchain"]
+        Contract["NotarizedAppAuth.sol\nrequestDeploy / notarize / isAppAllowed"]
+    end
+
+    subgraph MonCVM["Monitoring TEE"]
+        Monitor["Event Watcher"]
+        IPFS["IPFS Logger"]
+        Notify["Telegram / Discord / Email"]
+    end
+
+    subgraph PGCVM["Postgres CVM"]
+        PG["Postgres 16"]
+        SQLProxy["SQL Proxy"]
+    end
+
+    subgraph AppCVM["App CVM (dstack CVM)"]
+        Boot["Boot: derive keys from KMS"]
+        HM["Hivemind App :8100"]
+        DinD["Docker-in-Docker\n(agent containers)"]
+    end
+
+    KMS["dstack KMS"]
+    S3["S3 / Cloudflare R2"]
+
+    CLI -->|"1. requestDeploy(hash)"| Contract
+    Contract -->|"2. DeployRequested event"| Monitor
+    Monitor --> IPFS
+    Monitor --> Notify
+    Monitor -->|"3. notarize(hash, logCID)"| Contract
+    Contract -->|"4. isAppAllowed?"| KMS
+    KMS -->|"5. Release keys"| Boot
+    Boot --> HM
+    HM -->|"host network"| PG
+    HM --> DinD
+    PG -->|"WAL-G backup"| S3
+</pre>
+
+<hr>
+<h2>6. Security Layers (Defense in Depth)</h2>
+<pre class="mermaid">
+graph TB
+    L0["Layer 0: Encrypted Storage\nLUKS2 disk + TDX RAM encryption"]
+    L1["Layer 1: Simulation + Tape\nScope agent tests query agent, audits LLM calls"]
+    L2["Layer 2: Scope Function Firewall\nPost-query row filtering, fail-closed"]
+    L3["Layer 3: SQL Validation\nsqlglot AST: parse errors surface, non-SELECT blocked"]
+    L4["Layer 4: Budget Enforcement\nHard caps on tokens + LLM calls per query"]
+    L5["Layer 5: Mediator\nLLM output audit, PII redaction via response tags, no tool access"]
+    L6["Layer 6: Notarized Deploys\nIPFS log + blockchain allowlist before keys released"]
+
+    L0 --- L1 --- L2 --- L3 --- L4 --- L5 --- L6
+</pre>
+
+<hr>
+<h2>7. Key Derivation</h2>
+<pre class="mermaid">
+graph TB
+    KMS["Phala KMS (root of trust)"]
+
+    KMS -->|"instance-specific"| DiskKey["disk_crypt_key\nDies with the host"]
+    KMS -->|"app-scoped, portable"| DBKey["db_password\ngetKey('/hivemind/db-password')"]
+    KMS -->|"app-scoped, portable"| BackupKey["backup_key\ngetKey('/hivemind/backup')"]
+    KMS -->|"monitoring TEE only"| NotaryKey["notary_key\ngetKey('/notary/signer')"]
+</pre>
+
+<hr>
+<h2>8. Data Visibility Matrix</h2>
+<table>
+<tr><th>Component</th><th>Sees Data?</th><th>Notes</th></tr>
+<tr><td>Host / Operator</td><td>No</td><td>LUKS disk + TDX RAM = noise</td></tr>
+<tr><td>Postgres (in CVM)</td><td>All</td><td>Plaintext inside CVM, localhost only</td></tr>
+<tr><td>Python app (in CVM)</td><td>All</td><td>Orchestrates agents, routes tools</td></tr>
+<tr><td>Scope Agent</td><td>Read-only, all</td><td>Full DB read + query agent source</td></tr>
+<tr><td>Query Agent</td><td>Filtered only</td><td>Results pass through scope function</td></tr>
+<tr><td>Index Agent</td><td>Read-write</td><td>Full DML, blocked from internal tables</td></tr>
+<tr><td>Mediator</td><td>Output text only</td><td>No data access, filters via <code>&lt;response&gt;</code> tags</td></tr>
+<tr><td>Client</td><td>Mediated output</td><td>Cannot access raw data</td></tr>
+<tr><td>S3 / R2 backup</td><td>No</td><td>WAL encrypted with libsodium</td></tr>
+</table>
+
+<hr>
+<h2>9. Stage Timing (RunStore)</h2>
+<p>Every pipeline execution is tracked in <code>_hivemind_query_runs</code> with per-stage start/end timestamps and final output. Clients poll <code>GET /v1/query-agents/runs/{run_id}</code> to see stage progress and retrieve results.</p>
+<table>
+<tr><th>Column</th><th>Type</th><th>Description</th></tr>
+<tr><td><code>run_id</code></td><td>TEXT PK</td><td>Unique run identifier</td></tr>
+<tr><td><code>agent_id</code></td><td>TEXT</td><td>Query agent that ran</td></tr>
+<tr><td><code>status</code></td><td>TEXT</td><td>pending / running / completed / failed</td></tr>
+<tr><td><code>build_started_at</code> / <code>build_ended_at</code></td><td>FLOAT</td><td>Docker image build</td></tr>
+<tr><td><code>scope_started_at</code> / <code>scope_ended_at</code></td><td>FLOAT</td><td>Scope agent resolution</td></tr>
+<tr><td><code>query_started_at</code> / <code>query_ended_at</code></td><td>FLOAT</td><td>Query agent execution</td></tr>
+<tr><td><code>mediator_started_at</code> / <code>mediator_ended_at</code></td><td>FLOAT</td><td>Mediator processing</td></tr>
+<tr><td><code>output</code></td><td>TEXT</td><td>Final output (truncated to 10k chars)</td></tr>
+</table>
+
+<hr>
+<h2>10. Information Flow: What Data Reaches the LLM</h2>
+<p>This traces exactly what information leaves the TEE boundary (to the LLM provider) at each pipeline stage. Green = data entering a stage. Purple = LLM calls. Blue = tool calls. Orange = data leaving a stage. Red = security enforcement points.</p>
+
+<div id="info-flow-graph" class="graphviz-container"></div>
+
+<h3>Concrete Example Trace</h3>
+<p>Query: <code>"What are the top 5 most active users?"</code></p>
+
+<div class="example-trace">
+<p><span class="stage-label">CLIENT REQUEST</span><br>
+<span class="data-in">POST /v1/query-agents/submit {archive: agent.tar.gz}</span><br>
+<span class="data-out">&larr; {run_id: "abc123", agent_id: "xyz", status: "pending"}</span></p>
+
+<p><span class="stage-label">STAGE 0: BUILD</span> (background task)<br>
+<span class="data-in">Extract archive, build Docker image</span><br>
+<span class="data-out">RunStore: build_started_at, build_ended_at recorded</span></p>
+
+<p><span class="stage-label">STAGE 1: SCOPE AGENT</span> (Docker container, FULL_READ access)<br>
+<span class="data-in">Container env vars:</span> QUERY_PROMPT="What are the top 5 most active users?", QUERY_AGENT_ID="default-query"<br>
+<span class="llm-call">LLM call #1 (via Bridge &rarr; OpenRouter &rarr; Claude):</span><br>
+&nbsp;&nbsp;system: <em>"You are a scope agent. Your job is to write a Python scope function that acts as a query firewall..."</em><br>
+&nbsp;&nbsp;user: <em>"Determine scope for this query: What are the top 5 most active users?"</em><br>
+<span class="tool-call">Tool calls (via Bridge &rarr; Host process):</span><br>
+&nbsp;&nbsp;get_schema &rarr; returns full table/column/type definitions<br>
+&nbsp;&nbsp;execute_sql("SELECT * FROM users LIMIT 5") &rarr; <strong>returns raw unfiltered rows</strong> (scope agent has FULL_READ)<br>
+&nbsp;&nbsp;list_query_agent_files &rarr; returns ["agent.py"]<br>
+&nbsp;&nbsp;read_query_agent_file("agent.py") &rarr; returns full query agent source code<br>
+<span class="llm-call">LLM call #2-N:</span> multi-turn conversation incorporating tool results. <strong>Raw DB rows + schema + agent source are sent to the LLM.</strong><br>
+&nbsp;&nbsp;simulate_query(scope_fn_source="def scope(sql, params, rows): ...") &rarr; runs nested query agent<br>
+<span class="data-out">Output:</span> {"scope_fn": "def scope(sql, params, rows):\n  return {'allow': True, 'rows': [redact(r) for r in rows]}"}<br>
+<span class="security">Host validates:</span> AST-check (no imports/exec/eval/dunders) &rarr; compile in restricted namespace</p>
+
+<p><span class="stage-label">STAGE 2: QUERY AGENT</span> (new Docker container, SCOPED access)<br>
+<span class="data-in">Container env vars:</span> QUERY_PROMPT="What are the top 5 most active users?"<br>
+<span class="llm-call">LLM call #1 (via Bridge &rarr; LLM):</span><br>
+&nbsp;&nbsp;system: <em>"You are a query agent with access to a database via SQL tools..."</em><br>
+&nbsp;&nbsp;user: <em>"What are the top 5 most active users?"</em><br>
+<span class="tool-call">Tool calls (via Bridge &rarr; Host):</span><br>
+&nbsp;&nbsp;get_schema &rarr; returns schema<br>
+&nbsp;&nbsp;execute_sql("SELECT username, COUNT(*) as activity FROM events GROUP BY username ORDER BY activity DESC LIMIT 5")<br>
+&nbsp;&nbsp;&nbsp;&nbsp;<span class="security">&rarr; sqlglot validates: must be SELECT, parse errors surfaced &rarr; scope_fn(sql, params, rows) &rarr; filtered rows returned to agent</span><br>
+<span class="llm-call">LLM call #2-N:</span> multi-turn with <strong>filtered</strong> query results. <strong>Only scope-approved data reaches the LLM.</strong><br>
+<span class="data-out">Output:</span> "The top 5 most active users are: User A (1,203 events), User B (987 events)..."</p>
+
+<p><span class="stage-label">STAGE 3: MEDIATOR</span> (new Docker container, NO data access)<br>
+<span class="data-in">Container env vars:</span> RAW_OUTPUT="The top 5 most active users are...", QUERY_PROMPT="What are the top 5 most active users?"<br>
+<span class="llm-call">LLM call #1 (via Bridge &rarr; LLM):</span><br>
+&nbsp;&nbsp;system: <em>"PRIVACY GATE. You are a strict output mediator... Wrap final response in &lt;response&gt; tags..."</em><br>
+&nbsp;&nbsp;user: <em>"QUERY_PROMPT:\nWhat are the top 5 most active users?\n\nRESPONSE TO AUDIT:\nThe top 5 most active users are..."</em><br>
+<span class="tool-call">No tools available.</span><br>
+<span class="security">Post-processing: extract content from &lt;response&gt; tags, strip reasoning preamble</span><br>
+<span class="data-out">Output:</span> "The top 5 most active accounts had between 650 and 1,200 events."</p>
+
+<p><span class="stage-label">CLIENT POLLS</span><br>
+<span class="data-in">GET /v1/query-agents/runs/abc123</span><br>
+<span class="data-out">{output: "The top 5 most active accounts had between 650 and 1,200 events.", status: "completed", build: 2.1s, scope: 8.3s, query: 12.1s, mediator: 3.4s}</span></p>
+</div>
+
+<h3>What Crosses the TEE Boundary (to LLM Provider)</h3>
+<table>
+<tr><th>Stage</th><th>System Prompt</th><th>User Data Sent to LLM</th><th>DB Data Sent to LLM</th><th>Code Sent to LLM</th></tr>
+<tr><td>Scope</td><td>Scope function authoring instructions</td><td>Original query text</td><td><strong>Raw unfiltered rows</strong> + full schema</td><td>Query agent source code</td></tr>
+<tr><td>Query</td><td>SQL query + synthesis instructions</td><td>Original query text</td><td><strong>Scope-filtered rows only</strong> + schema</td><td>None</td></tr>
+<tr><td>Mediator</td><td>Privacy redaction policy</td><td>Original query + query agent's answer</td><td>None (no DB access)</td><td>None</td></tr>
+<tr><td>Index</td><td>Document indexing instructions</td><td>Document content (first 20KB)</td><td>Existing rows (for consistency) + schema</td><td>None</td></tr>
+</table>
+
+<h3>Information Flow for /v1/index</h3>
+<div id="index-flow-graph" class="graphviz-container"></div>
+
+<script>
+mermaid.initialize({ theme: 'dark', startOnLoad: true });
+
+// Render Graphviz diagrams
+Viz.instance().then(viz => {
+
+  // Main query pipeline information flow
+  const queryDot = `
+digraph info_flow {
+  bgcolor="transparent"
+  rankdir=TB
+  node [fontname="Helvetica" fontsize=11 fontcolor="#c9d1d9"]
+  edge [fontname="Helvetica" fontsize=9 fontcolor="#8b949e" color="#484f58"]
+
+  node [style="filled,rounded" shape=box]
+
+  client [label="Client" fillcolor="#1f6feb" fontcolor="white"]
+
+  subgraph cluster_tee {
+    label="TEE Boundary (dstack CVM)" style=dashed color="#30363d" fontcolor="#8b949e"
+    fontname="Helvetica"
+
+    subgraph cluster_host {
+      label="Host Process" style=filled color="#21262d" fillcolor="#21262d" fontcolor="#8b949e"
+      fontname="Helvetica"
+
+      api [label="FastAPI\\n/v1/query-agents/submit" fillcolor="#238636" fontcolor="white"]
+      pipeline [label="Pipeline\\nOrchestrator" fillcolor="#238636" fontcolor="white"]
+      runstore [label="RunStore\\n(stage timing)" fillcolor="#238636" fontcolor="white"]
+      scope_compile [label="AST Validate\\n+ Compile\\nscope_fn" fillcolor="#da3633" fontcolor="white"]
+      scope_filter [label="scope_fn()\\nRow Filter" fillcolor="#da3633" fontcolor="white"]
+      sql_validate [label="sqlglot\\nSQL Validation" fillcolor="#da3633" fontcolor="white"]
+
+      subgraph cluster_bridge0 {
+        label="Bridge 0 (scope)" style=filled color="#1c2333" fillcolor="#1c2333" fontcolor="#8b949e"
+        fontname="Helvetica"
+        b0_llm [label="LLM Proxy\\n(budget + tape)" fillcolor="#8957e5" fontcolor="white"]
+        b0_tools [label="Tool Dispatch\\n(FULL_READ)" fillcolor="#1f6feb" fontcolor="white"]
+      }
+
+      subgraph cluster_bridge1 {
+        label="Bridge 1 (query)" style=filled color="#1c2333" fillcolor="#1c2333" fontcolor="#8b949e"
+        fontname="Helvetica"
+        b1_llm [label="LLM Proxy\\n(budget + tape)" fillcolor="#8957e5" fontcolor="white"]
+        b1_tools [label="Tool Dispatch\\n(SCOPED)" fillcolor="#1f6feb" fontcolor="white"]
+      }
+
+      subgraph cluster_bridge2 {
+        label="Bridge 2 (mediator)" style=filled color="#1c2333" fillcolor="#1c2333" fontcolor="#8b949e"
+        fontname="Helvetica"
+        b2_llm [label="LLM Proxy\\n(budget + tape)" fillcolor="#8957e5" fontcolor="white"]
+      }
+
+      pg [label="Postgres" fillcolor="#f0883e" fontcolor="white" shape=cylinder]
+    }
+
+    subgraph cluster_dind {
+      label="Docker-in-Docker Sandbox (iptables isolated)" style=filled color="#1c1c1c" fillcolor="#161b22" fontcolor="#8b949e"
+      fontname="Helvetica"
+
+      build [label="Docker Build\\n(from archive)" fillcolor="#484f58" fontcolor="white"]
+      scope_agent [label="Scope Agent\\nContainer" fillcolor="#2ea043" fontcolor="white"]
+      query_agent [label="Query Agent\\nContainer" fillcolor="#2ea043" fontcolor="white"]
+      mediator_agent [label="Mediator\\nContainer" fillcolor="#2ea043" fontcolor="white"]
+    }
+  }
+
+  llm [label="LLM Provider\\n(OpenRouter / Venice / Anthropic)" fillcolor="#8957e5" fontcolor="white" shape=box3d]
+
+  client -> api [label="agent archive\\n+ query text" color="#7ee787" fontcolor="#7ee787"]
+  api -> runstore [label="create run\\n(status=pending)" color="#484f58"]
+  api -> build [label="extract + build" color="#484f58" style=dashed]
+  api -> pipeline [label="background task" color="#484f58"]
+  pipeline -> runstore [label="stage timing\\nupdates" color="#484f58"]
+
+  pipeline -> scope_agent [label="env: QUERY_PROMPT\\nQUERY_AGENT_ID" color="#7ee787" fontcolor="#7ee787" style=dashed]
+  scope_agent -> b0_llm [label="system prompt +\\nquery text +\\ntool results" color="#d2a8ff" fontcolor="#d2a8ff"]
+  b0_llm -> llm [label="messages[]\\n(raw rows, schema,\\nagent source code)" color="#d2a8ff" fontcolor="#d2a8ff" style=bold]
+  llm -> b0_llm [label="completion\\n+ tool_calls" color="#d2a8ff" fontcolor="#d2a8ff" style=bold]
+  scope_agent -> b0_tools [label="get_schema\\nexecute_sql\\nlist/read agent files" color="#79c0ff" fontcolor="#79c0ff"]
+  b0_tools -> pg [label="SELECT *\\n(unfiltered)" color="#f0883e" fontcolor="#f0883e"]
+  pg -> b0_tools [label="raw rows" color="#f0883e" fontcolor="#f0883e"]
+  scope_agent -> pipeline [label="scope_fn JSON" color="#f0883e" fontcolor="#f0883e" style=dashed]
+
+  pipeline -> scope_compile [label="scope_fn source" color="#f85149" fontcolor="#f85149"]
+  scope_compile -> pipeline [label="compiled callable" color="#f85149" fontcolor="#f85149"]
+
+  pipeline -> query_agent [label="env: QUERY_PROMPT" color="#7ee787" fontcolor="#7ee787" style=dashed]
+  query_agent -> b1_llm [label="system prompt +\\nquery text +\\nfiltered results" color="#d2a8ff" fontcolor="#d2a8ff"]
+  b1_llm -> llm [label="messages[]\\n(FILTERED rows\\n+ schema only)" color="#d2a8ff" fontcolor="#d2a8ff" style=bold]
+  llm -> b1_llm [label="completion" color="#d2a8ff" fontcolor="#d2a8ff" style=bold]
+  query_agent -> b1_tools [label="get_schema\\nexecute_sql" color="#79c0ff" fontcolor="#79c0ff"]
+  b1_tools -> sql_validate [label="SQL text" color="#f85149" fontcolor="#f85149"]
+  sql_validate -> b1_tools [label="parse ok / error" color="#f85149" fontcolor="#f85149"]
+  b1_tools -> pg [label="SELECT ..." color="#f0883e" fontcolor="#f0883e"]
+  pg -> b1_tools [label="raw rows" color="#f0883e" fontcolor="#f0883e"]
+  b1_tools -> scope_filter [label="raw rows" color="#f85149" fontcolor="#f85149"]
+  scope_filter -> b1_tools [label="filtered rows" color="#f85149" fontcolor="#f85149"]
+  query_agent -> pipeline [label="answer text" color="#f0883e" fontcolor="#f0883e" style=dashed]
+
+  pipeline -> mediator_agent [label="env: RAW_OUTPUT\\n+ QUERY_PROMPT" color="#7ee787" fontcolor="#7ee787" style=dashed]
+  mediator_agent -> b2_llm [label="system prompt +\\nquery + answer text" color="#d2a8ff" fontcolor="#d2a8ff"]
+  b2_llm -> llm [label="messages[]\\n(answer text only,\\nno DB data)" color="#d2a8ff" fontcolor="#d2a8ff" style=bold]
+  llm -> b2_llm [label="completion\\n(in response tags)" color="#d2a8ff" fontcolor="#d2a8ff" style=bold]
+  mediator_agent -> pipeline [label="sanitized text\\n(tags stripped)" color="#f0883e" fontcolor="#f0883e" style=dashed]
+
+  pipeline -> runstore [label="status=completed\\noutput text" color="#484f58"]
+  pipeline -> api [label="QueryResponse" color="#484f58"]
+  api -> client [label="poll: run status\\n+ stage timings\\n+ output" color="#f0883e" fontcolor="#f0883e"]
+
+  {rank=same; scope_agent; query_agent; mediator_agent}
+  {rank=same; b0_llm; b1_llm; b2_llm}
+}
+`;
+
+  const indexDot = `
+digraph index_flow {
+  bgcolor="transparent"
+  rankdir=LR
+  node [fontname="Helvetica" fontsize=11 fontcolor="#c9d1d9" style="filled,rounded" shape=box]
+  edge [fontname="Helvetica" fontsize=9 fontcolor="#8b949e" color="#484f58"]
+
+  client [label="Client" fillcolor="#1f6feb" fontcolor="white"]
+  api [label="/v1/index" fillcolor="#238636" fontcolor="white"]
+  index_agent [label="Index Agent\\nContainer" fillcolor="#2ea043" fontcolor="white"]
+  bridge [label="Bridge\\n(FULL_READWRITE)" fillcolor="#1f6feb" fontcolor="white"]
+  llm [label="LLM Provider" fillcolor="#8957e5" fontcolor="white" shape=box3d]
+  pg [label="Postgres" fillcolor="#f0883e" fontcolor="white" shape=cylinder]
+
+  client -> api [label="document_data\\n+ metadata JSON" color="#7ee787" fontcolor="#7ee787"]
+  api -> index_agent [label="env: DOCUMENT_DATA\\nDOCUMENT_METADATA" color="#7ee787" fontcolor="#7ee787"]
+  index_agent -> bridge [label="system prompt +\\ndocument (20KB max)" color="#d2a8ff" fontcolor="#d2a8ff"]
+  bridge -> llm [label="messages[]\\n(document content\\n+ tool results)" color="#d2a8ff" fontcolor="#d2a8ff" style=bold]
+  llm -> bridge [label="completion" color="#d2a8ff" fontcolor="#d2a8ff" style=bold]
+  index_agent -> bridge [label="execute_sql\\nget_schema" color="#79c0ff" fontcolor="#79c0ff"]
+  bridge -> pg [label="full DML\\n(CREATE, INSERT, SELECT)" color="#f0883e" fontcolor="#f0883e"]
+  pg -> bridge [label="rows" color="#f0883e" fontcolor="#f0883e"]
+  index_agent -> api [label="index_text + metadata" color="#f0883e" fontcolor="#f0883e"]
+  api -> client [label="IndexResponse" color="#f0883e" fontcolor="#f0883e"]
+}
+`;
+
+  const el1 = document.getElementById('info-flow-graph');
+  try {
+    const svg1 = viz.renderSVGElement(queryDot);
+    el1.appendChild(svg1);
+  } catch(e) {
+    el1.innerHTML = '<pre style="color:#f85149">Graphviz render error: ' + e.message + '</pre>';
+  }
+
+  const el2 = document.getElementById('index-flow-graph');
+  try {
+    const svg2 = viz.renderSVGElement(indexDot);
+    el2.appendChild(svg2);
+  } catch(e) {
+    el2.innerHTML = '<pre style="color:#f85149">Graphviz render error: ' + e.message + '</pre>';
+  }
+});
+</script>
+</body>
+</html>

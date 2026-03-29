@@ -42,7 +42,7 @@ class TestDatabaseInit:
         # Internal tables should exist after Database.__init__
         rows = pg_db.execute(
             "SELECT table_name FROM information_schema.tables "
-            "WHERE table_schema = 'public' AND table_name LIKE '_hivemind_%'"
+            "WHERE table_schema = 'public' AND table_name LIKE '_hivemind_%%'"
         )
         table_names = {r["table_name"] for r in rows}
         assert "_hivemind_agents" in table_names
@@ -100,7 +100,7 @@ class TestDefaultAgentAutoload:
                 calls.append(image)
                 return {"agent.py": f"# {image}"}
 
-        monkeypatch.setattr("hivemind.core.DockerRunner", FakeRunner)
+        monkeypatch.setattr("hivemind.core._create_runner", lambda settings: FakeRunner(settings))
 
         settings = Settings(
             database_url=test_dsn,
@@ -130,6 +130,8 @@ class TestDefaultAgentAutoload:
             assert len(hm.agent_store.list_file_paths("default-scope")) == 1
             assert len(hm.agent_store.list_file_paths("default-query")) == 1
         finally:
+            for aid in ("default-index", "default-scope", "default-query"):
+                hm.agent_store.delete(aid)
             hm.db.close()
 
     def test_autoload_disabled_does_not_register(self, monkeypatch):
@@ -138,7 +140,7 @@ class TestDefaultAgentAutoload:
             pytest.skip("HIVEMIND_TEST_DATABASE_URL not set")
 
         runner = MagicMock()
-        monkeypatch.setattr("hivemind.core.DockerRunner", runner)
+        monkeypatch.setattr("hivemind.core._create_runner", lambda settings: runner)
 
         settings = Settings(
             database_url=test_dsn,

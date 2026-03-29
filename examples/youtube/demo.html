@@ -1,0 +1,310 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>hivemind-core: Query Pipeline Trace</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: 'SF Mono', 'Fira Code', monospace; background: #0a0a0a; color: #e0e0e0; padding: 40px; line-height: 1.5; }
+  h1 { font-size: 1.4em; color: #fff; margin-bottom: 8px; }
+  .subtitle { color: #666; font-size: 0.85em; margin-bottom: 40px; }
+  .pipeline { display: flex; flex-direction: column; gap: 0; max-width: 860px; margin: 0 auto; }
+
+  .stage { border: 1px solid #222; border-radius: 8px; padding: 20px; position: relative; }
+  .stage-header { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; flex-wrap: wrap; }
+  .stage-num { background: #222; color: #888; font-size: 0.7em; padding: 2px 8px; border-radius: 4px; }
+  .stage-name { font-weight: bold; font-size: 0.95em; }
+  .stage-meta { color: #555; font-size: 0.65em; margin-left: auto; font-variant-numeric: tabular-nums; }
+
+  .content { font-size: 0.8em; }
+  .label { color: #666; font-size: 0.7em; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 4px; margin-top: 12px; }
+  .label:first-child { margin-top: 0; }
+  pre { background: #111; border: 1px solid #1a1a1a; border-radius: 4px; padding: 12px; overflow-x: auto; font-size: 0.85em; margin-top: 4px; white-space: pre-wrap; }
+  .arrow { text-align: center; color: #333; font-size: 1.4em; padding: 6px 0; }
+  .arrow-label { color: #444; font-size: 0.6em; font-family: inherit; }
+
+  .scope { border-color: #2a1a00; }
+  .scope .stage-name { color: #f0a030; }
+  .scope pre { border-color: #2a1a00; }
+
+  .query { border-color: #001a2a; }
+  .query .stage-name { color: #30a0f0; }
+  .query pre { border-color: #001a2a; }
+
+  .mediator { border-color: #1a002a; }
+  .mediator .stage-name { color: #a030f0; }
+  .mediator pre { border-color: #1a002a; }
+
+  .user-input { border-color: #0a2a0a; }
+  .user-input .stage-name { color: #30f060; }
+
+  .allowed { color: #40f080; }
+  .blocked { color: #f04040; }
+
+  .data-flow { display: flex; gap: 8px; align-items: flex-start; margin-top: 8px; }
+  .data-flow .col { flex: 1; }
+  .vs { color: #333; align-self: center; font-size: 0.8em; padding-top: 20px; }
+  .highlight { background: #1a2a1a; border-color: #2a4a2a !important; }
+  .dim { opacity: 0.5; }
+
+  .tee-badge { display: inline-block; background: #1a1a2a; border: 1px solid #2a2a4a; color: #8080f0; font-size: 0.6em; padding: 2px 6px; border-radius: 3px; margin-left: 8px; }
+  .note { color: #555; font-size: 0.75em; font-style: italic; margin-top: 6px; }
+
+  .trace { display: flex; gap: 12px; font-size: 0.65em; color: #555; margin-top: 8px; flex-wrap: wrap; }
+  .trace span { background: #151515; padding: 2px 6px; border-radius: 3px; }
+  .trace .t-time { color: #888; }
+  .trace .t-tokens { color: #8080f0; }
+  .trace .t-calls { color: #f0a030; }
+  .trace .t-container { color: #40f080; }
+
+  .timeline { max-width: 860px; margin: 30px auto; }
+  .timeline h2 { font-size: 0.85em; color: #888; margin-bottom: 12px; }
+  .tl-row { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; font-size: 0.7em; }
+  .tl-label { width: 80px; text-align: right; color: #666; }
+  .tl-bar-wrap { flex: 1; height: 20px; background: #111; border-radius: 3px; position: relative; }
+  .tl-bar { height: 100%; border-radius: 3px; position: absolute; display: flex; align-items: center; padding-left: 6px; font-size: 0.85em; color: rgba(255,255,255,0.7); }
+  .tl-ts { width: 60px; color: #444; font-variant-numeric: tabular-nums; }
+</style>
+</head>
+<body>
+
+<h1>hivemind-core query pipeline trace</h1>
+<div class="subtitle">
+  real query from production TEE · 2026-03-27 21:11:46 UTC
+  <span class="tee-badge">Intel TDX on Phala Cloud</span>
+</div>
+
+<div class="pipeline">
+
+  <!-- USER INPUT -->
+  <div class="stage user-input">
+    <div class="stage-header">
+      <span class="stage-num">INPUT</span>
+      <span class="stage-name">User Query</span>
+      <span class="stage-meta">21:11:46 UTC</span>
+    </div>
+    <div class="content">
+      <pre>POST /v1/query
+{
+  "query": "What time of day do I watch the most?"
+}</pre>
+    </div>
+  </div>
+
+  <div class="arrow">↓ <span class="arrow-label">query text + schema → scope agent container</span></div>
+
+  <!-- SCOPE AGENT -->
+  <div class="stage scope">
+    <div class="stage-header">
+      <span class="stage-num">STAGE 1</span>
+      <span class="stage-name">Scope Agent</span>
+      <span class="stage-meta">8s · container 2ec6c399</span>
+    </div>
+    <div class="content">
+      <div class="trace">
+        <span class="t-container">bridge :45787</span>
+        <span class="t-calls">1 LLM call</span>
+        <span class="t-tokens">977 tokens (625 prompt + 352 completion)</span>
+        <span class="t-time">21:11:46 → 21:11:54</span>
+      </div>
+
+      <div class="label">Input: schema + query + system prompt</div>
+      <pre>System: "Write a Python scope function for a privacy-preserving database.
+  Protect individual privacy while allowing aggregate insights.
+  Allow GROUP BY / COUNT / AVG queries freely.
+  For raw row queries, require at least 5 rows (k-anonymity).
+  Redact columns that could identify individuals."
+
+User: "Schema: watch_history (id, video_id, title, url, is_short, views, watched_at)
+  Query: What time of day do I watch the most?"</pre>
+
+      <div class="label">LLM → OpenRouter → claude-sonnet-4.5 → response</div>
+      <div class="label">Output: scope function (AST-validated, compiled in-process)</div>
+      <pre style="color: #f0a030;">def scope(sql, params, rows):
+    sql_upper = sql.upper()
+    is_aggregate = any(kw in sql_upper for kw in
+        ['COUNT(', 'SUM(', 'AVG(', 'GROUP BY', 'MIN(', 'MAX('])
+
+    if is_aggregate:
+        safe = []
+        for r in rows:
+            s = dict(r)
+            for k in ['video_id', 'title', 'url', 'watched_at']:
+                if k in s:
+                    s[k] = '[REDACTED]'
+            safe.append(s)
+        return {'allow': True, 'rows': safe}
+
+    if len(rows) < 5:
+        return {'allow': False, 'error': 'Too few rows, query too specific'}
+
+    safe = []
+    for r in rows:
+        s = dict(r)
+        for k in ['video_id', 'title', 'url']:
+            if k in s:
+                s[k] = '[REDACTED]'
+        safe.append(s)
+    return {'allow': True, 'rows': safe}</pre>
+      <div class="note">AST-validated: no imports, no exec/eval, no __dunder__, no open/input. Compiled and installed as the SQL result filter.</div>
+    </div>
+  </div>
+
+  <div class="arrow">↓ <span class="arrow-label">compiled scope_fn installed · new container for query agent</span></div>
+
+  <!-- QUERY AGENT -->
+  <div class="stage query">
+    <div class="stage-header">
+      <span class="stage-num">STAGE 2</span>
+      <span class="stage-name">Query Agent</span>
+      <span class="stage-meta">5s · container 9761a916</span>
+    </div>
+    <div class="content">
+      <div class="trace">
+        <span class="t-container">bridge :35167</span>
+        <span class="t-calls">2 LLM calls</span>
+        <span class="t-tokens">626 tokens (506 prompt + 120 completion)</span>
+        <span class="t-time">21:11:54 → 21:11:59</span>
+      </div>
+
+      <div class="label">LLM call #1: "write SQL to answer this question"</div>
+      <pre style="color: #30a0f0;">SELECT EXTRACT(HOUR FROM watched_at) AS hour, COUNT(*) AS count
+FROM watch_history
+GROUP BY EXTRACT(HOUR FROM watched_at)
+ORDER BY count DESC</pre>
+
+      <div class="label">SQL executes → full results from Postgres → scope_fn filters</div>
+      <div class="data-flow">
+        <div class="col">
+          <div class="label">Raw from Postgres (24 rows)</div>
+          <pre class="dim">hour | count
+-----+------
+  5  | 896
+  6  | 48
+  4  | 37
+  7  | 25
+  3  | 18
+ ... | ...
+(all hours, real timestamps)</pre>
+        </div>
+        <div class="vs">→ scope() →</div>
+        <div class="col">
+          <div class="label">After scope filter</div>
+          <pre class="highlight">hour | count
+-----+------
+  5  | 896
+  6  | 48
+  4  | 37
+  7  | 25
+  3  | 18
+ ... | ...
+<span class="allowed">✓ ALLOWED (GROUP BY detected)</span>
+watched_at column redacted but
+not present in aggregate output</pre>
+        </div>
+      </div>
+
+      <div class="label">LLM call #2: synthesize answer from filtered data</div>
+      <pre>Based on your viewing data, you watch the most at
+5 AM (or 5:00 in 24-hour format), with 896 videos
+watched during that hour.</pre>
+    </div>
+  </div>
+
+  <div class="arrow">↓ <span class="arrow-label">raw answer text → mediator container (no DB access)</span></div>
+
+  <!-- MEDIATOR -->
+  <div class="stage mediator">
+    <div class="stage-header">
+      <span class="stage-num">STAGE 3</span>
+      <span class="stage-name">Mediator</span>
+      <span class="stage-meta">4s · container 1fc66edc</span>
+    </div>
+    <div class="content">
+      <div class="trace">
+        <span class="t-container">bridge :45509</span>
+        <span class="t-calls">1 LLM call</span>
+        <span class="t-tokens">163 tokens (120 prompt + 43 completion)</span>
+        <span class="t-time">21:11:59 → 21:12:03</span>
+      </div>
+
+      <div class="label">Input: raw answer + original query (no DB access, no tools)</div>
+      <pre>System: "You are a privacy gate. Strip names, usernames,
+  exact video titles or URLs, exact timestamps, any PII."
+
+User: "Query: What time of day do I watch the most?
+  Response to audit: Based on your viewing data, you watch
+  the most at 5 AM, with 896 videos watched during that hour."</pre>
+
+      <div class="label">LLM audit result</div>
+      <pre><span class="allowed">✓ No PII detected — response passed unchanged</span>
+  No names, usernames, handles
+  No video titles or URLs
+  No exact timestamps (hour-level is aggregate)
+  No identifying information</pre>
+    </div>
+  </div>
+
+  <div class="arrow">↓</div>
+
+  <!-- OUTPUT -->
+  <div class="stage user-input">
+    <div class="stage-header">
+      <span class="stage-num">OUTPUT</span>
+      <span class="stage-name">Final Response</span>
+      <span class="stage-meta">21:12:03 UTC · 17s total</span>
+    </div>
+    <div class="content">
+      <pre>{
+  "output": "Based on your viewing data, you watch the most at 5 AM,
+             with 896 videos watched during that hour.",
+  "mediated": true,
+  "usage": { "total_tokens": 1766, "max_tokens": 200000 }
+}</pre>
+    </div>
+  </div>
+</div>
+
+<!-- TIMELINE -->
+<div class="timeline">
+  <h2>wall-clock timeline</h2>
+  <div class="tl-row">
+    <span class="tl-label" style="color:#f0a030">scope</span>
+    <div class="tl-bar-wrap">
+      <div class="tl-bar" style="left:0%; width:47%; background:rgba(240,160,48,0.25); border:1px solid rgba(240,160,48,0.4);">8s · 977 tok · 1 call</div>
+    </div>
+  </div>
+  <div class="tl-row">
+    <span class="tl-label" style="color:#30a0f0">query</span>
+    <div class="tl-bar-wrap">
+      <div class="tl-bar" style="left:47%; width:29%; background:rgba(48,160,240,0.25); border:1px solid rgba(48,160,240,0.4);">5s · 626 tok · 2 calls</div>
+    </div>
+  </div>
+  <div class="tl-row">
+    <span class="tl-label" style="color:#160,48,240">mediator</span>
+    <div class="tl-bar-wrap">
+      <div class="tl-bar" style="left:76%; width:24%; background:rgba(160,48,240,0.25); border:1px solid rgba(160,48,240,0.4);">4s · 163 tok · 1 call</div>
+    </div>
+  </div>
+  <div class="tl-row">
+    <span class="tl-label" style="color:#666">total</span>
+    <div class="tl-bar-wrap">
+      <div class="tl-bar" style="left:0%; width:100%; background:rgba(255,255,255,0.03); border:1px solid rgba(255,255,255,0.1);">17s · 1,766 tokens · 4 LLM calls · 0.9% of budget</div>
+    </div>
+  </div>
+</div>
+
+<!-- GUARANTEES -->
+<div style="max-width: 860px; margin: 20px auto; padding: 20px; border: 1px solid #1a1a1a; border-radius: 8px; font-size: 0.75em; color: #555;">
+  <strong style="color: #888;">What's actually enforced vs. best-effort?</strong><br><br>
+  <span class="allowed">&#9632;</span> <strong>Hard:</strong> Scope function runs server-side, AST-validated. Query agent literally cannot see unfiltered rows.<br>
+  <span class="allowed">&#9632;</span> <strong>Hard:</strong> Each agent runs in a separate Docker container. Bridge-only egress. Cannot reach Postgres or internet directly.<br>
+  <span class="allowed">&#9632;</span> <strong>Hard:</strong> Budget enforced server-side. 4/50 calls used. Agent cannot exceed 200K tokens.<br>
+  <span style="color: #f0a030;">&#9632;</span> <strong>Soft:</strong> Scope function quality depends on LLM. Here it wrote a reasonable k-anonymity + redaction policy.<br>
+  <span style="color: #f0a030;">&#9632;</span> <strong>Soft:</strong> Mediator PII check is LLM-based. Could miss subtle leaks.<br>
+  <span class="blocked">&#9632;</span> <strong>Not enforced:</strong> On-chain deploy verification (skipped for dev). No AppAuth contract deployed.
+</div>
+
+</body>
+</html>

@@ -1,7 +1,7 @@
 # Hivemind-Core Architecture
 
 Privacy-preserving Postgres inside a TEE. Users write raw SQL. Reads go through
-sandboxed agents. Nobody — including the operator — sees individual rows.
+sandboxed agents. Nobody -- including the operator -- sees individual rows.
 Only agent-mediated, scope-constrained, mediator-audited answers leave.
 
 Runs inside a dstack Confidential VM. Postgres is plaintext inside the CVM.
@@ -10,569 +10,338 @@ No application-level encryption. No record abstraction. Just Postgres.
 
 ---
 
-## Core Idea
+## 1. System Overview
 
-Hivemind-core is a **forkable base** for privacy-preserving apps. You fork it,
-define your own Postgres schema, deploy to a TEE, and get:
+```mermaid
+graph TB
+    Client["Client Application"]
 
-- **Write**: raw SQL (INSERT, CREATE TABLE, ALTER — whatever the app needs)
-- **Read**: only through uploaded agents running in sandboxes
-- **Agent-mediated access**: scope agent constrains what the query agent sees,
-  mediator agent audits what leaves
+    subgraph CVM["dstack Confidential VM (Intel TDX)"]
+        direction TB
+        subgraph App["Hivemind Application"]
+            API["FastAPI Server :8100"]
+            Pipeline["Pipeline Orchestrator"]
+            RunStore["RunStore<br/>(stage timing, output)"]
+            Tools["SQL Tools + Scope Engine"]
+        end
 
-The app defines the schema. Hivemind-core protects the data.
+        subgraph DinD["Docker-in-Docker"]
+            Sandbox["Docker Sandbox Network (internal)"]
+            Bridge["Bridge Server<br/>(ephemeral, per-agent)"]
+            Agents["Agent Containers<br/>(scope / query / index / mediator)"]
+        end
 
----
+        Postgres["Postgres 16"]
+        WALG["WAL-G Archiver"]
+    end
 
-## Four APIs
+    LLM["LLM Provider<br/>(OpenRouter / Venice / Anthropic)"]
+    S3["S3-compatible Storage<br/>(Cloudflare R2 / AWS)"]
+    KMS["dstack KMS<br/>(Key Derivation)"]
 
-```
-POST /v1/store     Raw SQL writes. App-defined schema.
-POST /v1/query     Query agent + scope agent → sandboxed pipeline → answer.
-POST /v1/index     Index agent processes document data → structured index.
-GET  /v1/health    Status, table count, version.
-```
-
-### Store
-
-Direct SQL execution against Postgres. The app is responsible for schema design.
-Auth is per-app (API key). No abstraction layer.
-
-```
-POST /v1/store {
-  "sql": "INSERT INTO watch_history (user_id, title, watched_at) VALUES (%s, %s, %s)",
-  "params": ["u123", "Charli dance tutorial", "2025-01-15T02:30:00Z"]
-}
-```
-
-### Query
-
-The core privacy mechanism. User submits a question + agent IDs. The pipeline:
-
-```
-  Client
-    │
-    │  POST /v1/query {
-    │    "query": "What are the trending topics this week?",
-    │    "query_agent_id": "analytics-v1",
-    │    "scope_agent_id": "aggregate-only"
-    │  }
-    │
-    ▼
-  Pipeline (scope → query → mediate)
-    │
-    ▼
-  Response: { "output": "Dance challenges are trending...", "mediated": true }
+    Client -->|"REST API"| API
+    API --> Pipeline
+    Pipeline --> RunStore
+    Pipeline --> Tools
+    Pipeline --> Bridge
+    Bridge -->|"LLM Proxy"| LLM
+    Bridge -->|"Tool Calls"| Tools
+    Tools --> Postgres
+    Agents -->|"only exit point"| Bridge
+    WALG --> S3
+    KMS -.->|"DB password + backup key"| App
 ```
 
 ---
 
-## The Query Protocol
+## 2. Query Pipeline (Multi-Stage with Async Tracking)
 
-Four phases:
+Clients submit agent archives via `/v1/query-agents/submit`. The server
+returns a `run_id` immediately. Build + pipeline stages execute in the
+background. Clients poll `/v1/query-agents/runs/{run_id}` for progress.
 
-```
-┌──────────┐          ┌──────────┐          ┌──────────┐          ┌──────────┐
-│  SCOPE   │ ──────►  │ SIMULATE │ ──────►  │  QUERY   │ ──────►  │ MEDIATOR │
-│  AGENT   │  scope   │ (optional)│  audit   │  AGENT   │  output  │  AGENT   │
-│          │  fn      │          │          │          │  text    │          │
-│ "what    │          │ "test    │          │ "answer  │          │ "is this │
-│  can be  │          │  the     │          │  the     │          │  safe to │
-│  seen?"  │          │  agent"  │          │  query"  │          │  return?"│
-└──────────┘          └──────────┘          └──────────┘          └──────────┘
-```
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant API as FastAPI
+    participant P as Pipeline
+    participant RS as RunStore
+    participant S as Scope Agent
+    participant Q as Query Agent
+    participant M as Mediator Agent
+    participant DB as Postgres
+    participant LLM as LLM Provider
 
-### Phase 1: Scope Resolution
+    C->>API: POST /v1/query-agents/submit (archive)
+    API->>RS: create run (status=pending)
+    API-->>C: {run_id, agent_id, status: pending}
 
-The scope agent runs in a sandbox with **full read-only access** to the database
-plus the query agent's source code. Its job: produce a **scope function** that
-acts as a query firewall for all SQL the query agent executes.
+    rect rgb(50, 50, 60)
+        Note over API,P: Stage 0 -- Build (background)
+        API->>RS: update_stage(build, started)
+        API->>API: Extract archive, build Docker image
+        API->>RS: update_stage(build, ended)
+    end
 
-```
-Input:  query text, query agent source code, full DB schema
-Output: {"scope_fn": "def scope(sql, params, rows): ..."}
-```
+    rect rgb(40, 40, 70)
+        Note over P,S: Stage 1 -- Scope (optional)
+        P->>RS: update_stage(scope, started)
+        P->>S: Start container (FULL_READ access)
+        S->>LLM: Chat completions (via bridge)
+        S->>DB: execute_sql (inspect schema + data)
+        S->>P: simulate_query (test proposed scope_fn)
+        S-->>P: scope_fn source code
+        P->>P: Compile + AST-validate scope_fn
+        P->>RS: update_stage(scope, ended)
+    end
 
-The scope function receives every SQL query and its raw results, then decides
-allow/deny/transform:
+    rect rgb(40, 70, 40)
+        Note over P,Q: Stage 2 -- Query
+        P->>RS: update_stage(query, started)
+        P->>Q: Start container (SCOPED access)
+        Q->>LLM: Chat completions (via bridge)
+        Q->>DB: execute_sql(SELECT ...)
+        DB-->>P: Raw rows
+        P->>P: scope_fn filters results
+        P-->>Q: Filtered rows
+        Q-->>P: Answer text
+        P->>RS: update_stage(query, ended)
+    end
 
-```python
-def scope(sql: str, params: list, rows: list[dict]) -> dict:
-    """Called for every execute_sql() by the query agent.
+    rect rgb(70, 40, 40)
+        Note over P,M: Stage 3 -- Mediation (optional)
+        P->>RS: update_stage(mediator, started)
+        P->>M: Start container (NO data access)
+        M->>LLM: Chat completions (via bridge)
+        Note over M: Output wrapped in response tags,<br/>reasoning stripped
+        M-->>P: Sanitized output
+        P->>RS: update_stage(mediator, ended)
+    end
 
-    Args:
-        sql: the SQL statement the query agent issued
-        params: query parameters
-        rows: the raw query results (full data from Postgres)
-
-    Returns one of:
-        {"allow": True, "rows": rows}           — pass through as-is
-        {"allow": True, "rows": filtered_rows}   — transform/filter results
-        {"allow": False, "error": "reason"}       — block this query
-    """
-    # Example: only allow aggregations, enforce k-anonymity
-    if "GROUP BY" not in sql.upper() and len(rows) > 1:
-        return {"allow": False, "error": "Only aggregated queries allowed"}
-    return {"allow": True, "rows": [r for r in rows if r.get("count", 999) >= 5]}
-```
-
-Why scope functions instead of SQL views:
-
-- **Data-aware**: sees actual result rows, can enforce k-anonymity, suppress outliers
-- **Query-aware**: sees SQL text, can distinguish `SELECT COUNT(*)` from `SELECT *`
-- **Transformative**: can modify results (redact columns, round numbers, suppress small groups)
-- **Dynamic**: one function handles all queries, not a fixed set of view definitions
-
-Safety: scope functions run in-process (not in a sandbox) for performance.
-AST validation rejects imports, exec/eval, dunders, file/network access.
-Fail-closed: any exception in the scope function denies the query.
-
-### Phase 2: Simulation (Optional)
-
-The scope agent can **simulate** the query agent before finalizing its scope
-function. The simulation runs the query agent with a proposed scope function,
-records every LLM call as a "tape", and returns the output for the scope agent
-to evaluate.
-
-```python
-# Scope agent tests its proposed function:
-result = simulate(prompt="What's trending?", scope_fn_source=my_scope_fn)
-# Examine result.output — does it leak individual data?
-# If yes, tighten the scope function and re-simulate.
-```
-
-The tape recorder captures LLM request/response pairs. Replay serves cached
-responses on hash match, enabling cheap re-simulation under tighter constraints
-without burning additional LLM budget.
-
-### Phase 3: Constrained Query Execution
-
-Query agent runs in a sandbox with **scoped SQL access**. Its `execute_sql()`
-tool runs queries against the full database, but results pass through the
-compiled scope function before reaching the agent.
-
-```
-Input:  query text, execute_sql + get_schema tools (scope-enforced)
-Output: answer text
-```
-
-The query agent never sees unfiltered data. If the scope function denies a query,
-the agent gets an error message instead of results.
-
-### Phase 4: Mediation
-
-Last-mile audit. Even with correct scope, the query agent's *phrasing* could
-leak info ("User #4523 watches a lot of anime"). The mediator has NO data access —
-it only sees the query agent's output text and the original question.
-
-```
-Input:  raw answer, query text
-Output: sanitized answer (or rejection)
-```
-
-Mediator policy (default): strip names, PII, verbatim quotes, credentials,
-substance references, medical info, financial details.
-Fail closed: if mediator errors, output is blocked.
-
----
-
-## MCP Tools Per Agent Type
-
-Each agent type gets different tools in its sandbox. Tools are exposed via the
-bridge's `/tools/{name}` HTTP endpoint.
-
-### Scope Agent Tools
-```
-execute_sql(sql, params)     Full read-only access to all user tables
-get_schema()                 Full database schema (tables, columns, types)
-list_query_agent_files()     Query agent's source file listing
-read_query_agent_file(path)  Read query agent source file
-simulate(prompt, scope_fn)   Run query agent with proposed scope function
-```
-
-### Query Agent Tools
-```
-execute_sql(sql, params)     SQL against full DB, results filtered by scope function
-get_schema()                 Database schema (excluding _hivemind_* internal tables)
-```
-
-### Index Agent Tools
-```
-execute_sql(sql, params)     Full read/write access (blocked from _hivemind_* writes)
-get_schema()                 Full database schema
-```
-
-### Mediator Agent Tools
-```
-(none)                       No data access. Text in, text out.
-```
-
-### Access Levels
-
-| Level | Agent | SQL | Scope enforcement |
-|-------|-------|-----|-------------------|
-| `FULL_READ` | scope | SELECT only, all user tables | None — full read |
-| `SCOPED` | query | SELECT only, results pass through scope_fn | Yes — every query filtered |
-| `FULL_READWRITE` | index | All DML, blocked from `_hivemind_*` writes | None — full write |
-| `NONE` | mediator | No SQL access | N/A |
-
-SQL validation uses `sqlglot` AST parsing to enforce SELECT-only constraints
-and block access to internal `_hivemind_*` tables.
-
----
-
-## Agent Sandboxing
-
-Agents are Docker containers. Source code is uploaded and stored in internal
-Postgres tables (`_hivemind_agent_files`).
-
-```
-┌────────────────────────────────────────────────────────────────────────┐
-│  DOCKER SANDBOX  (per agent invocation, ephemeral)                     │
-│                                                                        │
-│  Isolation:                                                            │
-│    - Read-only root filesystem (+ tmpfs for /tmp)                      │
-│    - ALL Linux capabilities dropped, no-new-privileges                 │
-│    - Internal Docker network only (bridge is sole egress)              │
-│    - Memory limit 256MB, CPU quota 1 core, PID limit 256               │
-│    - Cannot reach Postgres, internet, or other agents                  │
-│    - iptables rules enforce bridge-only egress (fail-closed)           │
-│                                                                        │
-│  Environment:                                                          │
-│    BRIDGE_URL          HTTP bridge for LLM + tools                     │
-│    SESSION_TOKEN       Ephemeral auth token (per-invocation)           │
-│    OPENAI_BASE_URL     Auto-routes OpenAI SDK through bridge           │
-│    OPENAI_API_KEY      = SESSION_TOKEN                                 │
-│    ANTHROPIC_BASE_URL  Auto-routes Anthropic SDK through bridge        │
-│    ANTHROPIC_API_KEY   = SESSION_TOKEN                                 │
-│    QUERY_PROMPT        The user's question (for query/scope agents)     │
-│                                                                        │
-│  Agent never gets real API keys. Bridge proxies LLM calls and          │
-│  enforces budget (max tokens, max calls, timeout).                     │
-│                                                                        │
-└────────────────────────────────────────────────────────────────────────┘
-```
-
-### Bridge (one per agent, ephemeral)
-
-```
-┌──────────────────────────────────────────────────────────────────────┐
-│  BRIDGE SERVER  (FastAPI, runs on host side)                          │
-│                                                                      │
-│  /v1/chat/completions    OpenAI-format LLM proxy                     │
-│  /v1/messages            Anthropic-format LLM proxy                  │
-│  /tools/{name}           Tool execution (scope-enforced)             │
-│  /sandbox/simulate       Run query agent simulation (scope only)     │
-│                                                                      │
-│  Budget enforcement: hard caps on tokens and calls. 429 when done.   │
-│  Tape recording: every LLM call logged for simulation/replay.        │
-│  Auth: SESSION_TOKEN in Authorization header or x-api-key.           │
-│                                                                      │
-└──────────────────────────────────────────────────────────────────────┘
+    P->>RS: update status=completed, output
+    C->>API: GET /v1/query-agents/runs/{run_id}
+    API-->>C: {output, stage timings, usage}
 ```
 
 ---
 
-## System Architecture
+## 3. Sandbox Isolation
 
-```
-╔════════════════════════════════════════════════════════════════════════════════╗
-║                                                                                ║
-║  DSTACK CVM  (Intel TDX — memory encrypted, disk LUKS2-encrypted)             ║
-║                                                                                ║
-║  ┌──────────────────────────────────────────────────────────────────────────┐  ║
-║  │                                                                          │  ║
-║  │  POSTGRES 16  (on LUKS-encrypted Docker volume)                          │  ║
-║  │                                                                          │  ║
-║  │  App-defined schema. Normal tables. Normal SQL. Normal FTS.              │  ║
-║  │  tsvector/tsquery. GIN indexes. B-tree indexes. All of it.              │  ║
-║  │  Postgres doesn't know about encryption — dm-crypt handles it below.    │  ║
-║  │                                                                          │  ║
-║  └──────────────────────────────────────────────────────────────────────────┘  ║
-║                                                                                ║
-║  ┌──────────────────────────────────────────────────────────────────────────┐  ║
-║  │                                                                          │  ║
-║  │  PYTHON  (FastAPI) — Orchestrator                                        │  ║
-║  │                                                                          │  ║
-║  │  Routes /v1/store, /v1/query, /v1/index, /v1/health                     │  ║
-║  │  Talks to Postgres directly (same CVM, localhost)                        │  ║
-║  │  Manages agent lifecycle, sandbox orchestration, budget enforcement       │  ║
-║  │                                                                          │  ║
-║  │  ┌────────────────────────────────────────────────────────────────────┐  │  ║
-║  │  │  PIPELINE ORCHESTRATOR                                             │  │  ║
-║  │  │                                                                    │  │  ║
-║  │  │  scope_agent(query, agent_source, full_schema)                     │  │  ║
-║  │  │       → scope function                                             │  │  ║
-║  │  │       ↓                                                            │  │  ║
-║  │  │  [simulate(query_agent, scope_fn) → tape → audit]  (optional)     │  │  ║
-║  │  │       ↓                                                            │  │  ║
-║  │  │  query_agent(query, scoped_tools)                                  │  │  ║
-║  │  │       → raw answer                                                 │  │  ║
-║  │  │       ↓                                                            │  │  ║
-║  │  │  mediator(raw_answer, query)                                       │  │  ║
-║  │  │       → sanitized answer                                           │  │  ║
-║  │  │                                                                    │  │  ║
-║  │  └────────────────────────────────────────────────────────────────────┘  │  ║
-║  │                                                                          │  ║
-║  └──────────────────────────────────────────────────────────────────────────┘  ║
-║                                                                                ║
-║  ┌──────────────────────────────────────────────────────────────────────────┐  ║
-║  │                                                                          │  ║
-║  │  DOCKER SANDBOXES  (agents run here)                                     │  ║
-║  │                                                                          │  ║
-║  │  ┌────────────┐  ┌────────────┐  ┌────────────┐  ┌────────────┐        │  ║
-║  │  │   SCOPE    │  │   INDEX    │  │   QUERY    │  │  MEDIATOR  │        │  ║
-║  │  │   AGENT    │  │   AGENT    │  │   AGENT    │  │   AGENT    │        │  ║
-║  │  └────────────┘  └────────────┘  └────────────┘  └────────────┘        │  ║
-║  │                                                                          │  ║
-║  │  Each sandbox: bridge-only egress, no Postgres access, no internet.     │  ║
-║  │  All DB access goes through bridge tools (scope-enforced).              │  ║
-║  │                                                                          │  ║
-║  └──────────────────────────────────────────────────────────────────────────┘  ║
-║                                                                                ║
-║  ┌──────────────────────────────────────────────────────────────────────────┐  ║
-║  │                                                                          │  ║
-║  │  WAL-G  (continuous backup to Cloudflare R2)                             │  ║
-║  │                                                                          │  ║
-║  │  backup_key = getKey("/hivemind/backup")                                 │  ║
-║  │  = KDF(kms_root, [app_id, "/hivemind/backup"])                          │  ║
-║  │  = same on any CVM with same app_id (portable restore)                  │  ║
-║  │                                                                          │  ║
-║  │  Encrypts WAL segments with libsodium before uploading to R2.           │  ║
-║  │  RPO: seconds (continuous archiving). Full base backup daily.           │  ║
-║  │                                                                          │  ║
-║  └──────────────────────────────────────────────────────────────────────────┘  ║
-║                                                                                ║
-╠════════════════════════════════════════════════════════════════════════════════╣
-║  LUKS2 ENCRYPTED DISK  (AES-XTS-256, key from KMS)                            ║
-║  dm-crypt encrypts every block. Postgres writes plaintext,                     ║
-║  disk stores ciphertext. ~2-5% overhead with AES-NI.                           ║
-╚════════════════════════════════════════════════════════════════════════════════╝
+```mermaid
+graph TB
+    subgraph Host["Hivemind Host Process"]
+        Pipeline["Pipeline"]
+        BridgeSrv["Bridge Server<br/>(ephemeral per agent)"]
+        Budget["Budget Tracker<br/>(max_tokens, max_calls)"]
+        Tape["Tape Recorder<br/>(LLM call cache)"]
+        ScopeFn["Scope Function<br/>(compiled Python)"]
+        SQLTools["SQL Tools<br/>(access-level gated)"]
+    end
+
+    subgraph DockerNet["Docker Internal Network (via DinD)"]
+        Container["Agent Container<br/>read-only rootfs | all caps dropped<br/>no-new-privileges | 256MB mem<br/>1 CPU | 256 PIDs<br/>iptables: bridge-only egress"]
+    end
+
+    LLM["LLM Provider"]
+    DB["Postgres"]
+
+    Container -->|"Bearer SESSION_TOKEN"| BridgeSrv
+    BridgeSrv --> Budget
+    BridgeSrv --> Tape
+    BridgeSrv -->|"proxy"| LLM
+    BridgeSrv -->|"tool call"| SQLTools
+    SQLTools --> ScopeFn
+    SQLTools --> DB
 ```
 
 ---
 
-## Deploy Governance (Notarized Deploys)
+## 4. Access Levels per Agent Type
 
-Every deploy is notarized by a monitoring TEE before the KMS releases keys.
-Auto-approves after logging and notifying — transparency log, not a gate.
+```mermaid
+graph LR
+    subgraph Agents
+        SA["Scope Agent"]
+        QA["Query Agent"]
+        IA["Index Agent"]
+        MA["Mediator Agent"]
+    end
 
-```
-  ┌──────────────────────────────────────────────────────────────────┐
-  │                                                                  │
-  │  BASE BLOCKCHAIN                                                 │
-  │                                                                  │
-  │  NotarizedAppAuth contract                                       │
-  │  ┌────────────────────────────────────────────────────────────┐  │
-  │  │  requestDeploy(hash) → only owner                          │  │
-  │  │    emits DeployRequested(hash, timestamp)                   │  │
-  │  │                                                            │  │
-  │  │  notarize(hash, logCID) → only notary (monitoring TEE)     │  │
-  │  │    adds hash to allowlist                                   │  │
-  │  │    emits DeployNotarized(hash, logCID, timestamp)           │  │
-  │  │                                                            │  │
-  │  │  isAppAllowed(bootInfo) → checks allowlist                  │  │
-  │  │    called by Phala's KMS via DstackKms                     │  │
-  │  └────────────────────────────────────────────────────────────┘  │
-  │                                                                  │
-  └──────────────────────────────────────────────────────────────────┘
+    subgraph Access["Database Access"]
+        FR["FULL_READ<br/>SELECT all tables"]
+        SC["SCOPED<br/>SELECT, filtered by scope_fn"]
+        RW["FULL_READWRITE<br/>All DML"]
+        NO["NONE"]
+    end
 
-  ┌──────────────────────────────────────────────────────────────────┐
-  │                                                                  │
-  │  MONITORING TEE  (separate dstack app)                           │
-  │                                                                  │
-  │  Watches for DeployRequested events. On each:                    │
-  │    1. Log to append-only transparency log (IPFS)                 │
-  │    2. Email auditor list with compose hash + source link         │
-  │    3. Post to Telegram/Discord auditor group                     │
-  │    4. Call notarize(hash, logCID) on-chain                       │
-  │       using getKey("/notary/signer") derived private key         │
-  │                                                                  │
-  │  Notary key is credibly exclusive to this TEE:                   │
-  │    key = KDF(kms_root, [monitoring_app_id, "/notary/signer"])   │
-  │    Different code → different app_id → different key             │
-  │                                                                  │
-  │  Total time: ~10-30 seconds from request to notarize             │
-  │                                                                  │
-  └──────────────────────────────────────────────────────────────────┘
+    subgraph Extra["Extra Capabilities"]
+        SIM["simulate_query<br/>list/read agent files"]
+    end
 
-  Deploy flow:
-    1. Push code → build Docker image (reproducible → deterministic hash)
-    2. requestDeploy(hash) on Base (~2 sec)
-    3. Monitoring TEE sees event → logs + emails + notarize() (~10 sec)
-    4. Restart CVM → KMS checks allowlist → releases keys → boots
-
-  What you CANNOT do:
-    - Deploy without notarize() (KMS rejects)
-    - Call notarize() yourself (wrong address)
-    - Deploy silently (emails already sent)
+    SA --> FR
+    SA --> SIM
+    QA --> SC
+    IA --> RW
+    MA --> NO
 ```
 
 ---
 
-## Recovery (host dies)
+## 5. Deployment (2-CVM Model)
 
-```
-  1. Boot new CVM on any host (same docker-compose → same app_id)
-  2. On boot: backup_key = getKey("/hivemind/backup") → same key
-  3. wal-g restore: download from R2 → decrypt → restore Postgres
-  4. Resume normal operation + WAL archiving
+Previously a 5-CVM architecture (one per agent type + postgres). Now
+consolidated to 2 CVMs: Postgres and a single App CVM with Docker-in-Docker
+for agent containers.
 
-  RPO: seconds (continuous WAL archiving)
-  RTO: minutes (download from R2 + replay WAL)
-```
+```mermaid
+graph TB
+    subgraph Operator
+        CLI["Operator CLI"]
+    end
 
----
+    subgraph Base["Base L2 Blockchain"]
+        Contract["NotarizedAppAuth.sol<br/>requestDeploy / notarize / isAppAllowed"]
+    end
 
-## Key Derivation
+    subgraph MonCVM["Monitoring TEE"]
+        Monitor["Event Watcher"]
+        IPFS["IPFS Logger"]
+        Notify["Telegram / Discord / Email"]
+    end
 
-```
-  PHALA KMS (root of trust)
-    │
-    ├── disk_crypt_key = KDF(root, [app_id, instance_id, ...])
-    │                    Instance-specific. Dies with the host.
-    │
-    ├── backup_key = getKey("/hivemind/backup")
-    │              = KDF(root, [app_id, "/hivemind/backup"])
-    │                No instance_id. Portable across CVMs.
-    │
-    └── notary_key = getKey("/notary/signer")  (on monitoring TEE)
-                   = KDF(root, [monitoring_app_id, "/notary/signer"])
-                     Bound to monitoring TEE's compose hash.
-```
+    subgraph PGCVM["Postgres CVM"]
+        PG["Postgres 16"]
+        SQLProxy["SQL Proxy"]
+    end
 
----
+    subgraph AppCVM["App CVM (dstack CVM)"]
+        Boot["Boot: derive keys from KMS"]
+        HM["Hivemind App :8100"]
+        DinD["Docker-in-Docker<br/>(agent containers)"]
+    end
 
-## Privacy Layers
+    KMS["dstack KMS"]
+    S3["S3 / Cloudflare R2"]
 
-```
-  LAYER 5: NOTARIZED DEPLOYS
-  Every code version is logged and announced before accessing data.
-
-    LAYER 4: MEDIATOR
-    LLM-based output audit. Strips PII, verbatim quotes.
-
-      LAYER 3: BUDGET
-      Hard caps on LLM calls and tokens per query.
-      Prevents exhaustive enumeration.
-
-        LAYER 2: SCOPE FUNCTION FIREWALL
-        Every SQL result passes through a scope function.
-        Can deny, filter, redact, or transform. Enforced by platform.
-
-          LAYER 1: SIMULATION + TAPE
-          Scope agent can test query agent behavior with proposed scope,
-          audit the tape, tighten constraints, revert and retry.
-
-            LAYER 0: ENCRYPTED STORAGE
-            LUKS2 disk encryption (AES-XTS-256).
-            TDX memory encryption.
-            Operator cannot read disk or RAM.
+    CLI -->|"1. requestDeploy(hash)"| Contract
+    Contract -->|"2. DeployRequested event"| Monitor
+    Monitor --> IPFS
+    Monitor --> Notify
+    Monitor -->|"3. notarize(hash, logCID)"| Contract
+    Contract -->|"4. isAppAllowed?"| KMS
+    KMS -->|"5. Release keys"| Boot
+    Boot --> HM
+    HM -->|"host network"| PG
+    HM --> DinD
+    PG -->|"WAL-G backup"| S3
 ```
 
 ---
 
-## Component Visibility
+## 6. Security Layers (Defense in Depth)
 
-```
-  ┌──────────────┬────────────┬──────────────────────────────────────┐
-  │  Component   │  Data      │  Notes                               │
-  ├──────────────┼────────────┼──────────────────────────────────────┤
-  │  Host/       │  NO        │  LUKS disk = noise. TDX RAM = noise. │
-  │  Operator    │            │  Can destroy data but not read it.   │
-  ├──────────────┼────────────┼──────────────────────────────────────┤
-  │  Postgres    │  YES       │  Plaintext inside CVM. Full SQL.     │
-  │  (in CVM)    │  (all)     │  Only reachable from CVM.            │
-  ├──────────────┼────────────┼──────────────────────────────────────┤
-  │  Python      │  YES       │  Can query Postgres directly.        │
-  │  (in CVM)    │  (all)     │  Orchestrates agents. Routes tools.  │
-  ├──────────────┼────────────┼──────────────────────────────────────┤
-  │  Scope Agent │  read-only │  Full DB read + query agent source.  │
-  │  (Docker)    │  (all)     │  Produces scope function.            │
-  ├──────────────┼────────────┼──────────────────────────────────────┤
-  │  Query Agent │  filtered  │  SQL against full DB, but results    │
-  │  (Docker)    │  only      │  pass through scope function.        │
-  ├──────────────┼────────────┼──────────────────────────────────────┤
-  │  Mediator    │  output    │  Sees agent output text only.        │
-  │  (Docker)    │  text only │  No data access. Filters output.     │
-  ├──────────────┼────────────┼──────────────────────────────────────┤
-  │  Client      │  mediated  │  Sees filtered output only.          │
-  │              │  output    │  Cannot access raw data.             │
-  ├──────────────┼────────────┼──────────────────────────────────────┤
-  │  R2 backup   │  NO        │  WAL encrypted with libsodium.       │
-  │              │            │  R2 stores ciphertext only.          │
-  └──────────────┴────────────┴──────────────────────────────────────┘
+```mermaid
+graph TB
+    L0["Layer 0: Encrypted Storage<br/>LUKS2 disk + TDX RAM encryption"]
+    L1["Layer 1: Simulation + Tape<br/>Scope agent tests query agent, audits LLM calls"]
+    L2["Layer 2: Scope Function Firewall<br/>Post-query row filtering, fail-closed"]
+    L3["Layer 3: SQL Validation<br/>sqlglot AST: parse errors surface, non-SELECT blocked"]
+    L4["Layer 4: Budget Enforcement<br/>Hard caps on tokens + LLM calls per query"]
+    L5["Layer 5: Mediator<br/>LLM output audit, PII redaction via response tags, no tool access"]
+    L6["Layer 6: Notarized Deploys<br/>IPFS log + blockchain allowlist before keys released"]
+
+    L0 --- L1 --- L2 --- L3 --- L4 --- L5 --- L6
 ```
 
 ---
 
-## Implementation Status
+## 7. Key Derivation
 
-### Done
+```mermaid
+graph TB
+    KMS["Phala KMS<br/>(root of trust)"]
 
-| Component | LOC | Notes |
+    KMS -->|"instance-specific"| DiskKey["disk_crypt_key<br/>Dies with the host"]
+    KMS -->|"app-scoped, portable"| DBKey["db_password<br/>getKey('/hivemind/db-password')"]
+    KMS -->|"app-scoped, portable"| BackupKey["backup_key<br/>getKey('/hivemind/backup')"]
+    KMS -->|"monitoring TEE only"| NotaryKey["notary_key<br/>getKey('/notary/signer')"]
+```
+
+---
+
+## 8. Data Visibility Matrix
+
+| Component | Sees Data? | Notes |
 |---|---|---|
-| Database layer (`db.py`) | ~100 | Thin psycopg wrapper, dict_row, thread-safe |
-| SQL tools (`tools.py`) | ~200 | execute_sql + get_schema, 4 access levels, sqlglot validation |
-| Scope functions (`scope.py`) | ~120 | AST validation, compile, apply with fail-closed semantics |
-| Pipeline (`pipeline.py`) | ~400 | scope → query → mediate → index orchestration |
-| Docker sandbox runner | ~860 | Container lifecycle, iptables, network isolation |
-| Bridge server (`bridge.py`) | ~620 | LLM proxy (OpenAI + Anthropic), tools, budget, tape |
-| Tape recorder (`tape.py`) | ~110 | LLM call recording/replay for simulation |
-| Sandbox backend (`backend.py`) | ~210 | Orchestrates bridge + container per agent |
-| Agent store (`agents.py`) | ~200 | CRUD + file storage in `_hivemind_*` internal tables |
-| Server (`server.py`) | ~300 | FastAPI HTTP API, agent CRUD, upload |
-| Default agents (4) | ~400 | scope, query, mediator, index — all Claude Agent SDK |
-| Agent SDK base image | ~17 | Python 3.12 + Node.js 20 + Claude Code CLI |
-| Config/settings | ~80 | Pydantic settings with env mapping |
-| Production Postgres image | ~80 | WAL-G, supercronic, KMS key derivation |
-| Production app image | ~20 | Boot script with KMS-derived DB password |
-| Monitoring TEE | ~150 | Event watcher, IPFS logging, on-chain notarization |
-| NotarizedAppAuth contract | ~80 | Solidity on Base, deploy allowlist |
-| WAL-G backup/restore | ~60 | Continuous archiving + R2 restore script |
+| Host / Operator | No | LUKS disk + TDX RAM = noise |
+| Postgres (in CVM) | All | Plaintext inside CVM, localhost only |
+| Python app (in CVM) | All | Orchestrates agents, routes tools |
+| Scope Agent | Read-only, all | Full DB read + query agent source |
+| Query Agent | Filtered only | Results pass through scope function |
+| Index Agent | Read-write | Full DML, blocked from internal tables |
+| Mediator | Output text only | No data access, filters agent output via `<response>` tags |
+| Client | Mediated output | Cannot access raw data |
+| S3 / R2 backup | No | WAL encrypted with libsodium |
 
 ---
 
-## File Structure
+## 9. Stage Timing (RunStore)
+
+Every pipeline execution is tracked in `_hivemind_query_runs` with per-stage
+start/end timestamps and final output:
+
+| Column | Type | Description |
+|---|---|---|
+| `run_id` | TEXT PK | Unique run identifier |
+| `agent_id` | TEXT | Query agent that ran |
+| `status` | TEXT | pending / running / completed / failed |
+| `build_started_at` / `build_ended_at` | FLOAT | Docker image build |
+| `scope_started_at` / `scope_ended_at` | FLOAT | Scope agent resolution |
+| `query_started_at` / `query_ended_at` | FLOAT | Query agent execution |
+| `mediator_started_at` / `mediator_ended_at` | FLOAT | Mediator processing |
+| `output` | TEXT | Final output (truncated to 10k chars) |
+
+Clients poll `GET /v1/query-agents/runs/{run_id}` to see stage progress
+and retrieve results.
+
+---
+
+## 10. File Structure
 
 ```
 hivemind/
-  __init__.py          Public API exports
   config.py            Settings (Pydantic, env-mapped)
   core.py              Hivemind class: Database + AgentStore + Pipeline
   db.py                Thin Postgres wrapper (psycopg, dict_row)
-  models.py            StoreRequest/Response, QueryRequest/Response, IndexRequest/Response, HealthResponse
-  pipeline.py          scope → query → mediate orchestration
+  models.py            Request/Response models
+  pipeline.py          build -> scope -> query -> mediate orchestration
   scope.py             Scope function compilation + AST validation
-  server.py            FastAPI HTTP server
+  server.py            FastAPI HTTP server + embedded UI
+  s3.py                S3Uploader (WAL-G backups, s3v4 signatures)
   tools.py             execute_sql + get_schema, AccessLevel enum
-  version.py           Version resolution
   sandbox/
-    agents.py          AgentStore (CRUD, file storage in _hivemind_* tables)
+    agents.py          AgentStore (CRUD, file storage)
     backend.py         SandboxBackend (bridge + Docker per agent)
     bridge.py          BridgeServer (LLM proxy, tools, budget, tape)
     budget.py          Budget tracker (calls, tokens)
-    docker_runner.py   DockerRunner (container lifecycle, iptables)
-    models.py          AgentConfig, SandboxSettings, SimulateRequest
-    settings.py        Settings → SandboxSettings mapper
-    tape.py            Tape recorder/replay (SHA-256 hash matching)
+    docker_runner.py   DockerRunner (container lifecycle, iptables, DinD)
+    run_store.py       RunStore (per-stage timing, status tracking)
+    tape.py            Tape recorder/replay for simulation
 
 agents/
   base/                Agent SDK base Docker image
-  default-common/      Shared bridge client (_bridge.py)
+  combined/            Simple httpx-based agents (scope/query/index/mediator)
   default-scope/       Default scope agent (Claude Agent SDK)
   default-query/       Default query agent (Claude Agent SDK)
-  default-mediator/    Default mediator agent (Claude Agent SDK)
+  default-mediator/    Default mediator agent (Claude Agent SDK, response tags)
   default-index/       Default index agent (Claude Agent SDK)
-  examples/            Example agents (simple-query, tool-loop, etc.)
 
 deploy/
-  boot.sh              CVM entrypoint (KMS key derivation, wait for Postgres)
+  boot.sh              CVM entrypoint (KMS key derivation)
   Dockerfile           Production app image
-  docker-compose.yaml  Production dstack deployment (app + Postgres)
-  docker-compose.dev.yml  Local dev Postgres
+  docker-compose.yaml  Production dstack deployment (2-CVM: postgres + core)
+  docker-compose.dev.yml  Local dev (postgres only)
   contracts/           NotarizedAppAuth.sol (Solidity on Base)
   monitor/             Monitoring TEE (event watcher + notarizer)
-  postgres/            Production Postgres image (WAL-G, supercronic, KMS)
-  restore.sh           Disaster recovery (WAL-G restore from R2)
+  postgres/            Production Postgres image (WAL-G, KMS)
 ```
