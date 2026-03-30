@@ -23,13 +23,14 @@ class AgentStore:
         """Register a new agent."""
         self.db.execute_commit(
             "INSERT INTO _hivemind_agents "
-            "(agent_id, name, description, image, entrypoint, "
+            "(agent_id, name, description, agent_type, image, entrypoint, "
             "memory_mb, max_llm_calls, max_tokens, timeout_seconds, created_at) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
             [
                 config.agent_id,
                 config.name,
                 config.description,
+                config.agent_type,
                 config.image,
                 config.entrypoint,
                 config.memory_mb,
@@ -46,12 +47,13 @@ class AgentStore:
         self.db.execute_commit(
             """
             INSERT INTO _hivemind_agents
-            (agent_id, name, description, image, entrypoint,
+            (agent_id, name, description, agent_type, image, entrypoint,
              memory_mb, max_llm_calls, max_tokens, timeout_seconds, created_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT(agent_id) DO UPDATE SET
                 name=EXCLUDED.name,
                 description=EXCLUDED.description,
+                agent_type=EXCLUDED.agent_type,
                 image=EXCLUDED.image,
                 entrypoint=EXCLUDED.entrypoint,
                 memory_mb=EXCLUDED.memory_mb,
@@ -63,6 +65,7 @@ class AgentStore:
                 config.agent_id,
                 config.name,
                 config.description,
+                config.agent_type,
                 config.image,
                 config.entrypoint,
                 config.memory_mb,
@@ -74,21 +77,12 @@ class AgentStore:
         )
         return config
 
-    def get(self, agent_id: str) -> AgentConfig | None:
-        """Look up an agent by ID."""
-        rows = self.db.execute(
-            "SELECT agent_id, name, description, image, entrypoint, "
-            "memory_mb, max_llm_calls, max_tokens, timeout_seconds "
-            "FROM _hivemind_agents WHERE agent_id = %s",
-            [agent_id],
-        )
-        if not rows:
-            return None
-        r = rows[0]
+    def _row_to_config(self, r: dict) -> AgentConfig:
         return AgentConfig(
             agent_id=r["agent_id"],
             name=r["name"],
             description=r["description"],
+            agent_type=r.get("agent_type", "query"),
             image=r["image"],
             entrypoint=r["entrypoint"],
             memory_mb=r["memory_mb"],
@@ -97,27 +91,34 @@ class AgentStore:
             timeout_seconds=r["timeout_seconds"],
         )
 
-    def list_agents(self) -> list[AgentConfig]:
-        """List all registered agents."""
+    def get(self, agent_id: str) -> AgentConfig | None:
+        """Look up an agent by ID."""
         rows = self.db.execute(
-            "SELECT agent_id, name, description, image, entrypoint, "
+            "SELECT agent_id, name, description, agent_type, image, entrypoint, "
             "memory_mb, max_llm_calls, max_tokens, timeout_seconds "
-            "FROM _hivemind_agents ORDER BY created_at DESC"
+            "FROM _hivemind_agents WHERE agent_id = %s",
+            [agent_id],
         )
-        return [
-            AgentConfig(
-                agent_id=r["agent_id"],
-                name=r["name"],
-                description=r["description"],
-                image=r["image"],
-                entrypoint=r["entrypoint"],
-                memory_mb=r["memory_mb"],
-                max_llm_calls=r["max_llm_calls"],
-                max_tokens=r["max_tokens"],
-                timeout_seconds=r["timeout_seconds"],
+        if not rows:
+            return None
+        return self._row_to_config(rows[0])
+
+    def list_agents(self, agent_type: str | None = None) -> list[AgentConfig]:
+        """List registered agents, optionally filtered by type."""
+        if agent_type:
+            rows = self.db.execute(
+                "SELECT agent_id, name, description, agent_type, image, entrypoint, "
+                "memory_mb, max_llm_calls, max_tokens, timeout_seconds "
+                "FROM _hivemind_agents WHERE agent_type = %s ORDER BY created_at DESC",
+                [agent_type],
             )
-            for r in rows
-        ]
+        else:
+            rows = self.db.execute(
+                "SELECT agent_id, name, description, agent_type, image, entrypoint, "
+                "memory_mb, max_llm_calls, max_tokens, timeout_seconds "
+                "FROM _hivemind_agents ORDER BY created_at DESC"
+            )
+        return [self._row_to_config(r) for r in rows]
 
     def save_files(self, agent_id: str, files: dict[str, str]) -> int:
         """Store extracted source files for an agent. Returns file count."""

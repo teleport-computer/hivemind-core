@@ -47,6 +47,7 @@ class Database:
                         agent_id TEXT PRIMARY KEY,
                         name TEXT NOT NULL,
                         description TEXT NOT NULL DEFAULT '',
+                        agent_type TEXT NOT NULL DEFAULT 'query',
                         image TEXT NOT NULL,
                         entrypoint TEXT,
                         memory_mb INTEGER NOT NULL DEFAULT 256,
@@ -96,6 +97,11 @@ class Database:
                     ("mediator_started_at", "DOUBLE PRECISION"),
                     ("mediator_ended_at", "DOUBLE PRECISION"),
                     ("output", "TEXT"),
+                    ("scope_agent_id", "TEXT"),
+                    ("index_agent_id", "TEXT"),
+                    ("index_started_at", "DOUBLE PRECISION"),
+                    ("index_ended_at", "DOUBLE PRECISION"),
+                    ("index_output", "TEXT"),
                 ]:
                     try:
                         cur.execute(
@@ -104,6 +110,14 @@ class Database:
                         )
                     except Exception:
                         pass  # column already exists
+                # Migrate _hivemind_agents: add agent_type if missing
+                try:
+                    cur.execute(
+                        "ALTER TABLE _hivemind_agents "
+                        "ADD COLUMN IF NOT EXISTS agent_type TEXT NOT NULL DEFAULT 'query'"
+                    )
+                except Exception:
+                    pass
             self._conn.commit()
 
     def execute(self, sql: str, params: list | tuple | None = None) -> list[dict]:
@@ -175,6 +189,7 @@ class HttpDatabase:
                 agent_id TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
                 description TEXT NOT NULL DEFAULT '',
+                agent_type TEXT NOT NULL DEFAULT 'query',
                 image TEXT NOT NULL,
                 entrypoint TEXT,
                 memory_mb INTEGER NOT NULL DEFAULT 256,
@@ -224,6 +239,11 @@ class HttpDatabase:
             ("mediator_started_at", "DOUBLE PRECISION"),
             ("mediator_ended_at", "DOUBLE PRECISION"),
             ("output", "TEXT"),
+            ("scope_agent_id", "TEXT"),
+            ("index_agent_id", "TEXT"),
+            ("index_started_at", "DOUBLE PRECISION"),
+            ("index_ended_at", "DOUBLE PRECISION"),
+            ("index_output", "TEXT"),
         ]:
             try:
                 self.execute_commit(
@@ -232,6 +252,14 @@ class HttpDatabase:
                 )
             except Exception:
                 pass
+        # Migrate _hivemind_agents: add agent_type if missing
+        try:
+            self.execute_commit(
+                "ALTER TABLE _hivemind_agents "
+                "ADD COLUMN IF NOT EXISTS agent_type TEXT NOT NULL DEFAULT 'query'"
+            )
+        except Exception:
+            pass
 
     def _check(self, resp) -> dict:
         if resp.status_code >= 400:

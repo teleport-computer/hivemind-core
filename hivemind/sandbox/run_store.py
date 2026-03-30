@@ -17,6 +17,8 @@ _COLUMNS = (
     "scope_started_at, scope_ended_at, "
     "query_started_at, query_ended_at, "
     "mediator_started_at, mediator_ended_at, "
+    "index_started_at, index_ended_at, index_output, "
+    "scope_agent_id, index_agent_id, "
     "output"
 )
 
@@ -27,18 +29,28 @@ class RunStore:
     def __init__(self, db: Database):
         self.db = db
 
-    def create(self, run_id: str, agent_id: str) -> dict:
+    def create(
+        self,
+        run_id: str,
+        agent_id: str,
+        *,
+        scope_agent_id: str | None = None,
+        index_agent_id: str | None = None,
+    ) -> dict:
         """Create a new run record with status=pending."""
         now = time.time()
         self.db.execute_commit(
             "INSERT INTO _hivemind_query_runs "
-            "(run_id, agent_id, status, created_at, updated_at) "
-            "VALUES (%s, %s, %s, %s, %s)",
-            [run_id, agent_id, "pending", now, now],
+            "(run_id, agent_id, scope_agent_id, index_agent_id, "
+            "status, created_at, updated_at) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s)",
+            [run_id, agent_id, scope_agent_id, index_agent_id, "pending", now, now],
         )
         return {
             "run_id": run_id,
             "agent_id": agent_id,
+            "scope_agent_id": scope_agent_id,
+            "index_agent_id": index_agent_id,
             "status": "pending",
             "s3_url": None,
             "error": None,
@@ -77,7 +89,7 @@ class RunStore:
         ended_at: float | None = None,
     ) -> bool:
         """Update timing for a pipeline stage (scope/query/mediator)."""
-        if stage not in ("build", "scope", "query", "mediator"):
+        if stage not in ("build", "scope", "query", "mediator", "index"):
             raise ValueError(f"Invalid stage: {stage}")
         now = time.time()
         sets = ["updated_at = %s"]
@@ -93,6 +105,16 @@ class RunStore:
             f"UPDATE _hivemind_query_runs SET {', '.join(sets)} "
             f"WHERE run_id = %s",
             params,
+        )
+        return rowcount > 0
+
+    def update_index_output(self, run_id: str, index_output: str) -> bool:
+        """Store index agent output text."""
+        now = time.time()
+        rowcount = self.db.execute_commit(
+            "UPDATE _hivemind_query_runs "
+            "SET index_output = %s, updated_at = %s WHERE run_id = %s",
+            [index_output, now, run_id],
         )
         return rowcount > 0
 

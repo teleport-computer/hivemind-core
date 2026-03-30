@@ -694,3 +694,45 @@ class Pipeline:
                 )
             except Exception:
                 logger.warning("Failed to update run %s to failed", run_id)
+
+    # -- Tracked index agent run (background) --
+
+    async def run_index_tracked(
+        self,
+        index_agent_id: str,
+        run_id: str,
+        run_store,
+        document_data: str,
+        document_metadata: str,
+        max_tokens: int | None = None,
+    ) -> None:
+        """Run index agent with tracking. Updates run_store through lifecycle."""
+        try:
+            index_t0 = time.time()
+            await asyncio.to_thread(
+                run_store.update_stage, run_id, "index", started_at=index_t0,
+            )
+
+            req = IndexRequest(
+                data=document_data,
+                metadata=json.loads(document_metadata) if document_metadata else {},
+                index_agent_id=index_agent_id,
+                max_tokens=max_tokens,
+            )
+            index_text, metadata, usage = await self._run_index_agent(
+                req=req, max_tokens=max_tokens,
+            )
+
+            await asyncio.to_thread(
+                run_store.update_stage, run_id, "index", ended_at=time.time(),
+            )
+            await asyncio.to_thread(
+                run_store.update_index_output, run_id,
+                json.dumps({"index_text": index_text, "metadata": metadata})[:10000],
+            )
+        except Exception as e:
+            logger.error("Tracked index run %s failed: %s", run_id, e)
+            await asyncio.to_thread(
+                run_store.update_stage, run_id, "index", ended_at=time.time(),
+            )
+            raise

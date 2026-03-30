@@ -106,6 +106,7 @@ class Hivemind:
                 agent_id=agent_id,
                 name=f"default-{role}",
                 description=f"Autoloaded default {role} agent",
+                agent_type=role,
                 image=image,
                 memory_mb=self.settings.container_memory_mb,
                 max_llm_calls=self.settings.max_llm_calls,
