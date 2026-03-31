@@ -13,7 +13,7 @@ from uuid import uuid4
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import ValidationError
 
 from .config import Settings
@@ -259,7 +259,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         entry = _pending_queries.get(run_id)
         if not entry:
             raise HTTPException(404, "Query run not found")
-        return {"run_id": run_id, **entry}
+        return JSONResponse(
+            content={"run_id": run_id, **entry},
+            headers={"Cache-Control": "no-cache, no-store"},
+        )
 
     @app.post(
         "/v1/index",
@@ -393,77 +396,66 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         tmpdir = tempfile.mkdtemp(prefix="hivemind-upload-")
         try:
-            try:
-                _safe_extract_tar(content, tmpdir)
-            except (tarfile.TarError, ValueError) as e:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Invalid archive: {e}",
-                )
-            except Exception:
-                logger.exception("Unexpected archive extraction failure")
-                raise HTTPException(
-                    status_code=500,
-                    detail="Archive extraction failed",
-                )
-
-            agent_id = uuid4().hex[:12]
-
-            sandbox_settings = build_sandbox_settings(settings)
-            runner = _create_runner(sandbox_settings)
-
-            image_tag = f"hivemind-agent-{agent_id}:latest"
-            try:
-                await runner.build_image_async(tmpdir, image_tag)
-            except ValueError as e:
-                raise HTTPException(status_code=400, detail=str(e))
-            except Exception:
-                logger.exception("Image build failed for uploaded agent")
-                raise HTTPException(
-                    status_code=500,
-                    detail="Image build failed",
-                )
-
-            try:
-                config = AgentConfig(
-                    agent_id=agent_id,
-                    name=name,
-                    description=description,
-                    agent_type=agent_type,
-                    image=image_tag,
-                    entrypoint=entrypoint,
-                    memory_mb=min(memory_mb, settings.container_memory_mb),
-                    max_llm_calls=max_llm_calls,
-                    max_tokens=max_tokens,
-                    timeout_seconds=timeout_seconds,
-                )
-            except ValidationError as e:
-                raise HTTPException(
-                    status_code=422,
-                    detail=e.errors(),
-                )
-            await asyncio.to_thread(hm.agent_store.create, config)
-
-            # Save source files to DB
-            file_count = 0
-            try:
-                files = await runner.extract_image_files_async(image_tag)
-                await asyncio.to_thread(
-                    hm.agent_store.save_files, agent_id, files
-                )
-                file_count = len(files)
-            except Exception as e:
-                logger.warning(
-                    "Failed to save agent files for %s: %s", agent_id, e
-                )
-
-            return {
-                "agent_id": agent_id,
-                "name": name,
-                "files_extracted": file_count,
-            }
-        finally:
+            _safe_extract_tar(content, tmpdir)
+        except (tarfile.TarError, ValueError) as e:
             shutil.rmtree(tmpdir, ignore_errors=True)
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid archive: {e}",
+            )
+        except Exception:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+            logger.exception("Unexpected archive extraction failure")
+            raise HTTPException(
+                status_code=500,
+                detail="Archive extraction failed",
+            )
+
+        agent_id = uuid4().hex[:12]
+        run_id = uuid4().hex[:12]
+
+        await asyncio.to_thread(hm.run_store.create, run_id, agent_id)
+
+        async def _build_upload_agent():
+            try:
+                from .sandbox.backend import _create_runner
+
+                sandbox_settings = build_sandbox_settings(settings)
+                runner = _create_runner(sandbox_settings)
+
+                await _build_single_agent(
+                    runner,
+                    tmpdir,
+                    agent_id,
+                    agent_type,
+                    name,
+                    description,
+                    entrypoint,
+                    min(memory_mb, settings.container_memory_mb),
+                    max_llm_calls,
+                    max_tokens,
+                    timeout_seconds,
+                    hm,
+                )
+
+                await asyncio.to_thread(
+                    hm.run_store.update_status, run_id, "completed",
+                )
+            except Exception as e:
+                logger.error("Background agent upload %s failed: %s", run_id, e)
+                try:
+                    await asyncio.to_thread(
+                        hm.run_store.update_status, run_id, "failed",
+                        error=str(e)[:500],
+                    )
+                except Exception:
+                    pass
+            finally:
+                shutil.rmtree(tmpdir, ignore_errors=True)
+
+        asyncio.create_task(_build_upload_agent())
+
+        return {"agent_id": agent_id, "run_id": run_id, "status": "pending"}
 
     # ── Unified agent submit ──
 
@@ -953,7 +945,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             run["download_url"] = await asyncio.to_thread(
                 hm.s3_uploader.presign_url, run["s3_url"]
             )
-        return run
+        return JSONResponse(
+            content=run,
+            headers={"Cache-Control": "no-cache, no-store"},
+        )
 
     # ── List recent runs ──
 
@@ -979,7 +974,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             run["download_url"] = await asyncio.to_thread(
                 hm.s3_uploader.presign_url, run["s3_url"]
             )
-        return run
+        return JSONResponse(
+            content=run,
+            headers={"Cache-Control": "no-cache, no-store"},
+        )
 
     @app.get("/v1/agent-runs", dependencies=[Depends(check_auth)])
     async def list_agent_runs(

@@ -53,32 +53,56 @@ class AccessLevel(enum.Enum):
 
 
 def _is_select_only(sql: str) -> bool:
-    """Check if SQL is a read-only statement using sqlglot AST parsing."""
+    """Check if SQL is a read-only statement using sqlglot AST parsing.
+
+    Walks the full AST including CTEs and subqueries to reject DML hidden
+    inside otherwise-SELECT statements.
+    """
     import sqlglot
 
     try:
-        statements = sqlglot.parse(sql, error_level=sqlglot.ErrorLevel.RAISE)
+        statements = sqlglot.parse(sql, error_level=sqlglot.ErrorLevel.IGNORE)
     except sqlglot.errors.ParseError:
         return False
 
     if not statements:
         return False
 
+    _DANGEROUS = (
+        sqlglot.exp.Delete, sqlglot.exp.Update, sqlglot.exp.Insert,
+        sqlglot.exp.Drop, sqlglot.exp.Create, sqlglot.exp.Alter,
+        sqlglot.exp.Command,
+    )
+
     for stmt in statements:
         if stmt is None:
             return False
-        # Only SELECT statements are allowed
+        # Only SELECT statements are allowed at the top level
         if not isinstance(stmt, sqlglot.exp.Select):
             return False
+        # Check for DML hidden inside CTEs or subqueries
+        for node in stmt.walk():
+            if isinstance(node, _DANGEROUS):
+                return False
 
     return True
 
 
 def _references_internal_tables(sql: str) -> bool:
-    """Check if SQL references _hivemind_* internal tables."""
-    # Simple text check — covers FROM, JOIN, INSERT INTO, etc.
-    upper = sql.upper()
-    return "_HIVEMIND_" in upper
+    """Check if SQL references _hivemind_* internal tables using AST parsing."""
+    import sqlglot
+
+    try:
+        for stmt in sqlglot.parse(sql, error_level=sqlglot.ErrorLevel.WARN):
+            if stmt is None:
+                continue
+            for table in stmt.find_all(sqlglot.exp.Table):
+                if table.name.upper().startswith("_HIVEMIND_"):
+                    return True
+    except Exception:
+        # Fail closed — if we can't parse, assume it references internal tables
+        return True
+    return False
 
 
 def build_sql_tools(

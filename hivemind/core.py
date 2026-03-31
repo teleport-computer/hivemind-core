@@ -91,10 +91,12 @@ class Hivemind:
             if runner is None:
                 runner = _create_runner(self._build_sandbox_settings())
             if not runner.image_exists(image):
-                raise RuntimeError(
-                    f"Default {role} image not found locally: {image}. "
-                    "Build/pull the image or disable autoload."
+                logger.warning(
+                    "Default %s image not found: %s — skipping autoload. "
+                    "Build/pull the image or set HIVEMIND_AUTOLOAD_DEFAULT_AGENTS=false.",
+                    role, image,
                 )
+                continue
 
             agent_id = (getattr(self.settings, agent_key, "") or "").strip()
             if not agent_id:

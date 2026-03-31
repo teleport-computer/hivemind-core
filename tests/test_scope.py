@@ -217,3 +217,75 @@ class TestApplyScopeFn:
         )
         result = apply_scope_fn(fn, "SELECT 1", [], [])
         assert result["allow"] is False
+
+
+class TestScopeSecurityBypass:
+    """Regression tests for scope sandbox escape vectors."""
+
+    def test_format_string_dunder_rejected(self):
+        with pytest.raises(ValueError, match="dunder"):
+            compile_scope_fn(
+                'def scope(sql, params, rows):\n'
+                '  return "{0.__class__}".format("")'
+            )
+
+    def test_class_definition_rejected(self):
+        with pytest.raises(ValueError, match="class"):
+            compile_scope_fn(
+                'def scope(sql, params, rows):\n'
+                '  class X(int): pass\n'
+                '  return {"allow": True, "rows": rows}'
+            )
+
+    def test_gi_frame_rejected(self):
+        with pytest.raises(ValueError, match="internal attribute"):
+            compile_scope_fn(
+                'def scope(sql, params, rows):\n'
+                '  def g(): yield 1\n'
+                '  x=g()\n'
+                '  f=x.gi_frame\n'
+                '  return {"allow":True,"rows":rows}'
+            )
+
+    def test_f_back_rejected(self):
+        with pytest.raises(ValueError, match="internal attribute"):
+            compile_scope_fn(
+                'def scope(sql, params, rows):\n'
+                '  x = rows\n'
+                '  y = x.f_back\n'
+                '  return {"allow":True,"rows":rows}'
+            )
+
+    def test_underscore_attr_rejected(self):
+        with pytest.raises(ValueError, match="private"):
+            compile_scope_fn(
+                'def scope(sql, params, rows):\n'
+                '  x = rows._hidden\n'
+                '  return {"allow":True,"rows":rows}'
+            )
+
+    def test_dunder_method_def_rejected(self):
+        with pytest.raises(ValueError, match="dunder methods"):
+            compile_scope_fn(
+                'def scope(sql, params, rows):\n'
+                '  def __secret__(): pass\n'
+                '  return {"allow":True,"rows":rows}'
+            )
+
+    def test_nested_dunder_string_rejected(self):
+        """Format strings with dunders anywhere in the string are caught."""
+        with pytest.raises(ValueError, match="dunder"):
+            compile_scope_fn(
+                'def scope(sql, params, rows):\n'
+                '  x = "foo.__init__bar"\n'
+                '  return {"allow":True,"rows":rows}'
+            )
+
+    def test_func_code_rejected(self):
+        with pytest.raises(ValueError, match="internal attribute"):
+            compile_scope_fn(
+                'def scope(sql, params, rows):\n'
+                '  def f(): pass\n'
+                '  c = f.func_code\n'
+                '  return {"allow":True,"rows":rows}'
+            )

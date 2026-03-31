@@ -105,6 +105,15 @@ class TestIsSelectOnly:
     def test_subquery(self):
         assert _is_select_only("SELECT * FROM (SELECT 1 AS v) sub") is True
 
+    def test_select_with_percent_s_param(self):
+        assert _is_select_only("SELECT * FROM t WHERE id = %s") is True
+
+    def test_select_with_multiple_params(self):
+        assert _is_select_only("SELECT * FROM t WHERE a = %s AND b = %s") is True
+
+    def test_insert_with_params_still_rejected(self):
+        assert _is_select_only("INSERT INTO t (x) VALUES (%s)") is False
+
 
 # ── _references_internal_tables ──
 
@@ -122,10 +131,19 @@ class TestReferencesInternalTables:
     def test_normal_table_allowed(self):
         assert _references_internal_tables("SELECT * FROM users") is False
 
-    def test_in_where_clause(self):
+    def test_in_where_clause_string_literal(self):
+        # String literal mentioning internal table is NOT an actual table reference
         assert (
             _references_internal_tables(
                 "SELECT * FROM t WHERE table_name = '_hivemind_agents'"
+            )
+            is False
+        )
+
+    def test_join_with_internal_table(self):
+        assert (
+            _references_internal_tables(
+                "SELECT * FROM t JOIN _hivemind_agents ON t.id = _hivemind_agents.id"
             )
             is True
         )

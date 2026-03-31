@@ -22,11 +22,13 @@ from __future__ import annotations
 import json
 import logging
 import os
+import secrets
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import psycopg
+from psycopg import sql as psql
 from psycopg.rows import dict_row
 
 logging.basicConfig(
@@ -123,15 +125,27 @@ def db_import_csv(table: str, csv_data: str, delimiter: str = ",",
     """COPY CSV data into a table using Postgres COPY protocol."""
     import io as _io
 
+    # Validate delimiter is a single character to prevent injection
+    if len(delimiter) != 1:
+        raise ValueError("Delimiter must be a single character")
+
     with _conn_lock:
         conn = _get_conn()
         try:
             with conn.cursor() as cur:
-                col_spec = f"({', '.join(columns)})" if columns else ""
-                header_opt = "HEADER" if header else ""
-                copy_sql = (
-                    f"COPY {table} {col_spec} FROM STDIN WITH ("
-                    f"FORMAT CSV, DELIMITER '{delimiter}', {header_opt})"
+                table_id = psql.Identifier(table)
+                if columns:
+                    col_ids = psql.SQL(", ").join(psql.Identifier(c) for c in columns)
+                    col_spec = psql.SQL(" ({})").format(col_ids)
+                else:
+                    col_spec = psql.SQL("")
+                header_opt = psql.SQL(", HEADER") if header else psql.SQL("")
+                copy_sql = psql.SQL(
+                    "COPY {} {} FROM STDIN WITH (FORMAT CSV, DELIMITER {}{})").format(
+                    table_id,
+                    col_spec,
+                    psql.Literal(delimiter),
+                    header_opt,
                 )
                 with cur.copy(copy_sql) as copy:
                     copy.write(csv_data.encode("utf-8"))
@@ -249,7 +263,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
         if not PROXY_KEY:
             return True
         key = self.headers.get("X-Proxy-Key", "")
-        if key != PROXY_KEY:
+        if not secrets.compare_digest(key.encode(), PROXY_KEY.encode()):
             self._json_response(401, {"error": "unauthorized"})
             return False
         return True

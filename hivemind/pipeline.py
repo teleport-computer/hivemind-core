@@ -52,10 +52,13 @@ class Pipeline:
         If the SQL is a SELECT, return rows. Otherwise commit and return rowcount.
         Optionally runs an index agent for pre-processing.
         """
-        from .tools import _is_select_only
+        from .tools import _is_select_only, _references_internal_tables
 
         sql = req.sql
         params = req.params
+
+        if _references_internal_tables(sql):
+            raise ValueError("Access to internal tables is denied via store endpoint")
 
         try:
             if _is_select_only(sql):

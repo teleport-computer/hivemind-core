@@ -11,8 +11,8 @@ from __future__ import annotations
 
 import ast
 import logging
-import signal
-import threading
+import multiprocessing
+import re
 from typing import Callable
 
 logger = logging.getLogger(__name__)
@@ -53,6 +53,23 @@ _FORBIDDEN_CALLS = frozenset({
     "input", "breakpoint", "exit", "quit",
     "getattr", "setattr", "delattr", "hasattr",
     "vars", "dir", "globals", "locals", "type",
+})
+
+_DUNDER_RE = re.compile(r'__\w+__')
+
+_DANGEROUS_ATTRS = frozenset({
+    # Generator/coroutine internals
+    "gi_frame", "gi_code", "gi_yieldfrom",
+    "cr_frame", "cr_code", "cr_origin",
+    "ag_frame", "ag_code",
+    # Frame attributes
+    "f_back", "f_builtins", "f_globals", "f_locals", "f_code", "f_trace",
+    # Code object attributes
+    "co_consts", "co_names", "co_code", "co_varnames", "co_freevars",
+    # Function internals
+    "func_globals", "func_code", "func_closure",
+    # Traceback
+    "tb_frame", "tb_next",
 })
 
 
@@ -127,18 +144,36 @@ def compile_scope_fn(source: str) -> Callable[[str, list, list[dict]], dict]:
                 raise ValueError(
                     f"Scope functions cannot call '{node.func.id}'"
                 )
+        # Block class definitions — too many implicit code execution vectors
+        if isinstance(node, ast.ClassDef):
+            raise ValueError("Scope functions cannot define classes")
+        # Block dunder method definitions (except 'scope' itself)
+        if isinstance(node, ast.FunctionDef) and node.name != "scope":
+            if node.name.startswith("__") and node.name.endswith("__"):
+                raise ValueError(
+                    f"Scope functions cannot define dunder methods: {node.name}"
+                )
         if isinstance(node, ast.Attribute):
             if node.attr.startswith("__") and node.attr.endswith("__"):
                 raise ValueError(
                     f"Scope functions cannot access dunder attributes: "
                     f"{node.attr}"
                 )
-        # Block dunder strings in any context (e.g. getattr(x, "__class__"))
-        if isinstance(node, ast.Constant) and isinstance(node.value, str):
-            if node.value.startswith("__") and node.value.endswith("__"):
+            # Block dangerous internal attributes (frame, code, generator internals)
+            if node.attr in _DANGEROUS_ATTRS:
                 raise ValueError(
-                    f"Scope functions cannot reference dunder names: "
-                    f'"{node.value}"'
+                    f"Scope functions cannot access internal attribute: {node.attr}"
+                )
+            # Block private/underscore-prefixed attributes
+            if node.attr.startswith("_") and node.attr != "_":
+                raise ValueError(
+                    f"Scope functions cannot access private attributes: {node.attr}"
+                )
+        # Block dunder patterns anywhere in string constants (e.g. "{0.__class__}")
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            if _DUNDER_RE.search(node.value):
+                raise ValueError(
+                    f"Scope functions cannot reference dunder names in strings"
                 )
 
     namespace: dict = {"__builtins__": dict(_SCOPE_BUILTINS)}
@@ -155,46 +190,77 @@ def compile_scope_fn(source: str) -> Callable[[str, list, list[dict]], dict]:
     return fn
 
 
+def _run_scope_in_process(
+    source: str, sql: str, params: list, rows: list[dict],
+    result_queue: multiprocessing.Queue,
+) -> None:
+    """Target function for scope subprocess. Re-compiles and runs the scope fn."""
+    try:
+        namespace: dict = {"__builtins__": dict(_SCOPE_BUILTINS)}
+        code = compile(ast.parse(source, mode="exec"), "<scope_fn>", "exec")
+        exec(code, namespace)  # noqa: S102
+        fn = namespace.get("scope")
+        if not callable(fn):
+            result_queue.put({"_error": "'scope' is not callable"})
+            return
+        result_queue.put(fn(sql, params, rows))
+    except Exception as e:
+        result_queue.put({"_error": str(e)})
+
+
 def apply_scope_fn(
     scope_fn: Callable[[str, list, list[dict]], dict],
     sql: str,
     params: list,
     rows: list[dict],
+    *,
+    _source: str | None = None,
 ) -> dict:
     """Apply a scope function with fail-closed semantics.
 
-    Runs the scope function in a daemon thread with a timeout to prevent
-    infinite loops from hanging the worker.
+    Runs the scope function in a child process with a hard timeout.
+    The process is killed if it exceeds the deadline, preventing infinite
+    loops from hanging the worker.
+
+    If ``_source`` is provided, the function is re-compiled in the child
+    process (avoids pickle issues with exec'd functions). Otherwise falls
+    back to direct invocation in-process.
 
     Returns a dict with:
       {"allow": True, "rows": [...]} on success
       {"allow": False, "error": "..."} on denial or error
     """
-    result_box: list = []
-    error_box: list = []
+    if _source:
+        q: multiprocessing.Queue = multiprocessing.Queue()
+        p = multiprocessing.Process(
+            target=_run_scope_in_process,
+            args=(_source, sql, params, rows, q),
+            daemon=True,
+        )
+        p.start()
+        p.join(timeout=SCOPE_FN_TIMEOUT)
 
-    def _run() -> None:
+        if p.is_alive():
+            p.kill()
+            p.join(timeout=1)
+            logger.warning("Scope function timed out after %ss", SCOPE_FN_TIMEOUT)
+            return {"allow": False, "error": f"Scope function timed out ({SCOPE_FN_TIMEOUT}s)"}
+
         try:
-            result_box.append(scope_fn(sql, params, rows))
+            result = q.get_nowait()
+        except Exception:
+            return {"allow": False, "error": "Scope function returned no result"}
+
+        if isinstance(result, dict) and "_error" in result:
+            logger.debug("Scope function evaluation error: %s", result["_error"])
+            return {"allow": False, "error": f"Scope function error: {result['_error']}"}
+    else:
+        # Fallback: run in-process (no source available for subprocess)
+        try:
+            result = scope_fn(sql, params, rows)
         except Exception as e:
-            error_box.append(e)
-
-    t = threading.Thread(target=_run, daemon=True)
-    t.start()
-    t.join(timeout=SCOPE_FN_TIMEOUT)
-
-    if t.is_alive():
-        logger.warning("Scope function timed out after %ss", SCOPE_FN_TIMEOUT)
-        return {"allow": False, "error": f"Scope function timed out ({SCOPE_FN_TIMEOUT}s)"}
-
-    if error_box:
-        logger.debug("Scope function evaluation error: %s", error_box[0])
-        return {"allow": False, "error": f"Scope function error: {error_box[0]}"}
-
-    if not result_box:
-        return {"allow": False, "error": "Scope function returned no result"}
-
-    result = result_box[0]
+            logger.debug("Scope function evaluation error: %s", e)
+            return {"allow": False, "error": f"Scope function error: {e}"}
 
     if not isinstance(result, dict):
         return {"allow": False, "error": "Scope function must return a dict"}
