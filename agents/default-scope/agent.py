@@ -17,6 +17,7 @@ import asyncio
 import json
 import os
 import sys
+from pathlib import Path
 from typing import Any
 
 from claude_agent_sdk import ClaudeAgentOptions, query, tool
@@ -133,6 +134,11 @@ Constraints:
 - Keep it simple: inspect the schema and query agent code, then output the JSON.
 - Output ONLY the JSON object, nothing else.
 """
+
+# Override with external prompt file if present (CLI-fused agents)
+_PROMPT_FILE = Path("/app/prompt.md")
+if _PROMPT_FILE.exists():
+    SYSTEM_PROMPT = _PROMPT_FILE.read_text()
 
 
 def _extract_scope_json(text: str) -> dict:

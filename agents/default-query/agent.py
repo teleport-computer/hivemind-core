@@ -12,6 +12,7 @@ Outputs answer text to stdout.
 import asyncio
 import os
 import sys
+from pathlib import Path
 
 from claude_agent_sdk import ClaudeAgentOptions, query
 from _bridge import create_hivemind_server
@@ -41,6 +42,11 @@ Rules:
 - Paraphrase and synthesize. Do not dump raw query results verbatim.
 - Never include credentials, API keys, passwords, tokens, or secrets.
 """
+
+# Override with external prompt file if present (CLI-fused agents)
+_PROMPT_FILE = Path("/app/prompt.md")
+if _PROMPT_FILE.exists():
+    SYSTEM_PROMPT = _PROMPT_FILE.read_text()
 
 server = create_hivemind_server()
 
