@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import os
 import secrets
 import socket
 import time
@@ -770,6 +771,26 @@ class BridgeServer:
 
     async def stop(self):
         """Shut down the bridge server."""
+        # Persist tape if HIVEMIND_TRACE_DIR is set. Zero-cost when unset.
+        trace_dir = os.environ.get("HIVEMIND_TRACE_DIR")
+        if trace_dir:
+            try:
+                from pathlib import Path
+                import time as _time
+                import json as _json
+                Path(trace_dir).mkdir(parents=True, exist_ok=True)
+                ts = _time.strftime("%Y%m%dT%H%M%S")
+                token8 = (self.session_token or "anon")[:8]
+                role = getattr(self, "role", "unknown") or "unknown"
+                fname = f"{ts}_{role}_{token8}.jsonl"
+                path = Path(trace_dir) / fname
+                tape = self._recording_tape.to_json()
+                with path.open("w") as f:
+                    for entry in tape:
+                        f.write(_json.dumps(entry) + "\n")
+                logger.info("Tape persisted to %s (%d entries)", path, len(tape))
+            except Exception as e:
+                logger.warning("Tape persistence failed: %s", e)
         if self._server:
             self._server.should_exit = True
         if self._task:

@@ -452,19 +452,93 @@ if _PROMPT_FILE.exists():
     SYSTEM_PROMPT = _PROMPT_FILE.read_text()
 
 
+def _looks_like_scope_source(src: str) -> bool:
+    """Heuristic: a scope_fn value should start with `def scope(`, allowing
+    for decorators and leading whitespace/blank lines but nothing else."""
+    if not isinstance(src, str):
+        return False
+    for line in src.splitlines():
+        s = line.strip()
+        if not s:
+            continue
+        if s.startswith("#") or s.startswith("@"):
+            continue  # comment or decorator
+        return s.startswith("def scope(") or s.startswith("def scope (")
+    return False
+
+
+def _scrape_def_scope(text: str) -> str | None:
+    """Find the first `def scope(...)` block inside arbitrary text.
+
+    Returns the source starting AT `def scope(` and running until a
+    non-indented, non-blank, non-comment line that isn't part of the
+    function. Used to rescue a scope_fn buried inside markdown / prose
+    / pre-code explanations.
+    """
+    import re
+    # Pattern anchors at `def scope(` (skips any preceding preamble).
+    m = re.search(r"(?m)^[ \t]*(def\s+scope\s*\([^)]*\)\s*(?:->\s*[^:]+)?\s*:)", text)
+    if not m:
+        return None
+    start = m.start()
+    lines = text[start:].splitlines()
+    # Capture the def line, then every subsequent line that is blank or
+    # indented (part of the function body). Stop at the first dedented
+    # non-blank line (closing of function at module level).
+    out = [lines[0]]
+    for line in lines[1:]:
+        stripped = line.lstrip()
+        if not stripped:
+            out.append(line)
+            continue
+        # Closing fence or prose resumes → stop.
+        if line[:1] not in (" ", "\t"):
+            if stripped.startswith("```"):
+                break
+            # Allow one trailing non-indented line if it looks like a
+            # call/return continuation? No — scope_fn bodies are always
+            # indented. Stop here.
+            break
+        out.append(line)
+    while out and not out[-1].strip():
+        out.pop()
+    return "\n".join(out) if out else None
+
+
 def _extract_scope_json(text: str) -> dict | None:
     """Extract a scope JSON object from LLM output.
 
     Returns the parsed dict if a {"scope_fn": "..."} object is found,
-    or None if nothing parseable is present.
+    or None if nothing parseable is present. When the LLM emits a valid
+    JSON whose scope_fn value is NOT a Python function (prose, markdown,
+    explanation), we re-scrape the value for a real `def scope(` block.
     """
     if not isinstance(text, str):
         return None
     text = text.strip()
+
+    def _validate_or_rescue(parsed: dict) -> dict | None:
+        """If parsed has scope_fn but the value isn't real Python, rescue."""
+        if not (isinstance(parsed, dict) and "scope_fn" in parsed):
+            return None
+        src = parsed.get("scope_fn", "")
+        if _looks_like_scope_source(src):
+            return parsed
+        # Value is prose/markdown. Try to rescue a def scope block from
+        # within it, or from the original surrounding text.
+        for candidate in (src, text):
+            if isinstance(candidate, str):
+                rescued = _scrape_def_scope(candidate)
+                if rescued and _looks_like_scope_source(rescued):
+                    parsed["scope_fn"] = rescued
+                    return parsed
+        return None
+
     try:
         parsed = json.loads(text)
-        if isinstance(parsed, dict) and "scope_fn" in parsed:
-            return parsed
+        result = _validate_or_rescue(parsed) if isinstance(parsed, dict) else None
+        if result:
+            return result
     except (json.JSONDecodeError, ValueError):
         pass
 
@@ -476,8 +550,9 @@ def _extract_scope_json(text: str) -> dict | None:
             inner = "\n".join(lines[1:]).strip()
         try:
             parsed = json.loads(inner)
-            if isinstance(parsed, dict) and "scope_fn" in parsed:
-                return parsed
+            result = _validate_or_rescue(parsed) if isinstance(parsed, dict) else None
+            if result:
+                return result
         except (json.JSONDecodeError, ValueError):
             pass
 
@@ -494,37 +569,18 @@ def _extract_scope_json(text: str) -> dict | None:
                 candidate = text[i : j + 1]
                 try:
                     parsed = json.loads(candidate)
-                    if isinstance(parsed, dict) and "scope_fn" in parsed:
-                        return parsed
+                    result = _validate_or_rescue(parsed) if isinstance(parsed, dict) else None
+                    if result:
+                        return result
                 except (json.JSONDecodeError, ValueError):
                     pass
                 break
 
-    # Fallback: the model often wraps the scope_fn in a markdown code block
-    # inside prose ("Here's the function: ```python def scope(...): ... ```").
-    # Extract the first `def scope(...)` code block and wrap it ourselves.
-    import re
-    # Match a fenced code block whose body contains `def scope(`.
-    fence_re = re.compile(
-        r"```(?:python|py)?\s*\n(.*?def\s+scope\s*\(.*?)\n```",
-        re.DOTALL,
-    )
-    m = fence_re.search(text)
-    if m:
-        return {"scope_fn": m.group(1).strip()}
-
-    # Bare-source fallback: a `def scope(...)` line followed by an indented
-    # body, no fence at all. Allow type annotations — the host's
-    # compile_scope_fn will reject them, but emitting something parseable
-    # lets downstream logging show why, vs silently dropping a valid-looking
-    # function.
-    bare_re = re.compile(
-        r"(def\s+scope\s*\([^)]*\)\s*(?:->\s*[^:]+)?\s*:.+?)(?=\n\S|\Z)",
-        re.DOTALL,
-    )
-    m = bare_re.search(text)
-    if m:
-        return {"scope_fn": m.group(1).strip()}
+    # No valid JSON found. Scrape `def scope(` directly from anywhere in
+    # the text (handles pure-prose emits, fenced or not).
+    rescued = _scrape_def_scope(text)
+    if rescued and _looks_like_scope_source(rescued):
+        return {"scope_fn": rescued}
 
     return None
 
