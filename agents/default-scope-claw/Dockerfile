@@ -1,8 +1,10 @@
 FROM hivemind-agent-sdk-base:latest
 
-# claw binary (built on host, copied via build context)
+# claw binary (built on host, copied via build context).
+# Base image runs non-root so we cannot chmod inside the build.
+# The binary is already +x on the host from `cargo build --release`,
+# and COPY preserves source file mode.
 COPY claw /usr/local/bin/claw
-RUN chmod +x /usr/local/bin/claw
 
 # hivemind mcp stdio proxy (copied via build context from hivemind/ subdir)
 RUN mkdir -p /app/hivemind
