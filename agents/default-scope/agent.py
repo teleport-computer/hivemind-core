@@ -190,6 +190,29 @@ Typical loop — use this when unsure what the query agent will do:
 Budget rule: simulate_query is expensive. Use it at MOST TWICE per
 invocation. verify_scope_fn is cheap — use it freely.
 
+# HARD PROTOCOL RULE — YOU MUST CALL verify_scope_fn BEFORE EMITTING
+
+Before your FINAL JSON emit, you MUST call verify_scope_fn at least
+once on the scope_fn you plan to emit. A final emit with zero prior
+verify_scope_fn calls is a PROTOCOL VIOLATION — the host will reject
+it as unverified and substitute a safe fallback, destroying your
+utility score.
+
+Observed failure mode: agents sometimes reason "the user asks about
+blocked topic X, therefore emit a denial" and ship without verifying.
+The scope_fn they emit has the wrong signature (scope_fn instead of
+scope), or returns {'allow': False, ...}, or uses SQL-text gating —
+all rejected by the host's AST validator. Always verify first.
+
+The minimum valid flow is:
+  1. Read the policy.
+  2. get_schema.
+  3. Draft a scope_fn with signature EXACTLY `def scope(sql, params, rows):`
+     returning `{"allow": True, "rows": [...]}`.
+  4. **CALL verify_scope_fn** on that source. (Required.)
+  5. If it fails, fix and re-verify.
+  6. Emit the final JSON.
+
 # WORKFLOW — YOU HAVE 20 TURNS MAX, BUT EMIT BY TURN 10
 
 Target: emit valid JSON by turn 6. Turns 7-20 are for debugging / fixing
@@ -676,6 +699,9 @@ async def main() -> None:
     # last assistant turn for our scope_fn JSON.
     last_assistant_text = ""
     streamed_messages: list[str] = []
+    # Track verify_scope_fn invocations during the session so we can catch
+    # "emit-without-verify" chain-of-thought failures post-hoc.
+    verify_call_count = 0
 
     try:
         async for message in query(
@@ -724,6 +750,9 @@ async def main() -> None:
                             flush=True,
                         )
                         streamed_messages[-1] += f"({block_type}:{tool_name})"
+                        # Protocol-rule tracking: count verify_scope_fn calls.
+                        if "verify_scope_fn" in tool_name:
+                            verify_call_count += 1
                     else:
                         streamed_messages[-1] += f"({block_type})"
             if hasattr(message, "result"):
@@ -776,18 +805,54 @@ async def main() -> None:
                 flush=True,
             )
     if parsed is not None and not result_is_error:
-        # Dump the FULL scope_fn source so we can audit runtime behavior
-        # against its docstring claims — docstrings have said "allow..."
-        # while the body actually rejects.
         full_src = str(parsed.get("scope_fn", ""))
-        flat_src = full_src.replace("\n", "\\n")
-        print(
-            f"[scope-agent] PATH=success scope_fn_full len={len(full_src)} src={flat_src}",
-            file=sys.stderr,
-            flush=True,
-        )
-        print(json.dumps(parsed))
-        return
+        # Protocol rule: scope MUST call verify_scope_fn before emitting.
+        # If it didn't, run verify ourselves as a backstop. Catches the
+        # "deny-first chain-of-thought" failure mode where scope reasons
+        # straight from policy to emit without touching the validator.
+        if verify_call_count == 0:
+            print(
+                f"[scope-agent] PROTOCOL_VIOLATION verify_call_count=0 "
+                f"— running auto-verify on emitted scope_fn",
+                file=sys.stderr,
+                flush=True,
+            )
+            try:
+                auto_result = await bridge_verify_scope_fn(full_src, tests=[])
+            except Exception as exc:
+                auto_result = {
+                    "compiles": False,
+                    "compile_error": f"auto-verify raised {type(exc).__name__}: {exc}",
+                }
+            compiles = bool(auto_result.get("compiles"))
+            if not compiles:
+                err = auto_result.get("compile_error", "") or "no error detail"
+                print(
+                    f"[scope-agent] AUTO_VERIFY_FAILED err={err[:300]!r} "
+                    f"— rejecting emit (falling through to emit-failure)",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                outcome = f"auto-verify-failed:{err[:120]}"
+                parsed = None
+            else:
+                print(
+                    "[scope-agent] AUTO_VERIFY_PASSED "
+                    f"— accepting emit despite no in-session verify_scope_fn call",
+                    file=sys.stderr,
+                    flush=True,
+                )
+        # Re-check parsed (auto-verify may have cleared it) before emit.
+        if parsed is not None:
+            flat_src = full_src.replace("\n", "\\n")
+            print(
+                f"[scope-agent] PATH=success scope_fn_full len={len(full_src)} "
+                f"verify_calls={verify_call_count} src={flat_src}",
+                file=sys.stderr,
+                flush=True,
+            )
+            print(json.dumps(parsed))
+            return
 
     # Emit-failure. Use a DENY-ALL scope_fn so the query agent surfaces
     # a clear failure instead of silently returning whatever it likes.
