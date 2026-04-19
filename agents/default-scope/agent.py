@@ -104,7 +104,7 @@ async def simulate_tool(args: dict[str, Any]) -> dict[str, Any]:
     return {"content": [{"type": "text", "text": json.dumps(result)}]}
 
 
-SCOPE_TOOLS = [verify_tool]  # iter 36 ISOLATED ABLATION: simulate_query removed
+SCOPE_TOOLS = [verify_tool, simulate_tool]
 server = create_hivemind_server(extra_tools=SCOPE_TOOLS)
 
 
@@ -152,35 +152,43 @@ The function you write MUST:
     what row shapes actually look like.
   mcp__hivemind__verify_scope_fn(source, tests) — FAST (ms). Compile + test
     candidate transform.
-  (simulate_query is DISABLED in this configuration — you must reason
-   about the query agent's likely behavior from /workspace/query-agent/
-   source and verify_scope_fn alone.)
+  mcp__hivemind__simulate_query(scope_fn_source, prompt) — SLOW (~60s),
+    nested LLM run. Plays the query agent as an NPC with your candidate
+    scope_fn and returns the output the USER would actually see. Use this
+    as your save/load test before emitting your final JSON.
 
 Claude Code built-in tools (Bash, Read, Write, Grep, Glob) are available.
 No external network.
 
-# THE NPC-REVIEWER VIEW — read the query agent, don't run it
+# THE NPC-SIMULATOR VIEW — save / load / revert
 
 You are playing a security-review game. Your character:
   - CAN READ the NPC (query agent) source at `/workspace/query-agent/` —
     that directory is read-only mounted with the exact Python code and
     prompt the query agent will run under your scope_fn. Use Read/Grep/Glob
     to inspect it. You cannot modify these files; the filesystem is read-only.
-  - CANNOT simulate the NPC in this configuration. Reason about it from
-    source + verify scope_fn correctness against sampled rows instead.
+  - CAN RUN the NPC with a candidate scope_fn via the MCP tool:
+      `mcp__hivemind__simulate_query(scope_fn_source=..., prompt=...)`
+    This hits a sandboxed /sandbox/simulate endpoint server-side, with
+    tape recording, so you can replay / diff runs.
+  - CAN REVERT at zero cost. Each simulate call is a fresh query-agent
+    run with a clean slate — no state persists between simulations.
+    Treat each as a save / load / retry cycle.
   - CANNOT WRITE to the NPC. The mount is RO; you cannot change the
     query agent's code or prompt. You can only change YOUR scope_fn.
 
-Typical loop:
+Typical loop — use this when unsure what the query agent will do:
 
   1. Read /workspace/query-agent/agent.py to understand its workflow.
   2. get_schema + execute_sql to see the data shapes.
   3. Draft a candidate scope_fn, write it to /tmp/cand.py via Write.
-  4. verify_scope_fn(source, tests) — compile-check. Use freely.
-  5. If tests fail or output looks unsafe, revise scope_fn, step 4 again.
-  6. When scope_fn passes tests, emit the final JSON.
+  4. verify_scope_fn(source, tests) — compile-check.
+  5. simulate_query — see what final output the user actually gets.
+  6. If the output leaks or is useless, revise scope_fn, step 4 again.
+  7. When output is SAFE + USEFUL, emit the final JSON.
 
-Budget rule: verify_scope_fn is cheap — use it freely. No simulate.
+Budget rule: simulate_query is expensive. Use it at MOST TWICE per
+invocation. verify_scope_fn is cheap — use it freely.
 
 # WORKFLOW — YOU HAVE 20 TURNS MAX, BUT EMIT BY TURN 10
 
@@ -289,22 +297,84 @@ the query agent that content is redacted by policy.
 The query agent will write a graceful reply acknowledging the question,
 noting the redaction, and reporting the count if safe to share.
 
+## Pattern E — row filter (exclusion)
+When the policy describes a ROW-LEVEL predicate — "only rows where X",
+"within last N days", "not about topic Y", "from source Z only" — the
+presence or absence of the whole row is the privacy signal, not which
+fields it carries. Filter rows by the predicate and return only the
+qualifying ones.
+
+    def scope(sql, params, rows):
+        def qualifies(r):
+            # derive the predicate from POLICY_CONTEXT:
+            #   date within allowed window,
+            #   content not matching blocked topic terms,
+            #   source in allowed set, etc.
+            ...
+            return True / False
+
+        kept = [r for r in rows if qualifies(r)]
+        if not kept:
+            # don't leak "there are zero rows" either — Pattern D marker
+            return {"allow": True, "rows": [{
+                "policy_note": "no rows match the allowed scope",
+                "match_count": 0,
+            }]}
+        return {"allow": True, "rows": kept}
+
+Row filtering can be COMPOSED with Pattern B (redact fields on the
+rows that survive the filter) when the policy has both an exclusion
+predicate AND a sensitive-field rule.
+
 # CHOOSING A PATTERN
 
-Read the user's question + the POLICY (if provided) + the row shapes
-you'd get back. The four patterns above are the primitive output
-shapes; compose them as needed for the policy.
+Two questions, in order:
 
-  - Pure aggregate question ("how many X?") with aggregate rows → Pattern A
-  - Listing-style question with rows containing free-text identifier
-    columns → Pattern B (redact identifiers) or C (collapse to count)
-  - Listing-style question where redaction would leave too little shape
-    to interpret → Pattern C
+(1) What KIND of constraint is the policy? Classify the POLICY_CONTEXT
+    before picking a pattern. Same schema + same question may need a
+    different pattern depending on policy type.
+
+  TYPE-V  — VALUE-REDACT
+    Signal words: "block <value-class>", "strip <credential>",
+    "mask <PII>", "no <thing> in output". The policy names a VALUE
+    category (names, emails, code blocks, $amounts, tokens). The ROW
+    is fine; specific field contents are not.
+    → Pattern B (redact fields) or D (marker row for extraction).
+
+  TYPE-R  — ROW-EXCLUDE
+    Signal words: "only <predicate>", "within last <window>",
+    "about <topic>", "not <category>", "from <source>", "since
+    <date>". The policy names a ROW PREDICATE — the entire record
+    either qualifies or doesn't. Redacting fields isn't enough; the
+    mere presence of a disqualified row leaks.
+    → Pattern E (row filter), possibly composed with B for residual
+      value-redaction on the rows that survive.
+
+  TYPE-A  — AGGREGATE-ONLY
+    Signal words: "only counts", "aggregate statistics", "summary
+    only", "no individual records", "bucketed". The policy forbids
+    individual-level detail regardless of redaction.
+    → Pattern C (collapse to aggregate).
+
+  A single policy can be a composition — e.g. "only conversations
+  from the last 30 days, and strip names from those" = TYPE-R + TYPE-V
+  → Pattern E then B on the survivors.
+
+(2) Given the type, which specific row-output shape fits the user's
+    question?
+
+  - Aggregate question ("how many X?") with aggregate rows → Pattern A
+  - Listing-style under TYPE-V with free-text identifier columns →
+    Pattern B (redact) or C (collapse to count)
+  - Listing-style under TYPE-R → Pattern E (filter) + B as needed
   - Explicit extraction attempt ("list the emails", "what names",
-    "show messages containing @") → Pattern D
+    "show messages containing @") regardless of type → Pattern D
 
-When in doubt between B and C: prefer C. A count is always safe; partial
-redaction can leak if done incompletely.
+When in doubt between B and C: prefer C. A count is always safe;
+partial redaction can leak if done incompletely. When in doubt about
+policy type: sample rows via execute_sql. If the policy speaks of
+"rows / conversations / records / windows / topics", it's TYPE-R.
+If it speaks of "values / content / fields / identifiers", it's TYPE-V.
 
 For policies you don't have a pre-written pattern for (temporal windows,
 topic filters, custom categorization, etc.) — READ THE POLICY CAREFULLY
