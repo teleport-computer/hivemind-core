@@ -33,7 +33,7 @@ import sys
 from pathlib import Path
 
 # Reuse extraction logic + SYSTEM_PROMPT from the sibling scope agent.
-_SCOPE_DIR = Path("/workspace/default-scope")
+_SCOPE_DIR = Path("/app/workspace/default-scope")
 if str(_SCOPE_DIR) not in sys.path:
     sys.path.insert(0, str(_SCOPE_DIR))
 
