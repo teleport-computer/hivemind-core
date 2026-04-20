@@ -94,12 +94,22 @@ class Pipeline:
         total_tokens = 0
         mediator_agent_id = req.mediator_agent_id or self.settings.default_mediator_agent
 
+        # Pipeline-stage ablation toggles (experiments). When set, the
+        # corresponding stage is skipped entirely — no LLM spend, no
+        # filtering. Intended for defense-contribution ablations.
+        _disable_scope = os.environ.get("HIVEMIND_DISABLE_SCOPE", "").lower() in ("1", "true", "yes")
+        _disable_mediator = os.environ.get("HIVEMIND_DISABLE_MEDIATOR", "").lower() in ("1", "true", "yes")
+        if _disable_mediator:
+            mediator_agent_id = ""
+
         # Stage 0: Scope resolution → produces a scope_fn
         scope_fn = None
         scope_fn_source = ""
         scope_budget = max(1, int(remaining * SCOPE_BUDGET_FRACTION))
 
-        if req.scope_agent_id:
+        if _disable_scope:
+            pass
+        elif req.scope_agent_id:
             scope_fn, scope_fn_source, scope_usage = await self._run_scope_agent(
                 req, max_tokens=scope_budget,
             )
