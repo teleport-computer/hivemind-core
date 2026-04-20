@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import os
 import time
 from pathlib import Path
 from typing import Callable
@@ -289,6 +290,13 @@ class Pipeline:
             # no policy is specified.
             "POLICY_CONTEXT": (req.policy or "") if hasattr(req, "policy") else "",
         }
+        # Forward ablation/feature toggles into the scope container so that
+        # env-var-based experiments set on the server process actually take effect.
+        for _toggle in ("HIVEMIND_DISABLE_SIMULATE", "HIVEMIND_DISABLE_SEMLIFT",
+                        "HIVEMIND_SCOPE_MAX_ATTEMPTS"):
+            _val = os.environ.get(_toggle)
+            if _val is not None:
+                env[_toggle] = _val
 
         # Scope agents get FULL_READ access
         scope_tools = build_sql_tools(self.db, AccessLevel.FULL_READ)
