@@ -26,7 +26,7 @@ RESULTS_TSV = REPO / "autoresearch" / "results.tsv"
 BENCH_RESULTS_DIR = REPO / "bench" / "results"
 SERVER_LOG = Path("/tmp/server.log")
 
-PASSWORD = os.environ.get("WATCH_PASSWORD", "REDACTED")
+PASSWORD = os.environ.get("WATCH_PASSWORD") or ""  # MUST be set via env; empty → all logins rejected
 COOKIE_NAME = "watch_session"
 COOKIE_MAX_AGE = 60 * 60 * 24 * 30  # 30 days
 # Issued tokens are kept in-memory; reboot invalidates sessions.
@@ -515,7 +515,7 @@ def login_form(request: Request) -> HTMLResponse:
 
 @app.post("/login")
 def login_submit(password: str = Form(...)) -> Response:
-    if not hmac.compare_digest(password, PASSWORD):
+    if not PASSWORD or not hmac.compare_digest(password, PASSWORD):
         # Small delay to dampen brute-force.
         time.sleep(0.5)
         return HTMLResponse(

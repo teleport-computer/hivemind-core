@@ -246,9 +246,8 @@ wins and scope skips the whole protocol.
 
 ## Infrastructure built during this session
 
-- `watch/dashboard.py` — live autoresearch UI at
-  https://watch.account.link (pw `REDACTED`), Caddy+LE TLS, bound
-  to 127.0.0.1:9999 behind reverse proxy.
+- `watch/dashboard.py` — live autoresearch UI. Caddy+LE TLS, bound
+  to 127.0.0.1:9999 behind reverse proxy. Password via WATCH_PASSWORD env.
 - `HIVEMIND_TRACE_DIR` — bridge-level tape persistence. Every LLM
   request/response pair saved as JSONL per session.
 - `_extract_scope_json` rescue path — scrapes `def scope(` blocks
@@ -258,3 +257,88 @@ wins and scope skips the whole protocol.
   chain-of-thought-bypass failure mode.
 - t3.large deployment with Docker, Postgres 16 (127.0.0.1:5433),
   4 agent images, 912 conversations / 17365 messages loaded.
+
+---
+
+## Update 2026-04-20 — iters 40-45
+
+**iter36 baseline consolidated.** HIVEMIND_SCOPE_MAX_ATTEMPTS=1 locked in as
+default. Retry is strictly negative on this benchmark — scope's first emit is
+usually right, and recovery attempts on rejection inherit the wrong-strategy
+bias from turn 1. Off by default.
+
+**Parallel-port ablation orchestrator** (`autoresearch/parallel_ablations.sh`)
+lets experiments run on disjoint ports (8101-8104) without touching the
+long-running iter36 on :8100. Registry-driven, auto-commits results.tsv
+per run, supports non-default scope images via HIVEMIND_DEFAULT_SCOPE_AGENT
+autoload.
+
+### iter37 — ablate semantic-lift on Haiku
+Dropped the SAMPLE-FIRST / detect-second prompt block. OVERALL C 82
+vs iter36 C 84 — barely moves the aggregate. But hide the per-scenario
+swings: PII −20, topic_filtering +12, temporal_scoping +6. Sem-lift is
+bimodal: boosts value-pattern detection (PII), pushes scope away from
+row-exclusion strategies where row-exclusion is correct (topic/temporal).
+
+### iter42 — whole-agent claw-code runtime (Kimi K2)
+Swapped claude-agent-sdk for claw-code (Rust Claude Code clone) as the
+scope agent's runtime. OVERALL C 78. Runtime differences end up in noise
+(+3 def / +40% wall time vs SDK Kimi); model choice dominates. Validated
+the MCP stdio proxy works for alternative runtimes but no quality unlock.
+
+### iter43 — simulate-as-frontier-search prompt (Haiku)
+Rewrote the scope system prompt to treat simulate_query as an iterative
+exploration tool: budget 2-5 simulate calls, compare outputs, revise
+scope_fn between simulations. OVERALL C 77 (−7 vs iter36). Agent took
+the prompt's "simulate multiple" instruction as "simulate twice on
+tiny variations of the same strategy" rather than "try different
+strategies" — a single bet repeated, not a search.
+
+### iter44 — policy-type classifier (REVERTED)
+Added a prompt prefix that classified the policy into 4 types
+(VALUE/ROW/AGGREGATE/INJECTION) and routed strategy accordingly.
+Killed before launch — the 4-type taxonomy mapped 1:1 to the 6 benchmark
+scenarios, which is benchmark-overfitting. The real world has many more
+policy variants than four. Same mistake iter21 made in reverse; iter24-26
+"pure template" direction was the correct walking-back of it.
+
+### iter45 — concurrent simulate_multi (running)
+Added `/sandbox/simulate_batch` endpoint + `simulate_multi` MCP tool (gated
+on HIVEMIND_SCOPE_MULTI=true). Scope passes up to 3 candidate scope_fns
+representing DIFFERENT strategies (row-exclusion vs value-redaction vs
+aggregation); they run concurrently via asyncio.gather with the budget
+split across them, and scope picks the winner from their outputs.
+
+This is the generic fix for the iter43 "single-bet-repeated" failure and
+the bimodal semantic-lift problem: instead of guessing a strategy,
+empirically test several at the cost of one simulate call.
+
+## Calibrated superpower values (refined 2026-04-20)
+
+| Superpower | Contribution | Notes |
+|---|---|---|
+| verify_scope_fn (AST + test cases) | +15 to +20 | Load-bearing. Catches sig/shape errors before emit. Removing would likely drop defense to D/F. |
+| POLICY_CONTEXT plumbing | +8 | iter31 ablation: −6 overall, temporal_scoping −26. Specific-window policies need the policy text in the scope prompt. |
+| semantic-lift (sample-first) | ±0 net, ±20 per-scenario | Bimodal. +20 PII, −28 topic_filtering. simulate_multi is the proposed generic fix. |
+| simulate_query (1-shot) | −2 to +4 | Overlaps with source-reading; neither is strictly load-bearing in isolation. Power unlocks with simulate_multi (iter45 testing). |
+| source-reading (/workspace/query-agent) | ~0 observable | Used in 2/40 tapes, both overlapping with simulate outcomes. simulate strictly dominates. |
+| MCP vs Claude Code builtins | 100% MCP | Scope never uses Bash/Read/Grep/Glob for SQL/verify/simulate. CLI defaults are dead weight for this agent. |
+
+## Main lessons (2026-04-20 synthesis)
+
+1. **Row-exclusion is the architectural ceiling** on Haiku. Scope's
+   toolkit expresses row-transformation (value redaction, aggregation)
+   cleanly; row exclusion (drop rows whose content matches forbidden
+   topic) less so. Model-capability-bound — simulate_multi is the
+   leverage point, not another prompt rewrite.
+2. **Don't engineer to the benchmark shape.** The policy-type classifier
+   (iter44) looked principled but encoded a 4-type taxonomy that
+   maps 1:1 to the 6 scenarios. Dead giveaway: solutions that work on
+   this bench but wouldn't generalize to arbitrary policy language.
+3. **Runtime is not a lever; model is.** claw-code vs claude-agent-sdk
+   ≈ noise. Kimi vs Haiku ≈ scenario-dependent but large. Invest
+   experiment time in model sweeps, not runtime swaps.
+4. **Simulate as comparative search, not as a post-hoc check.** Single
+   simulate at the end of a chosen strategy is not useful. Running 2-3
+   strategy candidates in parallel is the design that uses simulate's
+   save/load/revert nature (iter45).
