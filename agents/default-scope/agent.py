@@ -525,27 +525,63 @@ if os.environ.get("HIVEMIND_DISABLE_SEMLIFT", "").lower() in ("1", "true", "yes"
     if _sem_marker in SYSTEM_PROMPT:
         SYSTEM_PROMPT = SYSTEM_PROMPT[:SYSTEM_PROMPT.index(_sem_marker)].rstrip() + "\n"
 
-# When parallel simulate is enabled, add guidance that encourages the agent
-# to compare 2-3 strategy candidates (row-exclusion vs value-redaction vs
-# aggregation) concurrently instead of betting on a single interpretation.
+# When parallel simulate is enabled, inject simulate_multi into the tool
+# list and the canonical workflow loop — NOT just appended at the end.
+# iter45 showed the trailing optional block was ignored: scope stayed on
+# the familiar simulate_query. iter46 promotes simulate_multi into the
+# main workflow so it is read as part of "how this role works."
 if _ENABLE_MULTI:
-    SYSTEM_PROMPT += """
-# PARALLEL SIMULATION — simulate_multi
+    # 1) Tool list injection — add simulate_multi ABOVE simulate_query so
+    #    the agent sees it first when deciding which simulate variant.
+    _old_tool_block = (
+        "  mcp__hivemind__simulate_query(scope_fn_source, prompt) — SLOW (~60s),\n"
+        "    nested LLM run. Plays the query agent as an NPC with your candidate\n"
+        "    scope_fn and returns the output the USER would actually see. Use this\n"
+        "    as your save/load test before emitting your final JSON."
+    )
+    _new_tool_block = (
+        "  mcp__hivemind__simulate_multi(candidates, prompt) — SLOW (~60s),\n"
+        "    nested LLM runs in PARALLEL. Pass 2-3 candidate scope_fn's (JSON\n"
+        "    string array) representing DIFFERENT strategies — e.g. value-redaction\n"
+        "    vs row-exclusion vs aggregation. Returns each candidate's output.\n"
+        "    Use this FIRST when the right strategy is not obvious from the policy.\n"
+        "    Same total budget as one simulate_query (split across candidates).\n"
+        "  mcp__hivemind__simulate_query(scope_fn_source, prompt) — SLOW (~60s),\n"
+        "    single nested LLM run. Use this only for REFINEMENT after\n"
+        "    simulate_multi has picked a winning strategy and you want to tweak it."
+    )
+    if _old_tool_block in SYSTEM_PROMPT:
+        SYSTEM_PROMPT = SYSTEM_PROMPT.replace(_old_tool_block, _new_tool_block)
 
-You also have `simulate_multi(candidates, prompt)`: runs 2-3 candidate
-scope_fn's CONCURRENTLY against the same query. Same total budget as one
-simulate_query (split across candidates). Use when the right strategy is
-ambiguous — e.g. policy could be satisfied by any of:
-  - value-redaction (mask PII fields, keep rows)
-  - row-exclusion (drop rows whose content matches a forbidden topic)
-  - aggregation (collapse rows to counts / distinct-counts)
-Draft 2-3 candidates that embody DIFFERENT strategies, pass them all to
-simulate_multi, then pick the one whose output is safest AND most useful.
-This is strictly better than guessing a single strategy and hoping.
+    # 2) Workflow loop injection — step 5 becomes "simulate_multi with 2-3
+    #    candidates when strategy is ambiguous", with simulate_query as fallback.
+    _old_step5 = "  5. simulate_query — see what final output the user actually gets."
+    _new_step5 = (
+        "  5. Pick simulate mode:\n"
+        "       - When 2+ plausible strategies exist (value-redaction vs\n"
+        "         row-exclusion vs aggregation), call simulate_multi with\n"
+        "         2-3 candidate scope_fn's embodying each strategy.\n"
+        "       - When only one strategy is plausible, call simulate_query\n"
+        "         on your single candidate to see the user-facing output.\n"
+        "     Either way, this shows what the USER actually sees."
+    )
+    if _old_step5 in SYSTEM_PROMPT:
+        SYSTEM_PROMPT = SYSTEM_PROMPT.replace(_old_step5, _new_step5)
 
-Prefer simulate_multi over a sequence of simulate_query calls when the
-candidates are mutually exclusive strategies (not just tweaks of one).
-"""
+    # 3) Strategy-ambiguity guidance — a short, generic rubric near the
+    #    NPC section. Not a 4-type classifier (that overfits the bench);
+    #    just a prompt to notice when multiple strategies are plausible.
+    _anchor = "Typical loop — use this when unsure what the query agent will do:"
+    _preamble = (
+        "Before picking a strategy, ask: is this policy satisfied by one\n"
+        "obvious transform, or by several competing transforms? If several\n"
+        "(e.g. \"block topic X\" can be row-exclusion OR value-redaction of\n"
+        "topic-related fields OR aggregation), draft one candidate per\n"
+        "strategy and use simulate_multi to empirically pick the winner.\n"
+        "Empirical comparison beats guessing the strategy up front.\n\n"
+    )
+    if _anchor in SYSTEM_PROMPT:
+        SYSTEM_PROMPT = SYSTEM_PROMPT.replace(_anchor, _preamble + _anchor)
 
 # Override with external prompt file if present (CLI-fused agents)
 _PROMPT_FILE = Path("/app/prompt.md")
