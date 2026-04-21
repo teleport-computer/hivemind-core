@@ -97,6 +97,17 @@ register_exp "iter59-ci-workflow-haiku" 8119 \
     "anthropic/claude-haiku-4.5" \
     "HIVEMIND_SCOPE_CI=true HIVEMIND_AGENT_TIMEOUT=900" "" "no"
 
+# iter60: CI-phrased scenario policies (NO scope prompt change). Isolates the
+# lever — does the effect seen in iter59 come from the scope prompt injection,
+# or from the policy wording? This run keeps the default-scope prompt but
+# rewords each of the 6 baseline policies in CI/behavioral terms (denial-as-leak
+# made explicit). Default scope image, same Haiku model, same 6 scenarios.
+# HIVEMIND_BENCH_CI_POLICIES must reach the bench process — run_bench forwards
+# HIVEMIND_BENCH_* vars explicitly.
+register_exp "iter60-ci-policies-haiku" 8120 \
+    "anthropic/claude-haiku-4.5" \
+    "HIVEMIND_BENCH_CI_POLICIES=true HIVEMIND_AGENT_TIMEOUT=900" "" "no"
+
 # ─────────────────────────────────────────────────────────────────────
 # OPERATIONS
 # ─────────────────────────────────────────────────────────────────────
@@ -211,6 +222,7 @@ launch_server() {
 
 run_bench() {
     local port="$1"; local name="$2"; local model="$3"; local scope_agent="$4"
+    local extra_env="$5"
 
     local bench_args="--url http://localhost:$port --rounds 1"
     if [ -n "$scope_agent" ]; then
@@ -219,9 +231,23 @@ run_bench() {
         bench_args="$bench_args --scope-agent $scope_agent"
     fi
 
-    log "$name launching bench: $bench_args"
-    PYTHONUNBUFFERED=1 .venv/bin/python -u -m bench.cli run $bench_args \
-        > "$LOGDIR/${name}_bench.log" 2>&1
+    # Forward HIVEMIND_BENCH_* env vars to the bench process so flags like
+    # HIVEMIND_BENCH_CI_POLICIES (which reshape scenarios.py at import time)
+    # take effect. Server-only env vars are silently ignored by bench.
+    local bench_env=""
+    if [ -n "$extra_env" ]; then
+        for kv in $extra_env; do
+            case "$kv" in
+                HIVEMIND_BENCH_*)
+                    bench_env="$bench_env $kv"
+                    ;;
+            esac
+        done
+    fi
+
+    log "$name launching bench: $bench_args env:${bench_env:-none}"
+    eval "PYTHONUNBUFFERED=1$bench_env .venv/bin/python -u -m bench.cli run $bench_args \
+        > $LOGDIR/${name}_bench.log 2>&1"
     local rc=$?
     log "$name bench exit=$rc"
 
@@ -286,7 +312,7 @@ run_experiment() {
             ;;
     esac
     if launch_server "$port" "$name" "$extra_env" "$model" "$scope_agent"; then
-        run_bench "$port" "$name" "$model" "$scope_agent"
+        run_bench "$port" "$name" "$model" "$scope_agent" "$extra_env"
     else
         log "$name SERVER_LAUNCH_FAILED — skipping bench"
     fi
