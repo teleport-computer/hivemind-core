@@ -342,3 +342,75 @@ empirically test several at the cost of one simulate call.
    simulate at the end of a chosen strategy is not useful. Running 2-3
    strategy candidates in parallel is the design that uses simulate's
    save/load/revert nature (iter45).
+
+---
+
+## 2026-04-21 — iter57b: principled-mediator regression
+
+**Setup**: iter57b re-ran the iter54 config (Kimi mediator-only, scope
+disabled) but with a restructured mediator prompt that **defers to
+POLICY when passed, falls back to baked-in PII categories only when
+POLICY is absent**. The pipeline was patched to plumb `MEDIATION_POLICY`
+into the mediator sandbox.
+
+**Result**: C 80 (Def 87, Util 64), a 15-point regression vs iter54's
+A 95 (Def 100, Util 84). Defense -13, utility -20.
+
+**Interpretation**: this result is the **inverse** of what a
+well-designed principle upgrade should produce. Two non-exclusive
+explanations:
+
+1. **The benchmark's scenarios look like a generic PII-scrubbing
+   test.** iter54's hardcoded "strip names/substance/mental-health/
+   finance/medical/credentials" list was an accidental-but-lucky fit for
+   the 6 canonical scenarios. When we replaced it with policy-as-input,
+   the mediator stopped over-stripping in categories the scenario
+   policy didn't mention — the judge interpreted this as both a defense
+   leak AND a utility loss (the mediator also became less decisive, and
+   less-decisive output reads as less useful).
+2. **The hardcoded-list mediator was already overfit.** We only
+   discovered this by removing the overfit and watching the number
+   drop. The principled version is closer to what we'd deploy, but the
+   benchmark cannot measure that.
+
+Either way, the benchmark is now actively misleading: every principled
+architectural improvement will show up as a regression as long as
+iter54-style accidental-alignment is the frontier. Continuing to
+optimize against the 6 canonical scenarios would push the system
+*away* from the generalizable design.
+
+**Implication for direction**: the pivot away from benchmark-chasing is
+now empirically motivated, not just philosophically. A personalized
+privacy profile (preference pairs + per-user fine-tune) sidesteps the
+shared-prior problem between attacker-, defender-, and judge-LLMs that
+produces results like iter57b.
+
+### iter57a result (complete)
+
+**B 91** (Def 94, Util 84) on the full Kimi stack with policy-aware
+mediator.
+
+| Config                                          | Def | Util | Overall  |
+|-------------------------------------------------|-----|------|----------|
+| iter48: Kimi full, baked-in mediator            | 94  | 74   | B 88     |
+| iter54: Kimi mediator-only, baked-in            | 100 | 84   | A 95     |
+| **iter57a: Kimi full, policy-aware mediator**   | 94  | 84   | B 91     |
+| iter57b: Kimi mediator-only, policy-aware       | 87  | 64   | C 80     |
+
+The policy-aware mediator **helps** when paired with the scope agent
+(+3 vs iter48) but **hurts** when running alone (-15 vs iter54). Two
+readings:
+
+- **Complementary interpretation**: scope is already filtering rows
+  based on policy, so the mediator only needs to handle residue.
+  Policy-awareness makes that residue-handling surgical. In the
+  mediator-only configuration, the mediator has to do all the work
+  from scratch, and its baked-in broad-spectrum priors catch more than
+  policy-specific reasoning does.
+- **Noise interpretation**: 30 trials / 6 scenarios per run; ±4 points
+  is plausibly within variance. Would need re-runs to distinguish.
+
+Regardless, iter54's A 95 (accidentally-aligned baked-in mediator)
+remains the benchmark high-water mark. That's itself the signal that
+the benchmark is not measuring principledness — it's measuring prior
+alignment with the 6 chosen scenarios. The pivot rationale stands.

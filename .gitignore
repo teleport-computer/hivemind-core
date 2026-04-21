@@ -30,3 +30,9 @@ autoresearch/experiments/
 agents/default-scope-claw/claw
 agents/default-scope-claw/mcp_stdio_proxy.py
 agents/default-scope-claw/default-scope-agent.py
+
+# Research phase — raw third-party datasets (not committed; see bench/sources/README.md)
+bench/sources/opp115/
+bench/sources/privaci_bench/
+bench/sources/confaide/
+bench/sources/__pycache__/
