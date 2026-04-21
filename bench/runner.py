@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import os
 import time
 
 import httpx
+
+
+_DEFAULT_QUERY_TIMEOUT = float(os.environ.get("HIVEMIND_BENCH_QUERY_TIMEOUT", "600"))
 
 
 async def run_query(
@@ -15,7 +19,7 @@ async def run_query(
     mediator_agent_id: str | None = None,
     policy: str | None = None,
     api_key: str | None = None,
-    timeout: float = 600.0,
+    timeout: float = _DEFAULT_QUERY_TIMEOUT,
     max_retries: int = 2,
 ) -> dict:
     """POST /v1/query and return {output, mediated, usage, latency_ms, error}.
