@@ -15,6 +15,7 @@ venv/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.coverage
 .DS_Store
 .claude
 tests/artifacts/
@@ -36,3 +37,6 @@ bench/sources/opp115/
 bench/sources/privaci_bench/
 bench/sources/confaide/
 bench/sources/__pycache__/
+
+# Agent backup files (kept in git history, not in working tree)
+agents/*/*.py.bak

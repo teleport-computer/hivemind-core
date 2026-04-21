@@ -1,18 +1,10 @@
-"""Default scope agent — DIAGNOSTIC BUILD (2026-04-17).
+"""Default scope agent — SDK-based build.
 
-SDK-based scope agent with explicit stderr capture to root-cause the
-"Fatal error in message reader: Command failed with exit code 1" crash.
-
-Key differences from the no-SDK rewrite:
-  - Uses claude_agent_sdk.query() with MCP tools (Claude Code agent loop)
-  - max_turns=6 (matches query agent; bounds the Node CLI exposure window)
-  - stderr=captured_stderr.append on ClaudeAgentOptions (captures Node CLI output)
-  - ALWAYS dumps captured stderr at end (success OR failure) — the base SDK
-    hardcodes the error string "Check stderr output for details" without
-    actually surfacing the Node CLI's stderr, so the crash looks opaque. This
-    build forces it into our server log for diagnosis.
-
-Revert to the no-SDK build via: cp agent_no_sdk.py.bak agent.py (and rebuild).
+Uses claude_agent_sdk.query() with MCP tools (Claude Code agent loop).
+max_turns=20, with bench-measured turn-10 emit deadline in the prompt.
+Captures Node CLI stderr and always dumps it at end (success or failure)
+because the base SDK surfaces only the opaque "Check stderr output for
+details" message without forwarding the actual stderr.
 
 Env vars (set automatically by the sandbox):
   BRIDGE_URL, SESSION_TOKEN — bridge connection
