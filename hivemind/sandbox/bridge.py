@@ -17,8 +17,8 @@ from .models import (
     AnthropicMessagesRequest,
     BridgeLLMRequest,
     BridgeLLMResponse,
-    BridgeS3UploadRequest,
-    BridgeS3UploadResponse,
+    BridgeArtifactUploadRequest,
+    BridgeArtifactUploadResponse,
     BridgeToolRequest,
     BridgeToolResponse,
     OpenAIChatRequest,
@@ -249,7 +249,8 @@ class BridgeServer:
         run_query_fn: Callable | None = None,
         scope_query_agent_id: str | None = None,
         replay_tape: list[dict] | None = None,
-        s3_uploader=None,
+        artifact_store=None,
+        artifact_retention_seconds: int = 86400,
         run_id: str | None = None,
         run_store=None,
     ):
@@ -263,10 +264,10 @@ class BridgeServer:
         self.agent_store = agent_store
         self.run_query_fn = run_query_fn
         self.scope_query_agent_id = scope_query_agent_id
-        self.s3_uploader = s3_uploader
+        self.artifact_store = artifact_store
+        self.artifact_retention_seconds = artifact_retention_seconds
         self.run_id = run_id
         self.run_store = run_store
-        self.pending_s3_uploads: list[dict] = []
         self._server: uvicorn.Server | None = None
         self._task: asyncio.Task | None = None
         self._sock: socket.socket | None = None
@@ -297,9 +298,21 @@ class BridgeServer:
                 self._recording_tape.record(req_hash, kwargs, cached)
                 return cached
 
-        # Live call — enforce budget
+        # Live call — enforce budget.
+        #
+        # Clamp the caller's requested max_tokens to what's actually left in
+        # the budget. Clients like Claude Code CLI send a large nominal cap
+        # (~40k) that almost never reflects actual completion size (<1k for
+        # most turns); rejecting on the nominal cap wastes otherwise-fine
+        # calls. Real usage is still recorded post-hoc, so the budget
+        # invariant holds.
         planned_prompt_tokens = _estimate_prompt_tokens(kwargs["messages"])
-        planned_completion_tokens = kwargs.get("max_tokens", 4096)
+        remaining_tokens = self.budget.remaining()["tokens"]
+        room_for_completion = max(1, remaining_tokens - planned_prompt_tokens)
+        requested_completion = kwargs.get("max_tokens", 4096)
+        if requested_completion > room_for_completion:
+            kwargs["max_tokens"] = room_for_completion
+        planned_completion_tokens = kwargs["max_tokens"]
         budget_error = self.budget.check(
             planned_prompt_tokens=planned_prompt_tokens,
             planned_completion_tokens=planned_completion_tokens,
@@ -795,16 +808,18 @@ class BridgeServer:
                     results=results,
                 )
 
-        # ── S3 upload endpoint (query agents with run tracking) ──
+        # ── Artifact upload endpoint (query agents with run tracking) ──
 
-        if bridge.run_id and bridge.s3_uploader:
+        if bridge.run_id and bridge.artifact_store:
 
             @app.post(
-                "/sandbox/s3-upload",
+                "/sandbox/artifact-upload",
                 dependencies=[Depends(_check_token)],
-                response_model=BridgeS3UploadResponse,
+                response_model=BridgeArtifactUploadResponse,
             )
-            async def s3_upload(req: BridgeS3UploadRequest) -> BridgeS3UploadResponse:
+            async def artifact_upload(
+                req: BridgeArtifactUploadRequest,
+            ) -> BridgeArtifactUploadResponse:
                 import base64
 
                 try:
@@ -812,18 +827,23 @@ class BridgeServer:
                 except Exception:
                     raise HTTPException(400, "Invalid base64 content")
 
-                key = f"{bridge.run_id}/{req.filename}"
-
-                # Buffer the upload — actual S3 upload happens after mediator
-                placeholder_url = f"s3://pending/{key}"
-                bridge.pending_s3_uploads.append({
-                    "key": key,
-                    "data": data,
-                    "content_type": req.content_type,
-                    "placeholder_url": placeholder_url,
-                })
-
-                return BridgeS3UploadResponse(s3_url=placeholder_url)
+                # Write directly to the Postgres-backed ArtifactStore.
+                # No S3, no bucket credentials, no presigned URLs.
+                result = await asyncio.to_thread(
+                    bridge.artifact_store.put,
+                    bridge.run_id,
+                    req.filename,
+                    data,
+                    req.content_type,
+                )
+                path = (
+                    f"/v1/query/runs/{bridge.run_id}/artifacts/{req.filename}"
+                )
+                return BridgeArtifactUploadResponse(
+                    path=path,
+                    size_bytes=result["size_bytes"],
+                    retention_seconds=bridge.artifact_retention_seconds,
+                )
 
         return app
 

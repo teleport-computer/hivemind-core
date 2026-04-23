@@ -198,19 +198,26 @@ class VerifyScopeResponse(BaseModel):
     results: list[ScopeTestResult] = Field(default_factory=list)
 
 
-# ── S3 upload models (query agents with run tracking) ──
+# ── Artifact upload models (query agents with run tracking) ──
 
 
-class BridgeS3UploadRequest(BaseModel):
-    """Request from agent container to bridge POST /sandbox/s3-upload."""
+class BridgeArtifactUploadRequest(BaseModel):
+    """Request from agent container to bridge POST /sandbox/artifact-upload."""
 
     filename: str
     content_base64: str  # Base64-encoded file content
     content_type: str = "application/octet-stream"
 
 
-class BridgeS3UploadResponse(BaseModel):
-    """Response from bridge POST /sandbox/s3-upload."""
+class BridgeArtifactUploadResponse(BaseModel):
+    """Response from bridge POST /sandbox/artifact-upload.
 
-    s3_url: str
+    Artifacts are stored in the server's Postgres (encrypted at rest under
+    the enclave's KMS key) and fetched via GET path. Retention is the
+    server-wide artifact TTL (default 24h).
+    """
+
+    path: str  # e.g. /v1/query/runs/{run_id}/artifacts/{filename}
+    size_bytes: int
+    retention_seconds: int
     error: str | None = None

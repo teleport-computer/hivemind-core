@@ -91,6 +91,21 @@ class Database:
                         output TEXT
                     )
                 """)
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS _hivemind_query_artifacts (
+                        run_id TEXT NOT NULL,
+                        filename TEXT NOT NULL,
+                        content BYTEA NOT NULL,
+                        content_type TEXT NOT NULL DEFAULT 'application/octet-stream',
+                        size_bytes BIGINT NOT NULL,
+                        created_at DOUBLE PRECISION NOT NULL,
+                        PRIMARY KEY (run_id, filename)
+                    )
+                """)
+                cur.execute(
+                    "CREATE INDEX IF NOT EXISTS _hivemind_query_artifacts_created_idx "
+                    "ON _hivemind_query_artifacts (created_at)"
+                )
                 # Migrate existing tables: add columns if missing
                 for col, coltype in [
                     ("build_started_at", "DOUBLE PRECISION"),
@@ -230,6 +245,21 @@ class HttpDatabase:
                 mediator_ended_at DOUBLE PRECISION,
                 output TEXT
             )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS _hivemind_query_artifacts (
+                run_id TEXT NOT NULL,
+                filename TEXT NOT NULL,
+                content BYTEA NOT NULL,
+                content_type TEXT NOT NULL DEFAULT 'application/octet-stream',
+                size_bytes BIGINT NOT NULL,
+                created_at DOUBLE PRECISION NOT NULL,
+                PRIMARY KEY (run_id, filename)
+            )
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS _hivemind_query_artifacts_created_idx
+            ON _hivemind_query_artifacts (created_at)
             """,
         ]:
             self.execute_commit(ddl)

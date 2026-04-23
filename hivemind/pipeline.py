@@ -33,12 +33,28 @@ MEDIATOR_MIN_TOKENS = 128
 # starves the mediator and triggers a 429 → SDK crash. 30k gives
 # comfortable headroom for at least one full mediator call.
 MEDIATOR_TOKEN_RESERVE = 30_000
+# Below this fraction of remaining budget the flat reserve gets downsized
+# so we never hand more than this share to the mediator and leave the
+# query agent with too little to make progress.
+MEDIATOR_RESERVE_FRACTION = 0.3
 # Scope is capped to a fraction of the global budget so it cannot starve
 # the downstream query + mediator agents. A single Claude Code CLI call
 # typically sends ~20-25k tokens in its first request (system prompt + tools
 # + context) — if scope consumes the whole budget the bridge returns 429 to
 # query's very first call and the SDK subprocess exits with code 1.
 SCOPE_BUDGET_FRACTION = 0.5
+
+
+def _mediator_reserve(remaining: int) -> int:
+    """Return how many tokens to reserve from the query stage for mediator.
+
+    Proportional to remaining budget (capped by MEDIATOR_TOKEN_RESERVE),
+    floored at MEDIATOR_MIN_TOKENS, and never so large that the query
+    stage would drop below MEDIATOR_MIN_TOKENS itself.
+    """
+    desired = min(MEDIATOR_TOKEN_RESERVE, int(remaining * MEDIATOR_RESERVE_FRACTION))
+    desired = max(MEDIATOR_MIN_TOKENS, desired)
+    return min(desired, max(0, remaining - MEDIATOR_MIN_TOKENS))
 
 
 class Pipeline:
@@ -133,11 +149,7 @@ class Pipeline:
 
         query_max_tokens = remaining
         if mediator_agent_id and remaining > MEDIATOR_MIN_TOKENS:
-            reserve = min(
-                MEDIATOR_TOKEN_RESERVE,
-                max(0, remaining - MEDIATOR_MIN_TOKENS),
-            )
-            query_max_tokens = max(1, remaining - reserve)
+            query_max_tokens = max(1, remaining - _mediator_reserve(remaining))
 
         output, query_usage = await self._run_query_agent(
             query_agent_id=query_agent_id,
@@ -208,11 +220,7 @@ class Pipeline:
         return_tape: bool = False,
         extra_volumes: dict[str, dict[str, str]] | None = None,
     ):
-        """Run a Docker agent with tools and return its stdout.
-
-        backend.run() always appends pending_s3_uploads as the last element.
-        This helper strips it so existing callers see the same shape as before.
-        """
+        """Run a Docker agent with tools and return its stdout."""
         backend = SandboxBackend(
             self.llm_client,
             self.llm_model,
@@ -221,7 +229,7 @@ class Pipeline:
             agent_store=self.agent_store,
         )
 
-        raw = await backend.run(
+        return await backend.run(
             role=role,
             env=env,
             tools=tools,
@@ -236,11 +244,6 @@ class Pipeline:
             return_tape=return_tape,
             extra_volumes=extra_volumes,
         )
-
-        # Strip trailing pending_s3_uploads from the result
-        if isinstance(raw, tuple):
-            return raw[:-1] if len(raw) > 2 else raw[0] if len(raw) == 2 else raw
-        return raw
 
     async def _run_scope_agent(
         self,
@@ -444,19 +447,16 @@ class Pipeline:
             return_tape=return_tape,
         )
 
-        # backend.run() appends pending_s3_uploads as last tuple element;
-        # strip it here since _run_query_agent callers don't need it.
         if return_usage and return_tape:
-            output, usage, tape, _uploads = run_result
+            output, usage, tape = run_result
             return output, usage, tape
         elif return_usage:
-            output, usage, _uploads = run_result
+            output, usage = run_result
             return output, usage
         elif return_tape:
-            output, tape, _uploads = run_result
+            output, tape = run_result
             return output, {}, tape
-        output, _uploads = run_result
-        return output
+        return run_result
 
     async def _run_mediator_agent(
         self,
@@ -491,7 +491,7 @@ class Pipeline:
         async def noop_tool_call(name: str, args: dict) -> str:
             return "Error: mediator agents have no tool access"
 
-        output, usage, _uploads = await backend.run(
+        output, usage = await backend.run(
             role="mediator",
             env=env,
             tools=[],
@@ -581,16 +581,19 @@ class Pipeline:
         agent_id: str,
         run_id: str,
         run_store,
-        s3_uploader=None,
+        artifact_store=None,
+        artifact_retention_seconds: int = 86400,
         prompt: str = "",
         scope_agent_id: str | None = None,
         mediator_agent_id: str | None = None,
         max_tokens: int | None = None,
     ) -> None:
-        """Run the full 3-stage pipeline with run tracking and S3 upload.
+        """Run the full 3-stage pipeline with run tracking and artifact upload.
 
-        Stage 0: Scope agent   → produces scope_fn to filter SQL results
-        Stage 1: Query agent   → executes with scoped DB access + S3 upload
+        Stage 0: Scope agent    → produces scope_fn to filter SQL results
+        Stage 1: Query agent    → executes with scoped DB access; may POST
+                                  /sandbox/artifact-upload → writes straight to
+                                  _hivemind_query_artifacts (no S3)
         Stage 2: Mediator agent → audits/redacts query output
 
         Updates run_store status through the lifecycle:
@@ -654,11 +657,7 @@ class Pipeline:
             )
             query_max_tokens = remaining
             if resolved_mediator_id and remaining > MEDIATOR_MIN_TOKENS:
-                reserve = min(
-                    MEDIATOR_TOKEN_RESERVE,
-                    max(0, remaining - MEDIATOR_MIN_TOKENS),
-                )
-                query_max_tokens = max(1, remaining - reserve)
+                query_max_tokens = max(1, remaining - _mediator_reserve(remaining))
 
             tools = build_sql_tools(
                 self.db, AccessLevel.SCOPED, scope_fn=scope_fn,
@@ -685,18 +684,18 @@ class Pipeline:
                 agent_config,
             )
 
-            result = await backend.run(
+            query_output, query_usage = await backend.run(
                 role="query",
                 env=env,
                 tools=tools,
                 on_tool_call=on_tool_call,
                 max_tokens=query_max_tokens,
-                s3_uploader=s3_uploader,
+                artifact_store=artifact_store,
+                artifact_retention_seconds=artifact_retention_seconds,
                 run_id=run_id,
                 run_store=run_store,
                 return_budget_summary=True,
             )
-            query_output, query_usage, pending_uploads = result
             used = query_usage.get("total_tokens", 0)
             remaining = max(1, remaining - used)
             await asyncio.to_thread(
@@ -742,35 +741,13 @@ class Pipeline:
                             ended_at=time.time(),
                         )
 
-            # -- Post-mediator: execute buffered S3 uploads --
-            s3_url = None
-            if pending_uploads and s3_uploader:
-                for upload in pending_uploads:
-                    placeholder = upload["placeholder_url"]
-                    try:
-                        real_url = await asyncio.to_thread(
-                            s3_uploader.upload_bytes,
-                            upload["key"],
-                            upload["data"],
-                            upload["content_type"],
-                        )
-                        s3_url = real_url
-                        # Replace placeholder in output so user gets real URL
-                        if query_output:
-                            query_output = query_output.replace(
-                                placeholder, real_url
-                            )
-                    except Exception as e:
-                        logger.warning(
-                            "Deferred S3 upload failed for run %s: %s",
-                            run_id, e,
-                        )
-
-            # Mark completed + save output
+            # Artifacts (if any) were written straight to Postgres during
+            # the query-agent turn via /sandbox/artifact-upload. No post-
+            # mediator commit needed — failed runs are swept by the TTL
+            # job in hivemind.core.
             await asyncio.to_thread(
                 run_store.update_status, run_id, "completed",
                 output=(query_output or "")[:10000],
-                **({"s3_url": s3_url} if s3_url else {}),
             )
 
         except Exception as e:

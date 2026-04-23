@@ -1,8 +1,8 @@
 """TikTok watch-history analytics query agent.
 
 Queries the watch-history records, asks the LLM to summarise hashtag
-themes and per-user statistics, then uploads a JSON report to R2 via the
-bridge S3 endpoint.
+themes and per-user statistics, then uploads a JSON report to the
+Postgres-backed artifact store via the bridge.
 
 Env vars (set by hivemind):
   BRIDGE_URL      - HTTP endpoint for the bridge server
@@ -45,19 +45,19 @@ def llm_call(messages: list[dict], max_tokens: int = 4096) -> str:
     return resp.json()["content"]
 
 
-def s3_upload(filename: str, content: bytes, content_type: str = "application/json") -> str | None:
+def artifact_upload(filename: str, content: bytes, content_type: str = "application/json") -> dict | None:
     try:
-        resp = client.post("/sandbox/s3-upload", json={
+        resp = client.post("/sandbox/artifact-upload", json={
             "filename": filename,
             "content_base64": base64.b64encode(content).decode(),
             "content_type": content_type,
         })
         if resp.status_code >= 400:
-            print(f"[s3-upload] failed ({resp.status_code}): {resp.text[:200]}", file=sys.stderr)
+            print(f"[artifact-upload] failed ({resp.status_code}): {resp.text[:200]}", file=sys.stderr)
             return None
-        return resp.json()["s3_url"]
+        return resp.json()
     except Exception as e:
-        print(f"[s3-upload] exception: {e}", file=sys.stderr)
+        print(f"[artifact-upload] exception: {e}", file=sys.stderr)
         return None
 
 
@@ -151,16 +151,17 @@ def main():
         "llm_analysis": analysis,
     }
 
-    # ── Step 5: Upload to R2 (optional — gracefully skip on failure) ──
+    # ── Step 5: Upload to artifact store (optional — gracefully skip on failure) ──
     report_bytes = json.dumps(report, indent=2, ensure_ascii=False).encode()
-    s3_url = s3_upload("report.json", report_bytes, "application/json")
+    upload = artifact_upload("report.json", report_bytes, "application/json")
 
     # Print result (captured as agent stdout by hivemind-core)
-    print(json.dumps({
-        "status": "completed",
-        "s3_url": s3_url,
-        "report": report,
-    }, indent=2, ensure_ascii=False))
+    result = {"status": "completed", "report": report}
+    if upload:
+        result["artifact_path"] = upload["path"]
+        result["artifact_size_bytes"] = upload["size_bytes"]
+        result["artifact_retention_seconds"] = upload["retention_seconds"]
+    print(json.dumps(result, indent=2, ensure_ascii=False))
 
 
 if __name__ == "__main__":

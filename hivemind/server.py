@@ -13,7 +13,7 @@ from uuid import uuid4
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from pydantic import ValidationError
 
 from .config import Settings
@@ -169,6 +169,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def lifespan(app: FastAPI):
         hm = Hivemind(settings)
         app.state.hivemind = hm
+        hm.start_retention_sweeper()
         yield
         await hm.close()
 
@@ -759,7 +760,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 agent_id=query_agent_id,
                 run_id=run_id,
                 run_store=hm.run_store,
-                s3_uploader=hm.s3_uploader,
+                artifact_store=hm.artifact_store,
+                artifact_retention_seconds=hm.settings.artifact_retention_seconds,
                 prompt=prompt,
                 scope_agent_id=scope_agent_id,
                 mediator_agent_id=mediator_agent_id,
@@ -915,7 +917,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 agent_id=agent_id,
                 run_id=run_id,
                 run_store=hm.run_store,
-                s3_uploader=hm.s3_uploader,
+                artifact_store=hm.artifact_store,
+                artifact_retention_seconds=hm.settings.artifact_retention_seconds,
                 prompt=prompt,
                 scope_agent_id=scope_agent_id,
                 mediator_agent_id=mediator_agent_id,
@@ -940,11 +943,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         run = await asyncio.to_thread(hm.run_store.get, run_id)
         if not run:
             raise HTTPException(404, "Run not found")
-        run["download_url"] = None
-        if run.get("s3_url") and hm.s3_uploader:
-            run["download_url"] = await asyncio.to_thread(
-                hm.s3_uploader.presign_url, run["s3_url"]
-            )
+        run["artifacts"] = await asyncio.to_thread(
+            hm.artifact_store.list_for_run, run_id
+        )
+        run["artifact_retention_seconds"] = hm.settings.artifact_retention_seconds
         return JSONResponse(
             content=run,
             headers={"Cache-Control": "no-cache, no-store"},
@@ -969,11 +971,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         run = await asyncio.to_thread(hm.run_store.get, run_id)
         if not run:
             raise HTTPException(404, "Run not found")
-        run["download_url"] = None
-        if run.get("s3_url") and hm.s3_uploader:
-            run["download_url"] = await asyncio.to_thread(
-                hm.s3_uploader.presign_url, run["s3_url"]
-            )
+        run["artifacts"] = await asyncio.to_thread(
+            hm.artifact_store.list_for_run, run_id
+        )
+        run["artifact_retention_seconds"] = hm.settings.artifact_retention_seconds
         return JSONResponse(
             content=run,
             headers={"Cache-Control": "no-cache, no-store"},
@@ -985,6 +986,42 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     ):
         """List recent agent runs."""
         return await asyncio.to_thread(hm.run_store.list_recent, min(limit, 100))
+
+    # ── Artifact fetch (Postgres-backed; no S3) ──
+
+    @app.get(
+        "/v1/query/runs/{run_id}/artifacts/{filename:path}",
+        dependencies=[Depends(check_auth)],
+    )
+    async def get_run_artifact(
+        run_id: str, filename: str, hm: Hivemind = Depends(get_hivemind)
+    ):
+        """Stream a query-agent artifact.
+
+        Artifacts live in Postgres (encrypted at rest under the enclave's
+        KMS key) and expire after `artifact_retention_seconds` (default 24h).
+        Nothing is written to external object storage.
+        """
+        artifact = await asyncio.to_thread(
+            hm.artifact_store.get, run_id, filename
+        )
+        if not artifact:
+            raise HTTPException(404, "Artifact not found or expired")
+        ttl = hm.settings.artifact_retention_seconds
+        import email.utils
+        expires_at = float(artifact["created_at"]) + ttl
+        return Response(
+            content=bytes(artifact["content"]),
+            media_type=artifact["content_type"] or "application/octet-stream",
+            headers={
+                "Cache-Control": "no-cache, no-store",
+                "X-Retention-Seconds": str(ttl),
+                "Expires": email.utils.formatdate(expires_at, usegmt=True),
+                "Content-Disposition": (
+                    f'attachment; filename="{filename}"'
+                ),
+            },
+        )
 
     # ── Health ──
 

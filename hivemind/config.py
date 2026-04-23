@@ -38,13 +38,12 @@ class Settings(BaseSettings):
     max_tokens: int = 300_000
     agent_timeout: int = 300
 
-    # S3 configuration for query agent result uploads
-    s3_bucket: str = ""
-    s3_region: str = ""
-    s3_access_key_id: str = ""
-    s3_secret_access_key: str = ""
-    s3_endpoint_url: str = ""  # For S3-compatible services (MinIO, R2, etc.)
-    s3_prefix: str = "query-agent-runs"  # Key prefix for uploaded results
+    # Artifact retention — how long query-agent artifact uploads and run
+    # output/error text are kept before the periodic sweeper purges them.
+    # Artifacts and run output live in Postgres inside the TEE; there is
+    # no external object store. 24h default keeps disk bounded.
+    artifact_retention_seconds: int = 86400
+    artifact_sweep_interval_seconds: int = 3600
 
     # Default agents (Docker images) — empty = not available
     autoload_default_agents: bool = True

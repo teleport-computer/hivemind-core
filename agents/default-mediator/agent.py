@@ -131,6 +131,7 @@ async def main() -> None:
                 permission_mode="bypassPermissions",
                 cwd="/tmp",
                 stderr=captured_stderr.append,
+                extra_args={"debug": "api,mcp,hooks"},
             ),
         ):
             if hasattr(message, "result"):

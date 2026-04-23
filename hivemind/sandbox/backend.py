@@ -110,7 +110,8 @@ class SandboxBackend:
         return_budget_summary: bool = False,
         replay_tape: list[dict] | None = None,
         return_tape: bool = False,
-        s3_uploader=None,
+        artifact_store=None,
+        artifact_retention_seconds: int = 86400,
         run_id: str | None = None,
         run_store=None,
         extra_volumes: dict[str, dict[str, str]] | None = None,
@@ -150,7 +151,8 @@ class SandboxBackend:
             run_query_fn=run_query_fn,
             scope_query_agent_id=scope_query_agent_id,
             replay_tape=replay_tape,
-            s3_uploader=s3_uploader,
+            artifact_store=artifact_store,
+            artifact_retention_seconds=artifact_retention_seconds,
             run_id=run_id,
             run_store=run_store,
         )
@@ -214,15 +216,14 @@ class SandboxBackend:
                     output = "(Agent produced no output)"
 
             tape_data = bridge.get_recorded_tape() if return_tape else None
-            pending_uploads = bridge.pending_s3_uploads
 
             if return_budget_summary and return_tape:
-                return output, budget.summary(), tape_data, pending_uploads
+                return output, budget.summary(), tape_data
             elif return_budget_summary:
-                return output, budget.summary(), pending_uploads
+                return output, budget.summary()
             elif return_tape:
-                return output, tape_data, pending_uploads
-            return output, pending_uploads
+                return output, tape_data
+            return output
 
         finally:
             await bridge.stop()

@@ -88,3 +88,4 @@ class HealthResponse(BaseModel):
     status: str = "ok"
     table_count: int
     version: str
+    artifact_retention_seconds: int = 86400

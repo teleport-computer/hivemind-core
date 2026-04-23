@@ -67,16 +67,18 @@ POST /v1/query-agents/submit  (multipart/form-data)
 │  │  Stage 1: Query Agent (用户上传的自定义 agent)      │      │
 │  │                                                   │      │
 │  │  权限: SCOPED (SQL 结果经 scope_fn 过滤)           │      │
-│  │  能力: execute_sql, get_schema, llm/chat, s3-upload│      │
+│  │  能力: execute_sql, get_schema, llm/chat,          │      │
+│  │       artifact-upload                             │      │
 │  │                                                   │      │
 │  │  execute_sql 流程:                                 │      │
 │  │    agent → bridge → DB proxy → 拿到原始 rows       │      │
 │  │                   → scope_fn(sql, params, rows)    │      │
 │  │                   → 返回过滤后的 rows 给 agent      │      │
 │  │                                                   │      │
-│  │  s3-upload 流程:                                   │      │
-│  │    agent → bridge → S3Uploader → R2               │      │
-│  │                   → 更新 run record (s3_url)       │      │
+│  │  artifact-upload 流程:                             │      │
+│  │    agent → bridge → ArtifactStore (Postgres BYTEA)│      │
+│  │                   → 返回 /v1/query/runs/.../path   │      │
+│  │                   → 24h TTL 后自动清理              │      │
 │  │                                                   │      │
 │  │  输出: stdout (query 结果文本)                      │      │
 │  └─────────────────────┬─────────────────────────────┘      │
@@ -106,8 +108,15 @@ POST /v1/query-agents/submit  (multipart/form-data)
 {
   "run_id": "5f3576f4100c",
   "status": "completed",
-  "s3_url": "s3://hivemind-core-demo/query-agent-runs/.../report.json",
-  "download_url": "https://...presigned...",
+  "artifacts": [
+    {
+      "filename": "report.json",
+      "content_type": "application/json",
+      "size_bytes": 2431,
+      "created_at": 1711612379.123
+    }
+  ],
+  "artifact_retention_seconds": 86400,
   "error": null
 }
 ```
@@ -133,7 +142,7 @@ POST /v1/query-agents/submit  (multipart/form-data)
 | | Scope Agent | Query Agent | Mediator Agent |
 |---|---|---|---|
 | **DB 权限** | FULL_READ | SCOPED (经 scope_fn 过滤) | 无 |
-| **工具** | execute_sql, get_schema, 读 agent 源码, simulate | execute_sql, get_schema, s3-upload | 无 |
+| **工具** | execute_sql, get_schema, 读 agent 源码, simulate | execute_sql, get_schema, artifact-upload | 无 |
 | **网络** | 仅 Bridge | 仅 Bridge | 仅 Bridge |
 | **容器** | 独立 Docker，用完即删 | 独立 Docker，用完即删 | 独立 Docker，用完即删 |
 
@@ -152,9 +161,11 @@ GET /v1/query-agents/runs/{run_id}
 | `run_id` | 任务 ID |
 | `agent_id` | Query agent ID |
 | `status` | pending / running / completed / failed |
-| `s3_url` | S3 URI（如 `s3://bucket/key`） |
-| `download_url` | 7 天有效的 presigned URL，浏览器直接打开 |
+| `artifacts` | agent 写入的 artifact 列表（filename, size_bytes, content_type, created_at） |
+| `artifact_retention_seconds` | artifact 保留时间（默认 86400 = 24h） |
 | `error` | 失败时的错误信息 |
+
+artifact 下载： `GET /v1/query/runs/{run_id}/artifacts/{filename}` 返回原始字节；`X-Retention-Seconds` header 说明剩余可用时间。
 
 **轮询示例**：
 
