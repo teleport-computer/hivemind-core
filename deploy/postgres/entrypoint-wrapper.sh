@@ -9,8 +9,7 @@ set -euo pipefail
 #   3. Start backup cron if WAL-G is fully configured
 #   4. Hand off to the official postgres Docker entrypoint
 #
-# KMS integration temporarily disabled — all secrets come from environment.
-# To re-enable KMS, see git history for the dstack-sdk derivation block.
+# All secrets come from environment variables.
 
 # --- Validate DB password ---
 if [ -z "${POSTGRES_PASSWORD:-}" ]; then

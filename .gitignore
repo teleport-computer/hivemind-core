@@ -18,6 +18,7 @@ venv/
 .coverage
 .DS_Store
 .claude
+.hivemind/
 tests/artifacts/
 
 hivemind-core-amiller-cvm-deploy-demo

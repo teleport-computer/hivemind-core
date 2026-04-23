@@ -4,11 +4,11 @@ Ready-to-upload example agents for hivemind-core. Each directory is self-contain
 
 ## Default Agents
 
-The built-in default agents (`agents/default-query/`, `default-scope/`, `default-mediator/`, `default-index/`) all use the **Claude Agent SDK** with MCP tools. They share a common bridge helper (`agents/default-common/_bridge.py`) and use `hivemind-agent-sdk-base` as their Docker base image.
+The built-in default agents (`agents/default-query/`, `default-scope/`, `default-mediator/`, `default-index/`) all use the **Claude Agent SDK** with MCP tools. They share a common bridge helper (`agents/default-common/_bridge.py`) and use `hivemind-agent-base` as their Docker base image.
 
 ```bash
 # Build base image first
-docker build -t hivemind-agent-sdk-base -f agents/base/Dockerfile.agent-sdk agents/base/
+docker build -t hivemind-agent-base -f agents/base/Dockerfile agents/base/
 
 # Build any default agent
 docker build -t hivemind-default-query agents/default-query/
@@ -73,10 +73,10 @@ result2 = simulate(prompt, scope_fn_source="def scope(sql, params, rows): ...", 
 
 Uses the **Claude Agent SDK** with custom MCP tools instead of hand-rolled HTTP. The Agent SDK handles the agentic loop automatically — you define tools, pass a prompt, and get back a result.
 
-Requires the `hivemind-agent-sdk-base` Docker image (build from `agents/base/Dockerfile.agent-sdk`).
+Requires the `hivemind-agent-base` Docker image (build from `agents/base/Dockerfile`).
 
 ```bash
-docker build -t hivemind-agent-sdk-base -f agents/base/Dockerfile.agent-sdk agents/base/
+docker build -t hivemind-agent-base -f agents/base/Dockerfile agents/base/
 docker build -t hivemind-agent-sdk-query agents/examples/agent-sdk-query/
 ```
 

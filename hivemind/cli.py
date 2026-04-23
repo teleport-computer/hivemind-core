@@ -30,7 +30,7 @@ _AGENTS_DIR = _REPO_ROOT / "agents"
 _DEFAULT_SERVICE = "http://localhost:8100"
 
 _DOCKERFILE_MD_AGENT = """\
-FROM hivemind-agent-sdk-base:latest
+FROM hivemind-agent-base:latest
 COPY _bridge.py .
 COPY agent.py .
 COPY prompt.md .

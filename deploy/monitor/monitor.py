@@ -80,29 +80,11 @@ def eth_rpc(method: str, params: list) -> dict:
 
 
 def get_notary_key() -> bytes:
-    """Get the notary signing key.
-
-    KMS integration temporarily disabled. The key must be provided via
-    the NOTARY_PRIVATE_KEY environment variable (64 hex chars).
-    """
-    # --- KMS temporarily disabled ---
-    # from dstack_sdk import DstackClient
-    #
-    # client = DstackClient()
-    # result = client.get_key("/notary/signer", purpose="signing")
-    #
-    # key_hex = result.key
-    # if not key_hex or not isinstance(key_hex, str):
-    #     raise RuntimeError(f"KMS returned invalid key (type={type(key_hex).__name__})")
-    # if len(key_hex) < 64:
-    #     raise RuntimeError(f"KMS key too short: {len(key_hex)} hex chars (need >=64)")
-    # return bytes.fromhex(key_hex[:64])
-
+    """Return the notary signing key from NOTARY_PRIVATE_KEY (64 hex chars)."""
     key_hex = os.environ.get("NOTARY_PRIVATE_KEY", "")
     if not key_hex or len(key_hex) < 64:
         raise RuntimeError(
-            "NOTARY_PRIVATE_KEY env var not set or too short (need >=64 hex chars). "
-            "KMS is temporarily disabled."
+            "NOTARY_PRIVATE_KEY env var not set or too short (need >=64 hex chars)."
         )
     return bytes.fromhex(key_hex[:64])
 
@@ -197,20 +179,12 @@ def main():
     log.info("Contract: %s", CONTRACT)
     log.info("RPC: %s", RPC_URL)
 
-    # Derive notary key (retry up to 3 times)
-    private_key = None
-    for attempt in range(3):
-        try:
-            private_key = get_notary_key()
-            break
-        except Exception as e:
-            log.error("KMS key derivation failed (attempt %d/3): %s", attempt + 1, e)
-            if attempt < 2:
-                time.sleep(5)
-    if private_key is None:
-        log.error("FATAL: Could not derive notary key after 3 attempts — exiting")
+    try:
+        private_key = get_notary_key()
+    except Exception as e:
+        log.error("FATAL: %s", e)
         sys.exit(1)
-    log.info("Notary key derived from KMS")
+    log.info("Notary key loaded from NOTARY_PRIVATE_KEY")
 
     # Start from latest block
     from_block = int(eth_rpc("eth_blockNumber", []), 16)

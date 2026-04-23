@@ -212,9 +212,8 @@ class BridgeArtifactUploadRequest(BaseModel):
 class BridgeArtifactUploadResponse(BaseModel):
     """Response from bridge POST /sandbox/artifact-upload.
 
-    Artifacts are stored in the server's Postgres (encrypted at rest under
-    the enclave's KMS key) and fetched via GET path. Retention is the
-    server-wide artifact TTL (default 24h).
+    Artifacts are stored in the server's Postgres and fetched via GET path.
+    Retention is the server-wide artifact TTL (default 24h).
     """
 
     path: str  # e.g. /v1/query/runs/{run_id}/artifacts/{filename}

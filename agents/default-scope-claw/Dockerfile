@@ -1,4 +1,4 @@
-FROM hivemind-agent-sdk-base:latest
+FROM hivemind-agent-base:latest
 
 # claw binary (built on host, copied via build context).
 # Base image runs non-root so we cannot chmod inside the build.

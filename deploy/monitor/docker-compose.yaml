@@ -1,13 +1,7 @@
 # docker-compose.yaml — Monitoring TEE for hivemind deploy governance
 #
-# Deploy as a separate dstack app:
-#   phala deploy -n hivemind-monitor -c docker-compose.yaml
-#
-# The monitoring TEE's app_id determines the notary key:
-#   notary_key = KDF(kms_root, [monitoring_app_id, "/notary/signer"])
-#   notary_address = eth_address(notary_key)
-#
-# Set this address as the notary in NotarizedAppAuth.sol.
+# The notary key is provided via NOTARY_PRIVATE_KEY (64 hex chars).
+# The derived eth address must be set as the notary in NotarizedAppAuth.sol.
 
 services:
   monitor:
@@ -18,5 +12,4 @@ services:
       NOTIFY_WEBHOOK: ${NOTIFY_WEBHOOK:-}
       IPFS_API: ${IPFS_API:-http://127.0.0.1:5001}
       POLL_INTERVAL: ${POLL_INTERVAL:-5}
-    volumes:
-      - /var/run/dstack.sock:/var/run/dstack.sock
+      NOTARY_PRIVATE_KEY: ${NOTARY_PRIVATE_KEY}

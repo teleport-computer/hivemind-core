@@ -998,9 +998,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     ):
         """Stream a query-agent artifact.
 
-        Artifacts live in Postgres (encrypted at rest under the enclave's
-        KMS key) and expire after `artifact_retention_seconds` (default 24h).
-        Nothing is written to external object storage.
+        Artifacts live in Postgres and expire after
+        `artifact_retention_seconds` (default 24h). Nothing is written to
+        external object storage.
         """
         artifact = await asyncio.to_thread(
             hm.artifact_store.get, run_id, filename
