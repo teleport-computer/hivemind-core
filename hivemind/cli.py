@@ -4,6 +4,7 @@ Remote client for a hivemind-core service deployed in a TEE.
 
 Usage:
   hivemind init [--service <url>] [--api-key <key>]
+  hivemind load <file> [--table <name>] [--format sql|csv|jsonl]
   hivemind scope "<english rules>" | --from-file <path>
   hivemind share
   hivemind query "<question>"
@@ -340,6 +341,231 @@ def scope(
     config["scope_agent_id"] = agent_id
     _save_config(config)
     click.echo(f"Scope agent: {agent_id}")
+
+
+def _split_sql_statements(sql: str) -> list[str]:
+    """Naive SQL splitter: handles ';' terminators, single-quoted strings,
+    $$-delimited bodies, and -- line comments. Good enough for pg_dump-style
+    output."""
+    out: list[str] = []
+    buf: list[str] = []
+    i, n = 0, len(sql)
+    in_single = False
+    in_dollar = False
+    dollar_tag = ""
+    while i < n:
+        c = sql[i]
+        if not in_single and not in_dollar and c == "-" and i + 1 < n and sql[i + 1] == "-":
+            nl = sql.find("\n", i)
+            if nl < 0:
+                break
+            i = nl + 1
+            continue
+        if not in_dollar and c == "'":
+            in_single = not in_single
+            buf.append(c)
+            i += 1
+            continue
+        if not in_single and c == "$":
+            end = sql.find("$", i + 1)
+            if end > i:
+                tag = sql[i : end + 1]
+                if in_dollar and tag == dollar_tag:
+                    buf.append(tag)
+                    i = end + 1
+                    in_dollar = False
+                    dollar_tag = ""
+                    continue
+                if not in_dollar:
+                    buf.append(tag)
+                    i = end + 1
+                    in_dollar = True
+                    dollar_tag = tag
+                    continue
+        if c == ";" and not in_single and not in_dollar:
+            stmt = "".join(buf).strip()
+            if stmt:
+                out.append(stmt)
+            buf = []
+            i += 1
+            continue
+        buf.append(c)
+        i += 1
+    tail = "".join(buf).strip()
+    if tail:
+        out.append(tail)
+    return out
+
+
+@cli.command("load")
+@click.argument(
+    "file",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+)
+@click.option(
+    "--table",
+    "table",
+    default=None,
+    help="Target table (required for CSV/JSONL; ignored for SQL).",
+)
+@click.option(
+    "--format",
+    "fmt",
+    type=click.Choice(["auto", "sql", "csv", "jsonl"]),
+    default="auto",
+    show_default=True,
+    help="File format. 'auto' infers from the extension.",
+)
+@click.option(
+    "--batch",
+    "batch",
+    type=int,
+    default=500,
+    show_default=True,
+    help="Rows per INSERT batch (CSV/JSONL).",
+)
+@click.option(
+    "--delimiter",
+    "delim",
+    default=",",
+    show_default=True,
+    help="CSV delimiter.",
+)
+def load_cmd(
+    file: Path,
+    table: str | None,
+    fmt: str,
+    batch: int,
+    delim: str,
+):
+    """Load a dataset into the service's Postgres via POST /v1/store.
+
+    Formats:
+
+      SQL    — splits statements and executes each one.
+               `hivemind load dump.sql`
+
+      CSV    — parameterized INSERTs into --table. First row is header.
+               `hivemind load users.csv --table users`
+
+      JSONL  — one JSON object per line → parameterized INSERTs.
+               `hivemind load events.jsonl --table events`
+
+    All rows are batched and sent through the normal auth-checked API, so
+    this works against local Postgres and remote SQL-proxy-backed deploys
+    alike.
+    """
+    import csv
+
+    config = _load_config()
+    service = config["service"]
+    headers = {**_headers(config), "Content-Type": "application/json"}
+    store_url = f"{service}/v1/store"
+
+    if fmt == "auto":
+        ext = file.suffix.lower()
+        fmt = {".sql": "sql", ".csv": "csv", ".jsonl": "jsonl", ".ndjson": "jsonl"}.get(ext, "")
+        if not fmt:
+            raise click.ClickException(
+                f"Cannot infer format from extension: {file.suffix}. "
+                "Pass --format sql|csv|jsonl."
+            )
+
+    if fmt in ("csv", "jsonl") and not table:
+        raise click.ClickException("--table is required for CSV/JSONL.")
+
+    def _post(sql: str, params: list):
+        try:
+            r = httpx.post(
+                store_url,
+                headers=headers,
+                json={"sql": sql, "params": params},
+                timeout=120,
+            )
+        except httpx.ConnectError:
+            raise click.ClickException(f"Cannot reach {service}")
+        if r.status_code >= 400:
+            raise click.ClickException(f"{r.status_code}: {_api_error(r)}")
+
+    if fmt == "sql":
+        text = file.read_text()
+        stmts = _split_sql_statements(text)
+        click.echo(f"Loading {len(stmts)} SQL statements from {file} → {service}")
+        with click.progressbar(stmts, label="exec") as bar:
+            for stmt in bar:
+                _post(stmt, [])
+        click.echo(f"Done: {len(stmts)} statements.")
+        return
+
+    if fmt == "csv":
+        with file.open(newline="") as f:
+            reader = csv.reader(f, delimiter=delim)
+            try:
+                cols = next(reader)
+            except StopIteration:
+                raise click.ClickException(f"{file}: empty file")
+            rows = list(reader)
+        click.echo(
+            f"Loading {len(rows)} rows from {file} into {table} "
+            f"(columns: {', '.join(cols)}) → {service}"
+        )
+        _batch_insert(_post, table, cols, rows, batch)
+        click.echo(f"Done: {len(rows)} rows.")
+        return
+
+    if fmt == "jsonl":
+        rows_dicts: list[dict] = []
+        with file.open() as f:
+            for lineno, line in enumerate(f, 1):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = _json.loads(line)
+                except _json.JSONDecodeError as e:
+                    raise click.ClickException(f"{file}:{lineno}: {e}")
+                if not isinstance(obj, dict):
+                    raise click.ClickException(
+                        f"{file}:{lineno}: expected object, got {type(obj).__name__}"
+                    )
+                rows_dicts.append(obj)
+        if not rows_dicts:
+            click.echo(f"{file}: no rows to load.")
+            return
+        cols = sorted({k for r in rows_dicts for k in r.keys()})
+        rows = [[r.get(c) for c in cols] for r in rows_dicts]
+        click.echo(
+            f"Loading {len(rows)} rows from {file} into {table} "
+            f"(columns: {', '.join(cols)}) → {service}"
+        )
+        _batch_insert(_post, table, cols, rows, batch)
+        click.echo(f"Done: {len(rows)} rows.")
+        return
+
+
+def _batch_insert(
+    post_fn,
+    table: str,
+    cols: list[str],
+    rows: list[list],
+    batch_size: int,
+) -> None:
+    """Multi-row INSERT: `INSERT INTO t (c1,c2) VALUES (%s,%s),(%s,%s),...`."""
+    if not rows:
+        return
+    col_list = ", ".join(f'"{c}"' for c in cols)
+    row_tpl = "(" + ", ".join(["%s"] * len(cols)) + ")"
+    total = len(rows)
+    with click.progressbar(length=total, label="insert") as bar:
+        for start in range(0, total, batch_size):
+            chunk = rows[start : start + batch_size]
+            placeholders = ", ".join([row_tpl] * len(chunk))
+            sql = f'INSERT INTO "{table}" ({col_list}) VALUES {placeholders}'
+            params: list = []
+            for r in chunk:
+                params.extend(r)
+            post_fn(sql, params)
+            bar.update(len(chunk))
 
 
 @cli.command()

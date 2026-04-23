@@ -48,6 +48,11 @@ The `hivemind` CLI is the fastest path from "I have an agent" to "it ran and her
 # One-time setup — defaults to http://localhost:8100
 hivemind init [--api-key $HIVEMIND_API_KEY]
 
+# Load a dataset (SQL dump / CSV / JSONL) into Postgres via /v1/store
+hivemind load dump.sql
+hivemind load users.csv --table users
+hivemind load events.jsonl --table events
+
 # Browse what the service already has
 hivemind agents                 # list registered agents
 hivemind runs                   # list recent runs
@@ -164,7 +169,7 @@ agents/            Default + reference agents (see agents/examples/README.md)
   default-*/       4 built-in agents: index / query / scope / mediator
   private-default-scope/  Pattern A reference: host-supplied private prompt
   examples/        Sample uploadable agents
-deploy/            Production dstack CVM artifacts (postgres/, monitor/, contracts/)
+deploy/            Production dstack CVM artifacts (postgres/, phala/)
 tests/             Unit + Docker integration tests
 scripts/           quickstart.sh
 ```

@@ -349,15 +349,6 @@ Postgres tables (`_hivemind_agent_files`).
 
 ---
 
-## Deploy Governance (Deferred)
-
-Notarized-deploy attestation is currently **not active**. `deploy/contracts/NotarizedAppAuth.sol`
-(on-chain allowlist) and `deploy/monitor/` (notarizer TEE) remain in-repo as the
-reference design for re-enabling this later. Secrets today come from boot-time
-env vars.
-
----
-
 ## Recovery (host dies)
 
 ```
@@ -453,8 +444,6 @@ env vars.
 | Config/settings | ~80 | Pydantic settings with env mapping |
 | Production Postgres image | ~80 | WAL-G, supercronic, env-var secrets |
 | Production app image | ~20 | Boot script with env-var DB password |
-| Monitoring TEE | ~150 | Event watcher, IPFS logging, on-chain notarization |
-| NotarizedAppAuth contract | ~80 | Solidity on Base, deploy allowlist |
 | WAL-G backup/restore | ~60 | Continuous archiving + R2 restore script |
 
 ---
@@ -497,8 +486,6 @@ deploy/
   Dockerfile           Production app image
   docker-compose.yaml  Production dstack deployment (app + Postgres)
   docker-compose.dev.yml  Local dev Postgres
-  contracts/           NotarizedAppAuth.sol (Solidity on Base)
-  monitor/             Monitoring TEE (event watcher + notarizer)
   postgres/            Production Postgres image (WAL-G, supercronic)
   restore.sh           Disaster recovery (WAL-G restore from R2)
 ```
