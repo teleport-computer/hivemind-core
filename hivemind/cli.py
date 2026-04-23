@@ -197,7 +197,19 @@ def init(service: str, api_key: str):
     default=None,
     help="Read rules from a file (use instead of RULES argument)",
 )
-def scope(rules: str | None, from_file: Path | None):
+@click.option(
+    "--private-prompt",
+    "private_prompt",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="Upload the file as the entire scope prompt (no public template). "
+    "Uses agents/private-default-scope; prompt content stays TEE-resident.",
+)
+def scope(
+    rules: str | None,
+    from_file: Path | None,
+    private_prompt: Path | None,
+):
     """Upload a scope agent with English privacy rules.
 
     RULES is a natural-language description of your access policy.
@@ -212,28 +224,42 @@ def scope(rules: str | None, from_file: Path | None):
         Suppress groups smaller than 10."
 
       hivemind scope --from-file policy.md
+      hivemind scope --private-prompt my-secret-rules.md
     """
     config = _load_config()
-    if from_file is not None:
-        rules = from_file.read_text()
-    if not rules or not rules.strip():
+    if sum(bool(x) for x in (rules, from_file, private_prompt)) != 1:
         click.echo(
-            "Error: Provide rules as an argument or via --from-file.", err=True
+            "Error: provide exactly one of RULES / --from-file / --private-prompt.",
+            err=True,
         )
         raise SystemExit(1)
-    rules = rules.strip()
 
-    template_path = _AGENTS_DIR / "default-scope" / "scope-prompt.md"
-    if not template_path.exists():
-        click.echo(
-            f"Error: Scope template not found: {template_path}", err=True
+    if private_prompt is not None:
+        agent_dir = _AGENTS_DIR / "private-default-scope"
+        prompt_text = private_prompt.read_text()
+        description = "Private scope (prompt content TEE-resident)"
+    else:
+        if from_file is not None:
+            rules = from_file.read_text()
+        if not rules or not rules.strip():
+            click.echo(
+                "Error: Provide rules as an argument or via --from-file.",
+                err=True,
+            )
+            raise SystemExit(1)
+        rules = rules.strip()
+        template_path = _AGENTS_DIR / "default-scope" / "scope-prompt.md"
+        if not template_path.exists():
+            click.echo(
+                f"Error: Scope template not found: {template_path}", err=True
+            )
+            raise SystemExit(1)
+        prompt_text = template_path.read_text().replace(
+            "{scenario_description}", rules
         )
-        raise SystemExit(1)
-    fused_prompt = template_path.read_text().replace(
-        "{scenario_description}", rules
-    )
+        agent_dir = _AGENTS_DIR / "default-scope"
+        description = f"Scope: {rules[:200]}"
 
-    agent_dir = _AGENTS_DIR / "default-scope"
     agent_py = (agent_dir / "agent.py").read_text()
     bridge_py = (agent_dir / "_bridge.py").read_text()
 
@@ -242,7 +268,7 @@ def scope(rules: str | None, from_file: Path | None):
             "Dockerfile": _DOCKERFILE_MD_AGENT,
             "_bridge.py": bridge_py,
             "agent.py": agent_py,
-            "prompt.md": fused_prompt,
+            "prompt.md": prompt_text,
         }
     )
 
@@ -257,9 +283,9 @@ def scope(rules: str | None, from_file: Path | None):
                 "archive": ("scope-agent.tar.gz", tarball, "application/gzip")
             },
             data={
-                "name": "scope-agent",
+                "name": "private-scope-agent" if private_prompt else "scope-agent",
                 "agent_type": "scope",
-                "description": f"Scope: {rules[:200]}",
+                "description": description,
             },
             headers=headers,
             timeout=30,
