@@ -3,13 +3,18 @@
 Remote client for a hivemind-core service deployed in a TEE.
 
 Usage:
-  hivemind init --service <url> [--api-key <key>]
-  hivemind scope "<english rules>"
+  hivemind init [--service <url>] [--api-key <key>]
+  hivemind scope "<english rules>" | --from-file <path>
   hivemind share
   hivemind query "<question>"
+  hivemind run <path> [--prompt "..."] [--json] [--fetch]
+  hivemind runs [<run_id>]
+  hivemind agents
 """
 
 import io
+import json as _json
+import sys
 import tarfile
 import time
 from pathlib import Path
@@ -22,6 +27,7 @@ _CONFIG_DIR = ".hivemind"
 _CONFIG_FILE = "config.yaml"
 _REPO_ROOT = Path(__file__).parent.parent
 _AGENTS_DIR = _REPO_ROOT / "agents"
+_DEFAULT_SERVICE = "http://localhost:8100"
 
 _DOCKERFILE_MD_AGENT = """\
 FROM hivemind-agent-sdk-base:latest
@@ -88,6 +94,54 @@ def _make_tarball(files: dict[str, str]) -> bytes:
     return buf.getvalue()
 
 
+def _tarball_from_dir(path: Path) -> bytes:
+    """Pack a directory into a gzipped tarball (files at top level)."""
+    if not path.exists():
+        raise click.ClickException(f"Path not found: {path}")
+    if not path.is_dir():
+        raise click.ClickException(f"Not a directory: {path}")
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        for f in sorted(path.rglob("*")):
+            if f.is_file():
+                if any(
+                    part in {"__pycache__", ".git", ".venv", "node_modules"}
+                    for part in f.parts
+                ):
+                    continue
+                tar.add(f, arcname=str(f.relative_to(path)))
+    data = buf.getvalue()
+    if len(data) == 0:
+        raise click.ClickException(f"No files found in {path}")
+    return data
+
+
+def _api_error(resp: httpx.Response) -> str:
+    """Extract server detail field for nicer error messages."""
+    try:
+        j = resp.json()
+        if isinstance(j, dict):
+            return str(j.get("detail") or j.get("error") or resp.text)
+    except Exception:
+        pass
+    return resp.text or f"HTTP {resp.status_code}"
+
+
+def _http_get(url: str, headers: dict, timeout: float = 30) -> dict:
+    try:
+        r = httpx.get(url, headers=headers, timeout=timeout)
+    except httpx.ConnectError:
+        click.echo(f"Error: Cannot reach {url}", err=True)
+        raise SystemExit(2)
+    except httpx.TimeoutException:
+        click.echo(f"Error: Timed out fetching {url}", err=True)
+        raise SystemExit(2)
+    if r.status_code >= 400:
+        click.echo(f"Error {r.status_code}: {_api_error(r)}", err=True)
+        raise SystemExit(3)
+    return r.json()
+
+
 # ── CLI ──
 
 
@@ -98,7 +152,12 @@ def cli():
 
 
 @cli.command()
-@click.option("--service", required=True, help="Hivemind service URL")
+@click.option(
+    "--service",
+    default=_DEFAULT_SERVICE,
+    show_default=True,
+    help="Hivemind service URL",
+)
 @click.option("--api-key", default="", help="API key for authentication")
 def init(service: str, api_key: str):
     """Connect to a hivemind service and save config."""
@@ -130,8 +189,15 @@ def init(service: str, api_key: str):
 
 
 @cli.command()
-@click.argument("rules")
-def scope(rules: str):
+@click.argument("rules", required=False)
+@click.option(
+    "--from-file",
+    "from_file",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="Read rules from a file (use instead of RULES argument)",
+)
+def scope(rules: str | None, from_file: Path | None):
     """Upload a scope agent with English privacy rules.
 
     RULES is a natural-language description of your access policy.
@@ -144,14 +210,19 @@ def scope(rules: str):
         Allow aggregate statistics and survival curves.
         Never expose individual records or exact dates of birth.
         Suppress groups smaller than 10."
+
+      hivemind scope --from-file policy.md
     """
     config = _load_config()
-    rules = rules.strip()
-    if not rules:
-        click.echo("Error: Rules cannot be empty.", err=True)
+    if from_file is not None:
+        rules = from_file.read_text()
+    if not rules or not rules.strip():
+        click.echo(
+            "Error: Provide rules as an argument or via --from-file.", err=True
+        )
         raise SystemExit(1)
+    rules = rules.strip()
 
-    # Read template and fuse rules into {scenario_description}
     template_path = _AGENTS_DIR / "default-scope" / "scope-prompt.md"
     if not template_path.exists():
         click.echo(
@@ -162,12 +233,10 @@ def scope(rules: str):
         "{scenario_description}", rules
     )
 
-    # Read agent source files
     agent_dir = _AGENTS_DIR / "default-scope"
     agent_py = (agent_dir / "agent.py").read_text()
     bridge_py = (agent_dir / "_bridge.py").read_text()
 
-    # Build tarball
     tarball = _make_tarball(
         {
             "Dockerfile": _DOCKERFILE_MD_AGENT,
@@ -177,7 +246,6 @@ def scope(rules: str):
         }
     )
 
-    # Upload
     click.echo("Uploading scope agent...")
     service = config["service"]
     headers = _headers(config)
@@ -202,7 +270,7 @@ def scope(rules: str):
         raise SystemExit(1)
     except httpx.HTTPStatusError as e:
         click.echo(
-            f"Error: Upload failed ({e.response.status_code}): {e.response.text}",
+            f"Error: Upload failed ({e.response.status_code}): {_api_error(e.response)}",
             err=True,
         )
         raise SystemExit(1)
@@ -214,7 +282,6 @@ def scope(rules: str):
     agent_id = result["agent_id"]
     run_id = result.get("run_id")
 
-    # Poll for build completion
     if run_id:
         click.echo(f"Building image (run: {run_id})...")
         for _ in range(60):
@@ -244,7 +311,6 @@ def scope(rules: str):
                 err=True,
             )
 
-    # Save scope agent ID to config
     config["scope_agent_id"] = agent_id
     _save_config(config)
     click.echo(f"Scope agent: {agent_id}")
@@ -309,7 +375,8 @@ def _query_sync(service: str, headers: dict, payload: dict) -> None:
         raise SystemExit(1)
     except httpx.HTTPStatusError as e:
         click.echo(
-            f"Error: {e.response.status_code}: {e.response.text}", err=True
+            f"Error: {e.response.status_code}: {_api_error(e.response)}",
+            err=True,
         )
         raise SystemExit(1)
     except httpx.TimeoutException:
@@ -326,7 +393,6 @@ def _query_sync(service: str, headers: dict, payload: dict) -> None:
 
 
 def _query_async(service: str, headers: dict, payload: dict) -> None:
-    # Submit
     try:
         resp = httpx.post(
             f"{service}/v1/query/submit",
@@ -342,7 +408,6 @@ def _query_async(service: str, headers: dict, payload: dict) -> None:
     run_id = resp.json().get("run_id")
     click.echo(f"Submitted (run: {run_id}). Polling...")
 
-    # Poll
     for _ in range(120):
         time.sleep(2)
         try:
@@ -367,6 +432,410 @@ def _query_async(service: str, headers: dict, payload: dict) -> None:
 
     click.echo("Error: Query did not complete within timeout.", err=True)
     raise SystemExit(1)
+
+
+# ── Approach A: run / runs / agents ──
+
+
+def _artifact_url(service: str, run_id: str, filename: str) -> str:
+    return f"{service}/v1/query/runs/{run_id}/artifacts/{filename}"
+
+
+@cli.command("run")
+@click.argument(
+    "path",
+    type=click.Path(exists=True, file_okay=True, dir_okay=True, path_type=Path),
+)
+@click.option("--prompt", default="", help="Prompt to pass to the agent")
+@click.option(
+    "--name",
+    default=None,
+    help="Agent name (defaults to directory or file basename)",
+)
+@click.option("--scope-agent", "scope_agent", default=None, help="Scope agent ID")
+@click.option(
+    "--mediator-agent", "mediator_agent", default=None, help="Mediator agent ID"
+)
+@click.option(
+    "--timeout",
+    type=int,
+    default=600,
+    show_default=True,
+    help="Poll timeout in seconds",
+)
+@click.option(
+    "--memory-mb",
+    type=int,
+    default=256,
+    show_default=True,
+    help="Container memory limit",
+)
+@click.option(
+    "--max-llm-calls",
+    type=int,
+    default=20,
+    show_default=True,
+    help="Maximum LLM calls the agent may make",
+)
+@click.option(
+    "--max-tokens",
+    type=int,
+    default=100_000,
+    show_default=True,
+    help="Total token budget",
+)
+@click.option("--json", "as_json", is_flag=True, help="Emit JSON on stdout")
+@click.option(
+    "--fetch",
+    is_flag=True,
+    help="Download artifacts into ./hivemind-artifacts/<run_id>/",
+)
+def run_cmd(
+    path: Path,
+    prompt: str,
+    name: str | None,
+    scope_agent: str | None,
+    mediator_agent: str | None,
+    timeout: int,
+    memory_mb: int,
+    max_llm_calls: int,
+    max_tokens: int,
+    as_json: bool,
+    fetch: bool,
+):
+    """Upload, run, and collect a query agent in one command.
+
+    PATH can be either a directory containing a Dockerfile + agent source, or
+    an existing .tar.gz archive. The CLI packages, uploads, polls the run to
+    completion, and prints the agent's output and artifact URLs.
+
+    Example:
+
+      hivemind run ./my-agent --prompt "How many documents?"
+      hivemind run agent.tar.gz --json --fetch
+    """
+    config = _load_config()
+    service = config["service"]
+    headers = _headers(config)
+
+    if path.is_dir():
+        archive_bytes = _tarball_from_dir(path)
+        archive_name = f"{path.name}.tar.gz"
+        agent_name = name or path.name
+    elif path.suffix in {".gz", ".tgz"} or path.name.endswith(".tar.gz"):
+        archive_bytes = path.read_bytes()
+        archive_name = path.name
+        agent_name = name or path.stem.replace(".tar", "")
+    else:
+        raise click.ClickException(
+            f"Unsupported path type: {path}. Pass a directory or .tar.gz."
+        )
+
+    scope_id = scope_agent or config.get("scope_agent_id")
+    mediator_id = mediator_agent or config.get("mediator_agent_id")
+
+    form_data: dict[str, str] = {
+        "name": agent_name,
+        "prompt": prompt,
+        "description": f"hivemind run {path.name}",
+        "memory_mb": str(memory_mb),
+        "max_llm_calls": str(max_llm_calls),
+        "max_tokens": str(max_tokens),
+        "timeout_seconds": str(min(timeout, 3600)),
+    }
+    if scope_id:
+        form_data["scope_agent_id"] = scope_id
+    if mediator_id:
+        form_data["mediator_agent_id"] = mediator_id
+
+    if not as_json:
+        click.echo(f"Packing {path} → {archive_name} ({len(archive_bytes)} bytes)")
+        click.echo(f"Uploading to {service}...")
+
+    try:
+        resp = httpx.post(
+            f"{service}/v1/query-agents/submit",
+            files={
+                "archive": (archive_name, archive_bytes, "application/gzip"),
+            },
+            data=form_data,
+            headers=headers,
+            timeout=60,
+        )
+    except httpx.ConnectError:
+        click.echo(f"Error: Cannot reach {service}", err=True)
+        raise SystemExit(2)
+    except httpx.TimeoutException:
+        click.echo("Error: Upload timed out.", err=True)
+        raise SystemExit(2)
+
+    if resp.status_code >= 400:
+        click.echo(
+            f"Error: Submit failed ({resp.status_code}): {_api_error(resp)}",
+            err=True,
+        )
+        raise SystemExit(3)
+
+    submission = resp.json()
+    run_id = submission["run_id"]
+    agent_id = submission.get("agent_id")
+
+    if not as_json:
+        click.echo(f"Submitted: run_id={run_id} agent_id={agent_id}")
+        click.echo(f"Polling /v1/agent-runs/{run_id}...")
+
+    deadline = time.time() + timeout
+    last_status = ""
+    while time.time() < deadline:
+        try:
+            sr = httpx.get(
+                f"{service}/v1/agent-runs/{run_id}",
+                headers=headers,
+                timeout=15,
+            )
+            if sr.status_code == 404:
+                time.sleep(2)
+                continue
+            data = sr.json()
+        except httpx.RequestError:
+            time.sleep(2)
+            continue
+
+        status = data.get("status", "")
+        if status != last_status and not as_json:
+            click.echo(f"  status: {status}")
+            last_status = status
+
+        if status == "completed":
+            _emit_run_result(service, data, run_id, as_json=as_json, fetch=fetch)
+            return
+        if status == "failed":
+            err = data.get("error") or data.get("result", {}).get("error") or "?"
+            if as_json:
+                click.echo(_json.dumps({"status": "failed", "error": err, "run_id": run_id}))
+            else:
+                click.echo(f"Error: run failed: {err}", err=True)
+            raise SystemExit(4)
+
+        time.sleep(3)
+
+    if as_json:
+        click.echo(_json.dumps({"status": "timeout", "run_id": run_id}))
+    else:
+        click.echo(
+            f"Error: timed out after {timeout}s. Check `hivemind runs {run_id}`.",
+            err=True,
+        )
+    raise SystemExit(5)
+
+
+def _emit_run_result(
+    service: str,
+    data: dict,
+    run_id: str,
+    *,
+    as_json: bool,
+    fetch: bool,
+) -> None:
+    result = data.get("result") or {}
+    output = result.get("output", "")
+    mediated = result.get("mediated")
+    artifacts = data.get("artifacts", []) or []
+
+    artifact_urls = [
+        {
+            "filename": a["filename"],
+            "size": a.get("size"),
+            "content_type": a.get("content_type"),
+            "url": _artifact_url(service, run_id, a["filename"]),
+        }
+        for a in artifacts
+    ]
+
+    fetched: list[dict] = []
+    if fetch and artifacts:
+        out_dir = Path("hivemind-artifacts") / run_id
+        out_dir.mkdir(parents=True, exist_ok=True)
+        config = _load_config()
+        headers = _headers(config)
+        for a in artifacts:
+            fname = a["filename"]
+            try:
+                r = httpx.get(
+                    _artifact_url(service, run_id, fname),
+                    headers=headers,
+                    timeout=60,
+                )
+                r.raise_for_status()
+                dest = out_dir / fname
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.write_bytes(r.content)
+                fetched.append({"filename": fname, "path": str(dest)})
+            except httpx.HTTPError as e:
+                if not as_json:
+                    click.echo(
+                        f"  warn: failed to fetch {fname}: {e}", err=True
+                    )
+
+    if as_json:
+        click.echo(
+            _json.dumps(
+                {
+                    "status": "completed",
+                    "run_id": run_id,
+                    "output": output,
+                    "mediated": mediated,
+                    "artifacts": artifact_urls,
+                    "fetched": fetched,
+                },
+                indent=2,
+            )
+        )
+        return
+
+    click.echo("")
+    click.echo("── Output ──")
+    click.echo(output or "(empty)")
+    if mediated:
+        click.echo(f"\n(mediated: {mediated})", err=True)
+    if artifact_urls:
+        click.echo("\n── Artifacts ──")
+        for a in artifact_urls:
+            size = f" {a['size']}B" if a.get("size") else ""
+            click.echo(f"  {a['filename']}{size}  →  {a['url']}")
+    if fetched:
+        click.echo("\nFetched to ./hivemind-artifacts/{}/".format(run_id))
+        for f in fetched:
+            click.echo(f"  {f['path']}")
+
+
+@cli.command("runs")
+@click.argument("run_id", required=False)
+@click.option(
+    "--limit",
+    type=int,
+    default=20,
+    show_default=True,
+    help="Max rows when listing",
+)
+@click.option("--json", "as_json", is_flag=True, help="Emit JSON on stdout")
+def runs_cmd(run_id: str | None, limit: int, as_json: bool):
+    """List recent agent runs, or show details for one run."""
+    config = _load_config()
+    service = config["service"]
+    headers = _headers(config)
+
+    if run_id:
+        data = _http_get(
+            f"{service}/v1/agent-runs/{run_id}", headers=headers, timeout=15
+        )
+        if as_json:
+            click.echo(_json.dumps(data, indent=2, default=str))
+            return
+
+        click.echo(f"Run:      {data.get('run_id')}")
+        click.echo(f"Agent:    {data.get('agent_id')}")
+        click.echo(f"Status:   {data.get('status')}")
+        click.echo(f"Created:  {data.get('created_at')}")
+        click.echo(f"Updated:  {data.get('updated_at')}")
+
+        stages = data.get("stages") or {}
+        if stages:
+            click.echo("Stages:")
+            for name, s in stages.items():
+                started = s.get("started_at")
+                ended = s.get("ended_at")
+                dur = (
+                    f"{ended - started:.1f}s"
+                    if started and ended
+                    else "(running)"
+                )
+                click.echo(f"  {name}: {dur}")
+
+        result = data.get("result") or {}
+        output = result.get("output")
+        if output:
+            click.echo("")
+            click.echo("── Output ──")
+            click.echo(output)
+
+        artifacts = data.get("artifacts") or []
+        if artifacts:
+            click.echo("")
+            click.echo("── Artifacts ──")
+            for a in artifacts:
+                size = f" {a.get('size')}B" if a.get("size") else ""
+                click.echo(
+                    f"  {a['filename']}{size}  →  {_artifact_url(service, run_id, a['filename'])}"
+                )
+
+        err = data.get("error")
+        if err:
+            click.echo(f"\nError: {err}", err=True)
+        return
+
+    # List recent
+    data = _http_get(
+        f"{service}/v1/agent-runs?limit={limit}", headers=headers, timeout=15
+    )
+    if as_json:
+        click.echo(_json.dumps(data, indent=2, default=str))
+        return
+
+    if not data:
+        click.echo("(no runs)")
+        return
+
+    click.echo(f"{'RUN_ID':<14} {'AGENT_ID':<14} {'STATUS':<10} CREATED")
+    for row in data:
+        click.echo(
+            f"{row.get('run_id','?'):<14} "
+            f"{row.get('agent_id','?'):<14} "
+            f"{str(row.get('status','?')):<10} "
+            f"{row.get('created_at','')}"
+        )
+
+
+@cli.command("agents")
+@click.option(
+    "--type",
+    "agent_type",
+    default=None,
+    help="Filter by agent type (query/scope/mediator/index)",
+)
+@click.option("--json", "as_json", is_flag=True, help="Emit JSON on stdout")
+def agents_cmd(agent_type: str | None, as_json: bool):
+    """List agents registered with the service."""
+    config = _load_config()
+    service = config["service"]
+    headers = _headers(config)
+
+    url = f"{service}/v1/agents"
+    if agent_type:
+        url += f"?type={agent_type}"
+    data = _http_get(url, headers=headers, timeout=15)
+
+    if as_json:
+        click.echo(_json.dumps(data, indent=2, default=str))
+        return
+
+    if not data:
+        click.echo("(no agents)")
+        return
+
+    click.echo(
+        f"{'AGENT_ID':<14} {'TYPE':<10} {'NAME':<24} DESCRIPTION"
+    )
+    for a in data:
+        desc = (a.get("description") or "").replace("\n", " ")
+        if len(desc) > 60:
+            desc = desc[:57] + "..."
+        click.echo(
+            f"{a.get('agent_id','?'):<14} "
+            f"{str(a.get('agent_type','?')):<10} "
+            f"{str(a.get('name',''))[:24]:<24} "
+            f"{desc}"
+        )
 
 
 if __name__ == "__main__":

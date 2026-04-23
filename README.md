@@ -30,6 +30,34 @@ uv run python -m hivemind.server
 curl http://localhost:8100/v1/health
 ```
 
+## Using the CLI
+
+The `hivemind` CLI is the fastest path from "I have an agent" to "it ran and here are the artifacts." Single command owns build → upload → poll → fetch.
+
+```bash
+# One-time setup — defaults to http://localhost:8100
+hivemind init [--api-key $HIVEMIND_API_KEY]
+
+# Browse what the service already has
+hivemind agents                 # list registered agents
+hivemind runs                   # list recent runs
+hivemind runs <run_id>          # stage timings + artifact list
+
+# Register a scope policy (gates what queries may return)
+hivemind scope --from-file policy.md
+# or inline:
+hivemind scope "Allow aggregate counts. Never expose individual rows."
+
+# Run your agent — directory containing Dockerfile + agent.py, or a .tar.gz
+hivemind run ./my-agent --prompt "How many documents?"
+hivemind run ./my-agent --json --fetch       # scriptable + downloads artifacts
+
+# Or use the thin natural-language query path (default query agent)
+hivemind query "What tables are available?"
+```
+
+Every `--json` output is a stable, pipe-friendly record: `{status, run_id, output, mediated, artifacts:[{filename,url,...}], fetched:[...]}`. Artifact URLs remain fetchable for the server's retention window (default 24h).
+
 ## How It Works
 
 ### System overview
