@@ -1,0 +1,139 @@
+name: Deploy to Phala CVM (via EC2 relay)
+
+# Redeploys hivemind-core and/or hivemind-pg on Phala Cloud. The
+# GitHub-hosted runner never sees production secrets — it SSHes into a
+# long-lived EC2 box (the "relay") that holds the authoritative `.env`
+# and an authenticated `phala` CLI. The relay runs
+# `deploy/phala/deploy.sh`, which has its own pre-checks (required
+# ${VAR:?} vars present, sealed-env re-push, health poll with serial
+# logs on timeout).
+#
+# Why a relay instead of putting `.env` in GitHub secrets directly:
+#   - one source of truth for the production env (file on EC2)
+#   - rotating a key means editing one file on one box, not re-uploading
+#     ~17 individual GH secrets
+#   - the `phala` CLI is stateful (~/.phala-cloud/credentials.json); the
+#     relay holds that state so each deploy doesn't re-auth
+#
+# Manual-only (workflow_dispatch). We intentionally do NOT auto-deploy
+# on build-images success — redeploys should be an explicit decision.
+#
+# Prereqs on the EC2 relay (see deploy/ec2/README.md for bootstrap):
+#   - node + phala CLI installed, `phala status` shows correct workspace
+#   - ~/hivemind-core cloned (read-only deploy key)
+#   - ~/hivemind-core/deploy/phala/.env populated with every ${VAR:?}
+#     referenced by both compose files
+#
+# Required GH secrets:
+#   EC2_HOST              — IP or hostname of the relay
+#   EC2_USER              — SSH user (typically "ubuntu")
+#   EC2_SSH_PRIVATE_KEY   — OpenSSH private key authorized on the relay
+#   PHALA_CLOUD_API_KEY   — optional; injected per-run so the relay
+#                           doesn't depend on stale stored creds
+#
+# Inputs:
+#   target     — core | postgres | all (which CVM(s) to redeploy)
+#   ref        — git ref to deploy (default: main). Research branches OK.
+#   image_sha  — optional; if set, the compose file's image pin is
+#                rewritten to ghcr.io/account-link/hivemind-core:<sha>
+#                for this run only (not committed back). Leave empty to
+#                use whatever pin is on the checked-out ref.
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Which CVM to redeploy"
+        required: true
+        default: "core"
+        type: choice
+        options:
+          - core
+          - postgres
+          - all
+      ref:
+        description: "Git ref to deploy from (branch, tag, or commit)"
+        required: false
+        default: "main"
+      image_sha:
+        description: "Optional image SHA override for hivemind-core (e.g. fd87c82). Leave empty to use the ref's committed pin."
+        required: false
+        default: ""
+
+concurrency:
+  group: phala-deploy-${{ github.event.inputs.target }}
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: "Deploy ${{ github.event.inputs.target }} @ ${{ github.event.inputs.ref }}"
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      TARGET: ${{ github.event.inputs.target }}
+      DEPLOY_REF: ${{ github.event.inputs.ref }}
+      IMAGE_SHA: ${{ github.event.inputs.image_sha }}
+
+    steps:
+      - name: Configure SSH
+        env:
+          SSH_KEY: ${{ secrets.EC2_SSH_PRIVATE_KEY }}
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -H "$EC2_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Sanity — show target host
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_USER: ${{ secrets.EC2_USER }}
+        run: |
+          ssh -i ~/.ssh/id_ed25519 -o BatchMode=yes \
+            "${EC2_USER}@${EC2_HOST}" \
+            'echo "relay: $(hostname) $(whoami)"; phala --version; phala status | head -10'
+
+      - name: Deploy via relay
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_USER: ${{ secrets.EC2_USER }}
+          PHALA_CLOUD_API_KEY: ${{ secrets.PHALA_CLOUD_API_KEY }}
+        run: |
+          set -euo pipefail
+
+          # All work happens inside this SSH session. We use a heredoc
+          # with quoted 'REMOTE' so no local variables get interpolated
+          # — the relay sees the exact script text, and GH Action env
+          # vars are forwarded explicitly via `ssh -o SendEnv` which
+          # requires AcceptEnv on the server. Simpler: pass them as
+          # leading `KEY=VALUE` pairs on the command line instead.
+
+          ssh -i ~/.ssh/id_ed25519 -o BatchMode=yes \
+            "${EC2_USER}@${EC2_HOST}" \
+            "TARGET='${TARGET}' DEPLOY_REF='${DEPLOY_REF}' IMAGE_SHA='${IMAGE_SHA}' PHALA_CLOUD_API_KEY='${PHALA_CLOUD_API_KEY}' bash -s" <<'REMOTE'
+          set -euo pipefail
+          cd ~/hivemind-core
+
+          echo "── fetch + checkout ─────────────────────────────"
+          git fetch --prune origin
+          git checkout --detach "origin/${DEPLOY_REF}" 2>/dev/null \
+            || git checkout --detach "${DEPLOY_REF}"
+          echo "HEAD: $(git rev-parse --short HEAD)"
+
+          if [ -n "${IMAGE_SHA:-}" ]; then
+            echo "── pin override: rewriting image to :${IMAGE_SHA} ──"
+            # Only rewrites in the running working tree — not committed.
+            sed -i -E "s|(ghcr\.io/account-link/hivemind-core:)[A-Za-z0-9._-]+|\1${IMAGE_SHA}|" \
+              deploy/phala/docker-compose.core.yaml
+            grep "image:" deploy/phala/docker-compose.core.yaml
+          fi
+
+          echo "── deploy ($TARGET) ─────────────────────────────"
+          ./deploy/phala/deploy.sh "${TARGET}"
+          REMOTE
+
+      - name: Cleanup SSH key
+        if: always()
+        run: rm -f ~/.ssh/id_ed25519
