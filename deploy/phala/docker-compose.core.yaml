@@ -67,7 +67,7 @@ services:
       # (the ``s`` suffix is Phala's TCP-passthrough convention), so the
       # CLI sees the enclave's self-signed cert directly. (b) the CLI
       # must be >=0.3.1 to consume the v2 report_data layout.
-      HIVEMIND_ENCLAVE_TLS: ${HIVEMIND_ENCLAVE_TLS:-}
+      HIVEMIND_ENCLAVE_TLS: ${HIVEMIND_ENCLAVE_TLS:-1}
 
       # Docker sandbox — agents run as containers via host Docker daemon
       HIVEMIND_BRIDGE_HOST: "0.0.0.0"
