@@ -17,11 +17,29 @@ logger = logging.getLogger(__name__)
 
 
 class Hivemind:
-    """Thin wrapper: database + pipeline + health."""
+    """Thin wrapper: database + pipeline + health.
 
-    def __init__(self, settings: Settings):
+    `tenant_db` (optional) narrows the DB connection to a specific tenant
+    database — the sql_proxy routes by X-Tenant-DB header, or a direct
+    psycopg DSN has its dbname swapped. `tenant_id` stamps docker image
+    tags so per-tenant agent images don't collide on a shared daemon.
+    """
+
+    def __init__(
+        self,
+        settings: Settings,
+        *,
+        tenant_db: str | None = None,
+        tenant_id: str | None = None,
+    ):
         self.settings = settings
-        self.db = connect(settings.database_url, proxy_key=settings.sql_proxy_key)
+        self.tenant_id = tenant_id
+        self.tenant_db = tenant_db
+        self.db = connect(
+            settings.database_url,
+            proxy_key=settings.sql_proxy_key,
+            tenant_db=tenant_db,
+        )
         self.agent_store = AgentStore(self.db)
         self.run_store = RunStore(self.db)
         self.artifact_store = ArtifactStore(self.db)

@@ -69,8 +69,27 @@ if [ -z "${HIVEMIND_LLM_API_KEY:-}" ] && [ "$DO_DEMO" -eq 1 ]; then
     DO_DEMO=0
 fi
 
-# Point at local postgres for this session
-export HIVEMIND_DATABASE_URL="${HIVEMIND_DATABASE_URL:-postgresql://hivemind:dev@localhost:5432/hivemind}"
+# Point at local postgres maintenance DB (tenant DBs are auto-created).
+export HIVEMIND_DATABASE_URL="${HIVEMIND_DATABASE_URL:-postgresql://hivemind:dev@localhost:5432/postgres}"
+
+# Multi-tenant: generate an admin key on first run so the server can mint
+# per-tenant API keys. We persist it in .env so subsequent runs reuse it.
+if ! grep -q '^HIVEMIND_ADMIN_KEY=..' .env 2>/dev/null; then
+    NEW_ADMIN_KEY="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
+    # Replace empty HIVEMIND_ADMIN_KEY= line (or append).
+    python3 -c "
+import pathlib
+p = pathlib.Path('.env')
+text = p.read_text()
+if 'HIVEMIND_ADMIN_KEY=\n' in text:
+    text = text.replace('HIVEMIND_ADMIN_KEY=\n', 'HIVEMIND_ADMIN_KEY=${NEW_ADMIN_KEY}\n')
+else:
+    text += '\nHIVEMIND_ADMIN_KEY=${NEW_ADMIN_KEY}\n'
+p.write_text(text)
+"
+    say "Generated HIVEMIND_ADMIN_KEY and saved to .env"
+fi
+export HIVEMIND_ADMIN_KEY="$(grep '^HIVEMIND_ADMIN_KEY=' .env | head -1 | cut -d= -f2-)"
 
 # --- 2. Build all images in parallel ---
 say "Building hivemind-agent-base + 4 default agent images (parallel)..."
@@ -101,9 +120,9 @@ say "All 5 images built (log: $BUILD_LOG)"
 
 # --- 3. Start Postgres ---
 say "Starting Postgres..."
-docker compose -f deploy/docker-compose.dev.yml up -d >/dev/null
+docker compose -f scripts/docker-compose.dev.yml up -d >/dev/null
 for i in $(seq 1 30); do
-    if docker compose -f deploy/docker-compose.dev.yml exec -T postgres \
+    if docker compose -f scripts/docker-compose.dev.yml exec -T postgres \
         pg_isready -U hivemind -q 2>/dev/null; then
         break
     fi
@@ -140,16 +159,27 @@ say "Server is up (pid $SERVER_PID)"
 
 # --- 6. End-to-end demo ---
 if [ "$DO_DEMO" -eq 1 ]; then
-    say "Running end-to-end demo (hivemind init → load row → scope → query)"
-
-    AUTH_HEADER=()
-    if [ -n "${HIVEMIND_API_KEY:-}" ]; then
-        AUTH_HEADER=(-H "Authorization: Bearer ${HIVEMIND_API_KEY}")
-    fi
+    say "Provisioning demo tenant via admin API"
+    TENANT_JSON="$(uv run hivemind admin create-tenant \
+        --service http://localhost:8100 \
+        --admin-key "$HIVEMIND_ADMIN_KEY" \
+        --name "quickstart-$(date +%s)" \
+        --json)"
+    BOOTSTRAP_KEY="$(python3 -c "import json,sys; print(json.loads(sys.argv[1])['api_key'])" "$TENANT_JSON")"
+    TENANT_ID="$(python3 -c "import json,sys; print(json.loads(sys.argv[1])['tenant_id'])" "$TENANT_JSON")"
+    say "Tenant provisioned: $TENANT_ID"
 
     uv run hivemind init \
         --service http://localhost:8100 \
-        ${HIVEMIND_API_KEY:+--api-key "$HIVEMIND_API_KEY"} >/dev/null
+        --api-key "$BOOTSTRAP_KEY" >/dev/null
+
+    say "Rotating bootstrap key (admin briefly saw it; tenant cuts them out)"
+    ROTATE_JSON="$(uv run hivemind rotate-key --yes --json)"
+    TENANT_API_KEY="$(python3 -c "import json,sys; print(json.loads(sys.argv[1])['api_key'])" "$ROTATE_JSON")"
+
+    say "Running end-to-end demo (load row → scope → query)"
+
+    AUTH_HEADER=(-H "Authorization: Bearer ${TENANT_API_KEY}")
 
     # Create a trivial table + row so the scope/query agents have something real.
     curl -fsS -X POST http://localhost:8100/v1/store \
@@ -189,7 +219,7 @@ Install hivemind as a top-level command (no 'uv run' prefix):
 
 Shut down:
   kill $SERVER_PID
-  docker compose -f deploy/docker-compose.dev.yml down
+  docker compose -f scripts/docker-compose.dev.yml down
 
 EOF
 

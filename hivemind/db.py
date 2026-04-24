@@ -22,10 +22,26 @@ logger = logging.getLogger(__name__)
 _INTERNAL_PREFIX = "_hivemind_"
 
 
-def connect(dsn: str, proxy_key: str = "") -> Database | HttpDatabase:
-    """Create the right Database depending on DSN scheme."""
+def connect(
+    dsn: str,
+    proxy_key: str = "",
+    tenant_db: str | None = None,
+) -> Database | HttpDatabase:
+    """Create the right Database depending on DSN scheme.
+
+    If `tenant_db` is set and `dsn` is HTTP, the resulting ``HttpDatabase``
+    sends ``X-Tenant-DB`` on every request so the sql_proxy routes traffic
+    to the named Postgres database. For direct psycopg (non-HTTP) DSNs,
+    ``tenant_db`` rewrites the DSN's dbname component.
+    """
     if dsn.startswith("http://") or dsn.startswith("https://"):
-        return HttpDatabase(dsn, proxy_key=proxy_key)
+        return HttpDatabase(dsn, proxy_key=proxy_key, tenant_db=tenant_db)
+    if tenant_db:
+        # Direct psycopg: rewrite DSN's dbname to the tenant database.
+        from psycopg import conninfo as _conninfo
+        parsed = _conninfo.conninfo_to_dict(dsn)
+        parsed["dbname"] = tenant_db
+        dsn = _conninfo.make_conninfo(**parsed)
     return Database(dsn)
 
 
@@ -187,13 +203,21 @@ class HttpDatabase:
     connected via the sql_proxy sidecar.
     """
 
-    def __init__(self, base_url: str, proxy_key: str = ""):
+    def __init__(
+        self,
+        base_url: str,
+        proxy_key: str = "",
+        tenant_db: str | None = None,
+    ):
         import httpx
 
         self._base_url = base_url.rstrip("/")
-        self._headers = {}
+        self._headers: dict[str, str] = {}
         if proxy_key:
             self._headers["X-Proxy-Key"] = proxy_key
+        if tenant_db:
+            self._headers["X-Tenant-DB"] = tenant_db
+        self.tenant_db = tenant_db
         self._client = httpx.Client(
             base_url=self._base_url,
             headers=self._headers,

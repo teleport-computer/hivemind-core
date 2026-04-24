@@ -53,7 +53,7 @@ tar czf /tmp/agent.tar.gz -C agents/private-default-scope \
 curl -F "name=private-scope" \
      -F "agent_type=scope" \
      -F "archive=@/tmp/agent.tar.gz;type=application/gzip" \
-     -H "Authorization: Bearer $HIVEMIND_API_KEY" \
+     -H "Authorization: Bearer $TENANT_API_KEY" \
      http://localhost:8100/v1/agents/upload
 rm agents/private-default-scope/prompt.md      # don't leave it on disk
 ```

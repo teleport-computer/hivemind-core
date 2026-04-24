@@ -36,8 +36,15 @@ services:
   sql-proxy:
     image: ghcr.io/account-link/hivemind-sql-proxy:latest
     environment:
-      DATABASE_URL: "postgresql://hivemind:${DB_PASS}@db:5432/hivemind"
+      # Point the proxy at the `postgres` maintenance DB so it has
+      # cluster-wide admin privileges (CREATE/DROP DATABASE). Per-tenant
+      # SQL is routed to the right DB via the X-Tenant-DB header.
+      DATABASE_URL: "postgresql://hivemind:${DB_PASS}@db:5432/postgres"
       SQL_PROXY_KEY: ${SQL_PROXY_KEY:?SQL_PROXY_KEY must be set}
+      # Separate admin credential for CREATE/DROP DATABASE. Core CVM sends
+      # this as X-Admin-Key when provisioning tenants. Unset → admin API
+      # disabled (proxy stays data-plane only, useful for read replicas).
+      SQL_PROXY_ADMIN_KEY: ${SQL_PROXY_ADMIN_KEY:-}
       SQL_PROXY_PORT: "8080"
     ports:
       - "8080:8080"

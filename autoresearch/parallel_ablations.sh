@@ -31,7 +31,7 @@ mkdir -p "$LOGDIR" /tmp/traces
 
 log() { echo "[parallel $(date -u +%FT%TZ)] $*" | tee -a "$LOGDIR/parallel.log"; }
 
-api_key=$(grep ^HIVEMIND_API_KEY "$REPO/.env" | cut -d= -f2)
+api_key="${HIVEMIND_TENANT_KEY:?Set HIVEMIND_TENANT_KEY to a tenant API key minted via 'hivemind admin create-tenant'}"
 
 # ─────────────────────────────────────────────────────────────────────
 # EXPERIMENT REGISTRY

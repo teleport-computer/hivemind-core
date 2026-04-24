@@ -16,9 +16,16 @@ set -euo pipefail
 # Environment:
 #   SQL_PROXY_URL  — e.g. https://<cvm_id>-8080.app.phala.network  (required)
 #   SQL_PROXY_KEY  — shared secret                                   (required)
+#   TENANT_DB      — target tenant DB, e.g. tenant_t_abc123          (optional,
+#                    omit to target the maintenance DB for raw imports)
 
 : "${SQL_PROXY_URL:?Set SQL_PROXY_URL to the proxy endpoint}"
 : "${SQL_PROXY_KEY:?Set SQL_PROXY_KEY}"
+
+TENANT_HEADER=()
+if [ -n "${TENANT_DB:-}" ]; then
+  TENANT_HEADER=(-H "X-Tenant-DB: ${TENANT_DB}")
+fi
 
 CMD="${1:?Usage: $0 <sql|csv> ...}"
 shift
@@ -31,9 +38,10 @@ case "$CMD" in
     else
       DATA="$(cat "$FILE")"
     fi
-    echo "[import] Sending SQL dump ($(echo "$DATA" | wc -c | tr -d ' ') bytes)..."
+    echo "[import] Sending SQL dump ($(echo "$DATA" | wc -c | tr -d ' ') bytes)${TENANT_DB:+ to '$TENANT_DB'}..."
     curl -sf -X POST "${SQL_PROXY_URL}/import/sql" \
       -H "X-Proxy-Key: ${SQL_PROXY_KEY}" \
+      "${TENANT_HEADER[@]}" \
       -H "Content-Type: text/plain" \
       --data-binary "$DATA" | python3 -m json.tool
     ;;
@@ -52,9 +60,10 @@ print(json.dumps({
     'header': True,
 }))
 " "$TABLE" "$CSV_DATA" "$DELIM")
-    echo "[import] Importing CSV into '$TABLE' ($(echo "$CSV_DATA" | wc -l | tr -d ' ') lines)..."
+    echo "[import] Importing CSV into '$TABLE' ($(echo "$CSV_DATA" | wc -l | tr -d ' ') lines)${TENANT_DB:+ of '$TENANT_DB'}..."
     curl -sf -X POST "${SQL_PROXY_URL}/import/csv" \
       -H "X-Proxy-Key: ${SQL_PROXY_KEY}" \
+      "${TENANT_HEADER[@]}" \
       -H "Content-Type: application/json" \
       -d "$PAYLOAD" | python3 -m json.tool
     ;;

@@ -1090,5 +1090,297 @@ def agents_cmd(agent_type: str | None, as_json: bool):
         )
 
 
+@cli.command("rotate-key")
+@click.option("--json", "as_json", is_flag=True, help="Emit JSON on stdout")
+@click.confirmation_option(
+    prompt=(
+        "Rotate this tenant's API key? The current key will stop working "
+        "immediately. Continue?"
+    )
+)
+def rotate_key(as_json: bool):
+    """Rotate this tenant's API key and update local config.
+
+    Designed as the mandatory first action for a new tenant: the admin
+    who created the tenant briefly saw the plaintext key. Rotating
+    immediately cuts them out of the trust loop — from here on, only
+    the TEE holds anything that maps to this tenant's data.
+    """
+    config = _load_config()
+    service = config["service"]
+    headers = _headers(config)
+    if "Authorization" not in headers:
+        click.echo("Error: no api_key in config. Run 'hivemind init'.", err=True)
+        raise SystemExit(1)
+
+    try:
+        resp = httpx.post(
+            f"{service}/v1/tenant/rotate-key", headers=headers, timeout=30,
+        )
+    except httpx.RequestError as e:
+        click.echo(f"Error: {e}", err=True)
+        raise SystemExit(2)
+    if resp.status_code >= 400:
+        click.echo(f"Error {resp.status_code}: {_api_error(resp)}", err=True)
+        raise SystemExit(3)
+
+    data = resp.json()
+    new_key = data["api_key"]
+    config["api_key"] = new_key
+    _save_config(config)
+
+    if as_json:
+        click.echo(_json.dumps(data, indent=2))
+        return
+    click.echo(f"Tenant: {data['tenant_id']}")
+    click.echo("New API key (saved to .hivemind/config.yaml):")
+    click.echo(f"  {new_key}")
+    click.echo("")
+    click.echo(
+        "Previous key is now revoked. Anyone who held the old key "
+        "(including the admin who minted it) can no longer reach your data."
+    )
+
+
+# ── Admin: tenant management ──
+
+
+def _admin_headers(admin_key: str) -> dict:
+    return {
+        "Authorization": f"Bearer {admin_key}",
+        "Content-Type": "application/json",
+    }
+
+
+def _resolve_admin_service(service: str | None) -> str:
+    if service:
+        return service.rstrip("/")
+    # Fall back to the regular init config (admins often manage locally).
+    try:
+        return _load_config()["service"]
+    except SystemExit:
+        return _DEFAULT_SERVICE
+
+
+@cli.group("admin")
+def admin_cli():
+    """Multi-tenant admin: provision, list, delete tenants.
+
+    Requires the server's HIVEMIND_ADMIN_KEY. Pass it with --admin-key
+    or set HIVEMIND_ADMIN_KEY in your shell environment.
+    """
+    pass
+
+
+@admin_cli.command("create-tenant")
+@click.argument("name")
+@click.option("--service", default=None, help="Hivemind service URL")
+@click.option(
+    "--admin-key",
+    envvar="HIVEMIND_ADMIN_KEY",
+    required=True,
+    help="Admin bearer token (or set HIVEMIND_ADMIN_KEY)",
+)
+@click.option("--json", "as_json", is_flag=True, help="Emit JSON only")
+def admin_create_tenant(name: str, service: str | None, admin_key: str, as_json: bool):
+    """Provision a new tenant. Prints the one-time API key."""
+    url = _resolve_admin_service(service)
+    try:
+        resp = httpx.post(
+            f"{url}/v1/admin/tenants",
+            headers=_admin_headers(admin_key),
+            json={"name": name},
+            timeout=60,
+        )
+    except httpx.RequestError as e:
+        click.echo(f"Error: {e}", err=True)
+        raise SystemExit(2)
+    if resp.status_code >= 400:
+        click.echo(f"Error {resp.status_code}: {_api_error(resp)}", err=True)
+        raise SystemExit(3)
+    data = resp.json()
+    if as_json:
+        click.echo(_json.dumps(data, indent=2))
+        return
+    click.echo(f"Tenant:   {data['tenant_id']}  ({data['name']})")
+    click.echo(f"Database: {data['db_name']}")
+    click.echo("")
+    click.echo("API key (store it now — we won't show it again):")
+    click.echo(f"  {data['api_key']}")
+
+
+@admin_cli.command("register-existing")
+@click.argument("name")
+@click.argument("db_name")
+@click.option(
+    "--api-key",
+    default=None,
+    help="Reuse this key (defaults to a newly minted one)",
+)
+@click.option(
+    "--tenant-id",
+    default=None,
+    help="Pin the control-plane tenant_id (use when db_name=tenant_<tenant_id>)",
+)
+@click.option("--service", default=None, help="Hivemind service URL")
+@click.option(
+    "--admin-key",
+    envvar="HIVEMIND_ADMIN_KEY",
+    required=True,
+    help="Admin bearer token",
+)
+@click.option("--json", "as_json", is_flag=True, help="Emit JSON only")
+def admin_register_existing(
+    name: str,
+    db_name: str,
+    api_key: str | None,
+    tenant_id: str | None,
+    service: str | None,
+    admin_key: str,
+    as_json: bool,
+):
+    """Adopt a pre-populated Postgres database as a tenant."""
+    url = _resolve_admin_service(service)
+    body: dict[str, str] = {"name": name, "db_name": db_name}
+    if api_key:
+        body["api_key"] = api_key
+    if tenant_id:
+        body["tenant_id"] = tenant_id
+    try:
+        resp = httpx.post(
+            f"{url}/v1/admin/tenants/register",
+            headers=_admin_headers(admin_key),
+            json=body,
+            timeout=30,
+        )
+    except httpx.RequestError as e:
+        click.echo(f"Error: {e}", err=True)
+        raise SystemExit(2)
+    if resp.status_code >= 400:
+        click.echo(f"Error {resp.status_code}: {_api_error(resp)}", err=True)
+        raise SystemExit(3)
+    data = resp.json()
+    if as_json:
+        click.echo(_json.dumps(data, indent=2))
+        return
+    click.echo(f"Tenant:   {data['tenant_id']}  ({data['name']})")
+    click.echo(f"Database: {data['db_name']}")
+    click.echo("API key:")
+    click.echo(f"  {data['api_key']}")
+
+
+@admin_cli.command("list-tenants")
+@click.option("--service", default=None, help="Hivemind service URL")
+@click.option(
+    "--admin-key",
+    envvar="HIVEMIND_ADMIN_KEY",
+    required=True,
+    help="Admin bearer token",
+)
+@click.option("--json", "as_json", is_flag=True, help="Emit JSON only")
+def admin_list_tenants(service: str | None, admin_key: str, as_json: bool):
+    """List all tenants."""
+    url = _resolve_admin_service(service)
+    try:
+        resp = httpx.get(
+            f"{url}/v1/admin/tenants",
+            headers={"Authorization": f"Bearer {admin_key}"},
+            timeout=15,
+        )
+    except httpx.RequestError as e:
+        click.echo(f"Error: {e}", err=True)
+        raise SystemExit(2)
+    if resp.status_code >= 400:
+        click.echo(f"Error {resp.status_code}: {_api_error(resp)}", err=True)
+        raise SystemExit(3)
+    tenants = resp.json().get("tenants", [])
+    if as_json:
+        click.echo(_json.dumps(tenants, indent=2, default=str))
+        return
+    if not tenants:
+        click.echo("(no tenants)")
+        return
+    click.echo(f"{'TENANT_ID':<16} {'NAME':<24} {'DB':<28} SUSPENDED")
+    for t in tenants:
+        click.echo(
+            f"{t['id']:<16} "
+            f"{str(t.get('name', ''))[:24]:<24} "
+            f"{str(t.get('db_name', ''))[:28]:<28} "
+            f"{t.get('suspended', False)}"
+        )
+
+
+@admin_cli.command("delete-tenant")
+@click.argument("tenant_id")
+@click.option("--service", default=None, help="Hivemind service URL")
+@click.option(
+    "--admin-key",
+    envvar="HIVEMIND_ADMIN_KEY",
+    required=True,
+    help="Admin bearer token",
+)
+@click.confirmation_option(
+    prompt="Drop the tenant DB and all its data? This cannot be undone."
+)
+def admin_delete_tenant(tenant_id: str, service: str | None, admin_key: str):
+    """Delete a tenant: drops its Postgres DB and revokes its key."""
+    url = _resolve_admin_service(service)
+    try:
+        resp = httpx.delete(
+            f"{url}/v1/admin/tenants/{tenant_id}",
+            headers={"Authorization": f"Bearer {admin_key}"},
+            timeout=60,
+        )
+    except httpx.RequestError as e:
+        click.echo(f"Error: {e}", err=True)
+        raise SystemExit(2)
+    if resp.status_code >= 400:
+        click.echo(f"Error {resp.status_code}: {_api_error(resp)}", err=True)
+        raise SystemExit(3)
+    click.echo(f"Deleted tenant {tenant_id}.")
+
+
+@admin_cli.command("rename-database")
+@click.argument("old_name")
+@click.argument("new_name")
+@click.option("--service", default=None, help="Hivemind service URL")
+@click.option(
+    "--admin-key",
+    envvar="HIVEMIND_ADMIN_KEY",
+    required=True,
+    help="Admin bearer token",
+)
+@click.confirmation_option(
+    prompt=(
+        "Rename the target database on the Postgres cluster? "
+        "The database must not have any open connections. Continue?"
+    )
+)
+def admin_rename_database(
+    old_name: str, new_name: str, service: str | None, admin_key: str,
+):
+    """ALTER DATABASE on the cluster. One-shot migration helper.
+
+    Does NOT update control-plane rows — follow up with
+    'hivemind admin register-existing <name> <new_name> --tenant-id <t_...>'
+    to adopt the renamed DB as a tenant.
+    """
+    url = _resolve_admin_service(service)
+    try:
+        resp = httpx.post(
+            f"{url}/v1/admin/rename-database",
+            headers=_admin_headers(admin_key),
+            json={"old_name": old_name, "new_name": new_name},
+            timeout=60,
+        )
+    except httpx.RequestError as e:
+        click.echo(f"Error: {e}", err=True)
+        raise SystemExit(2)
+    if resp.status_code >= 400:
+        click.echo(f"Error {resp.status_code}: {_api_error(resp)}", err=True)
+        raise SystemExit(3)
+    click.echo(f"Renamed: {old_name} → {new_name}")
+
+
 if __name__ == "__main__":
     cli()

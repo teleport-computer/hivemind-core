@@ -31,7 +31,8 @@ def _load_env() -> dict:
         "llm_api_key": os.environ.get("HIVEMIND_LLM_API_KEY", ""),
         "llm_base_url": os.environ.get("HIVEMIND_LLM_BASE_URL", "https://openrouter.ai/api/v1"),
         "llm_model": os.environ.get("HIVEMIND_LLM_MODEL", "anthropic/claude-sonnet-4.5"),
-        "api_key": os.environ.get("HIVEMIND_API_KEY", ""),
+        # Tenant API key used to hit /v1/query and /v1/store.
+        "api_key": os.environ.get("HIVEMIND_TENANT_KEY", ""),
     }
 
 

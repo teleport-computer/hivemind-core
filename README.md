@@ -30,7 +30,7 @@ hivemind --help
 
 ```bash
 uv sync --all-extras
-docker compose -f deploy/docker-compose.dev.yml up -d
+docker compose -f scripts/docker-compose.dev.yml up -d
 docker build -t hivemind-agent-base -f agents/base/Dockerfile agents/base/
 docker build -t hivemind-default-index:local    agents/default-index
 docker build -t hivemind-default-query:local    agents/default-query
@@ -45,8 +45,8 @@ curl http://localhost:8100/v1/health
 The `hivemind` CLI is the fastest path from "I have an agent" to "it ran and here are the artifacts." Single command owns build → upload → poll → fetch.
 
 ```bash
-# One-time setup — defaults to http://localhost:8100
-hivemind init [--api-key $HIVEMIND_API_KEY]
+# One-time: point the CLI at the server and paste your tenant key
+hivemind init --api-key hmk_...   # mint one via `hivemind admin create-tenant`
 
 # Load a dataset (SQL dump / CSV / JSONL) into Postgres via /v1/store
 hivemind load dump.sql
@@ -97,14 +97,53 @@ both OpenAI and Anthropic formats so SDK code works unchanged inside containers.
 
 → Full pipeline diagrams, security layers, and container contract: **[ARCHITECTURE.md](ARCHITECTURE.md)**
 
+## Multi-tenancy
+
+hivemind-core is **multi-tenant by default**. The operator (you) holds a single
+**admin key** and mints per-tenant API keys on demand. Each tenant lives in an
+isolated Postgres database — when deployed in a TEE (Phala dstack), even the
+admin cannot read tenant data via the API.
+
+```bash
+# One-time: set HIVEMIND_ADMIN_KEY in .env (quickstart.sh does this for you)
+python3 -c "import secrets; print(secrets.token_urlsafe(32))"
+
+# Provision a tenant (returns api_key once — store it immediately)
+hivemind admin create-tenant --name "alice-corp"
+# → {"tenant_id": "t_abc...", "api_key": "hmk_...", "db_name": "tenant_t_abc..."}
+
+# List / delete
+hivemind admin list-tenants
+hivemind admin delete-tenant t_abc...
+```
+
+Hand the `hmk_...` key to the tenant — they use it as their normal
+`hivemind init --api-key` and everything else works unchanged.
+
+**First action for every new tenant: rotate the key.** The admin who
+minted it briefly saw the plaintext in the API response. Rotation issues
+a fresh key (the admin's copy stops working immediately) and updates
+`.hivemind/config.yaml` automatically:
+
+```bash
+hivemind init --api-key hmk_bootstrap_...
+hivemind rotate-key
+# → prints a fresh hmk_... that only the TEE + the tenant know
+```
+
+Treat any tenant key that has not been rotated as bootstrap-only.
+
 ## Configuration
 
 Settings load from `.env` with the `HIVEMIND_` prefix. The ones you actually touch:
 
 | Variable | Default | Notes |
 |---|---|---|
-| `HIVEMIND_DATABASE_URL` | `postgresql://hivemind:dev@localhost:5432/hivemind` | Postgres DSN |
-| `HIVEMIND_API_KEY` | — | Required when binding a non-local host |
+| `HIVEMIND_DATABASE_URL` | `postgresql://hivemind:dev@localhost:5432/postgres` | Postgres DSN — point at the maintenance DB so tenant DBs can be auto-created |
+| `HIVEMIND_ADMIN_KEY` | — | Enables `/v1/admin/tenants` so you can mint tenant keys. Required for multi-tenant use |
+| `HIVEMIND_SQL_PROXY_ADMIN_KEY` | — | Matches `SQL_PROXY_ADMIN_KEY` on sql-proxy — needed only for HTTP-proxy deploys |
+| `HIVEMIND_CONTROL_DATABASE` | `hivemind_control` | Metadata DB (tenant IDs, hashed keys). Auto-created on first boot |
+| `HIVEMIND_TENANT_CACHE_SIZE` | `32` | LRU cache of per-tenant Hivemind instances |
 | `HIVEMIND_HOST` / `HIVEMIND_PORT` | `127.0.0.1` / `8100` | Server bind |
 | `HIVEMIND_LLM_API_KEY` | — | LLM provider key (bridge passes LLM calls through) |
 | `HIVEMIND_LLM_BASE_URL` | `https://openrouter.ai/api/v1` | LLM API base URL |
@@ -179,9 +218,9 @@ scripts/           quickstart.sh
 ```bash
 uv run pytest tests/ --ignore=tests/test_integration_docker.py -q
 
-# With a Postgres DSN for store/pipeline tests:
-docker compose -f deploy/docker-compose.dev.yml up -d
-export HIVEMIND_TEST_DATABASE_URL="postgresql://hivemind:dev@localhost:5432/hivemind"
+# With a Postgres DSN for store/pipeline/tenant tests (use maintenance DB):
+docker compose -f scripts/docker-compose.dev.yml up -d
+export HIVEMIND_TEST_DATABASE_URL="postgresql://hivemind:dev@localhost:5432/postgres"
 uv run pytest tests/ --ignore=tests/test_integration_docker.py -q
 
 # Docker integration (real containers):

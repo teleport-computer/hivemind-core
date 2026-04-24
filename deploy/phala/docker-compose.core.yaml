@@ -20,8 +20,18 @@ services:
       # Server
       HIVEMIND_HOST: "0.0.0.0"
       HIVEMIND_PORT: "8100"
-      HIVEMIND_API_KEY: ${HIVEMIND_API_KEY:?Set API key}
       HIVEMIND_CORS_ALLOW_ORIGINS: ${HIVEMIND_CORS_ALLOW_ORIGINS:-}
+
+      # Multi-tenant control plane
+      # HIVEMIND_ADMIN_KEY enables /v1/admin/tenants so you (the operator)
+      # can mint per-tenant API keys. Required. Generate with:
+      #   python3 -c "import secrets; print(secrets.token_urlsafe(32))"
+      HIVEMIND_ADMIN_KEY: ${HIVEMIND_ADMIN_KEY:?Set admin key for tenant provisioning}
+      # Must match SQL_PROXY_ADMIN_KEY on the postgres CVM — used for
+      # CREATE/DROP DATABASE when provisioning/deleting tenants.
+      HIVEMIND_SQL_PROXY_ADMIN_KEY: ${SQL_PROXY_ADMIN_KEY:?Set SQL proxy admin key}
+      HIVEMIND_CONTROL_DATABASE: ${HIVEMIND_CONTROL_DATABASE:-hivemind_control}
+      HIVEMIND_TENANT_CACHE_SIZE: ${HIVEMIND_TENANT_CACHE_SIZE:-32}
 
       # LLM proxy
       HIVEMIND_LLM_API_KEY: ${HIVEMIND_LLM_API_KEY:?Set LLM API key}

@@ -82,7 +82,7 @@ deploy_service() {
     local cvm_id="$2"
     local compose_file="$3"
     local image_name="$4"
-    local env_flag="${5:-}"
+    local env_file="${5:-}"
 
     echo ""
     echo "--- Deploying ${name} ---"
@@ -102,8 +102,8 @@ deploy_service() {
 
     # Deploy
     local cmd=(phala deploy --cvm-id "${cvm_id}" -c "${pinned_compose}")
-    if [ -n "${env_flag}" ]; then
-        cmd+=(-e "${env_flag}")
+    if [ -n "${env_file}" ]; then
+        cmd+=(-e "${env_file}")
     fi
 
     echo "  Running: ${cmd[*]}"
@@ -137,7 +137,7 @@ deploy_postgres() {
     echo "  Compose diff:"
     diff "${compose}" "${tmp}" || true
 
-    phala deploy --cvm-id "${CVM_POSTGRES}" -c "${tmp}" -e "${SCRIPT_DIR}/.env"
+    phala deploy --cvm-id "${CVM_POSTGRES}" -c "${tmp}" -e "${SCRIPT_DIR}/.env.postgres"
     rm -f "${tmp}"
     echo "  postgres deployed"
 }
@@ -146,7 +146,7 @@ deploy_core() {
     deploy_service "core" "${CVM_CORE}" \
         "${SCRIPT_DIR}/docker-compose.core.yaml" \
         "hivemind-core" \
-        "${SCRIPT_DIR}/.env"
+        "${SCRIPT_DIR}/.env.core"
 }
 
 # ── Verify health ──

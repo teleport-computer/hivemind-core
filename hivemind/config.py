@@ -10,8 +10,18 @@ class Settings(BaseSettings):
     # Direct: postgres://...  |  Via HTTP proxy: https://<cvm>-8080.app.phala.network
     database_url: str = ""
     sql_proxy_key: str = ""  # shared secret for SQL proxy (Phala split deploy)
-    api_key: str = ""  # shared secret for HTTP auth; empty = no auth
     host: str = "127.0.0.1"
+
+    # Multi-tenant control plane. Bearer tokens resolve to per-tenant
+    # Hivemind instances via the `_tenants` table in `control_database`.
+    # Admin endpoints (POST/DELETE /v1/admin/tenants) are gated by
+    # `admin_key` and let the operator mint tenant API keys.
+    # `sql_proxy_admin_key` lets this process call sql_proxy's CREATE/DROP
+    # DATABASE routes — never exposed outside the core CVM.
+    admin_key: str = ""
+    sql_proxy_admin_key: str = ""
+    control_database: str = "hivemind_control"
+    tenant_cache_size: int = 32
     port: int = 8100
     cors_allow_origins: str = ""  # comma-separated list; empty = disable CORS
 
@@ -59,9 +69,9 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def _validate_security(self):
         host = (self.host or "").strip().lower()
-        if not self.api_key and host not in _LOCAL_BIND_HOSTS:
+        if not self.admin_key and host not in _LOCAL_BIND_HOSTS:
             raise ValueError(
-                "HIVEMIND_API_KEY must be set when HIVEMIND_HOST binds "
+                "HIVEMIND_ADMIN_KEY must be set when HIVEMIND_HOST binds "
                 "non-local interfaces"
             )
         return self

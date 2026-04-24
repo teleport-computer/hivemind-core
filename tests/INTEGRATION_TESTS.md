@@ -25,7 +25,7 @@ Use this file as the source of truth for live end-to-end checks.
    - `psql` (optional, for direct DB inspection)
    - `tar` (agent upload tests)
 2. Start local Postgres:
-   - `docker compose -f deploy/docker-compose.dev.yml up -d`
+   - `docker compose -f scripts/docker-compose.dev.yml up -d`
 3. Configure `.env` with a valid `HIVEMIND_LLM_API_KEY`.
    - For full completion runs with defaults, ensure these are set:
      - `HIVEMIND_AUTOLOAD_DEFAULT_AGENTS=true`
@@ -33,7 +33,7 @@ Use this file as the source of truth for live end-to-end checks.
      - `HIVEMIND_DEFAULT_QUERY_IMAGE=hivemind-default-query:local`
      - `HIVEMIND_DEFAULT_SCOPE_IMAGE=hivemind-default-scope:local`
      - `HIVEMIND_DEFAULT_MEDIATOR_IMAGE=hivemind-default-mediator:local`
-4. If `HIVEMIND_API_KEY` is set, include `Authorization: Bearer <key>` for all endpoints except health.
+4. Provision a tenant (`hivemind admin create-tenant`) and include `Authorization: Bearer <tenant-api-key>` for all endpoints except `/v1/health` and `/v1/healthz`.
 5. Export environment for command-line helpers:
    - `set -a; source .env; set +a`
 6. Build default local agent images:
@@ -47,8 +47,7 @@ Use this file as the source of truth for live end-to-end checks.
 8. Wait for health:
    - `curl -sS http://localhost:8100/v1/health`
 9. Verify default agents are registered (when autoload is enabled):
-   - No API key: `curl -sS http://localhost:8100/v1/agents`
-   - With API key: `curl -sS -H "Authorization: Bearer ${HIVEMIND_API_KEY}" http://localhost:8100/v1/agents`
+   - `curl -sS -H "Authorization: Bearer ${TENANT_API_KEY}" http://localhost:8100/v1/agents`
 
 ---
 
@@ -72,14 +71,9 @@ Use these shell variables in commands:
 
 ```bash
 export BASE="http://localhost:8100"
-export API_KEY="${HIVEMIND_API_KEY:-}"
+export API_KEY="${TENANT_API_KEY:?mint via 'hivemind admin create-tenant'}"
 
-# Optional auth argument helper
-if [ -n "$API_KEY" ]; then
-  AUTH=(-H "Authorization: Bearer $API_KEY")
-else
-  AUTH=()
-fi
+AUTH=(-H "Authorization: Bearer $API_KEY")
 ```
 
 ### Required Artifact Harness
@@ -412,5 +406,5 @@ At the end of a full completion run, output both:
 
 ```bash
 if [ -f /tmp/hivemind-server.pid ]; then kill "$(cat /tmp/hivemind-server.pid)" 2>/dev/null || true; fi
-docker compose -f deploy/docker-compose.dev.yml down
+docker compose -f scripts/docker-compose.dev.yml down
 ```

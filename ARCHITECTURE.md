@@ -484,8 +484,10 @@ agents/
 deploy/
   boot.sh              CVM entrypoint (env-var secrets, wait for Postgres)
   Dockerfile           Production app image (built by CI → GHCR)
-  docker-compose.dev.yml  Local dev Postgres (used by quickstart.sh)
   phala/               Phala Cloud two-CVM deploy (postgres + core compose files, deploy.sh)
-  postgres/            Production Postgres image (WAL-G, supercronic, sql-proxy sidecar)
-  restore.sh           Disaster recovery (WAL-G restore from R2)
+  postgres/            Production Postgres image (WAL-G, supercronic, sql-proxy sidecar, restore.sh)
+
+scripts/
+  quickstart.sh             One-command dev loop (builds agents, boots Postgres, demos a query)
+  docker-compose.dev.yml    Local Postgres for `uv run python -m hivemind.server`
 ```
