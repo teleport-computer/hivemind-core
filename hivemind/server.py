@@ -180,13 +180,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        # Ensure hivemind-agent-base:latest exists before accepting uploads.
-        # Runs off the event loop because image build can take minutes.
-        try:
-            from .agent_base_bootstrap import ensure_agent_base_image
-            await asyncio.to_thread(ensure_agent_base_image)
-        except Exception as e:
-            logger.warning("agent-base bootstrap raised: %s", e)
         # Fetch TDX quote + measurements for /v1/attestation. Cheap,
         # cached for process lifetime; falls back to ready=false outside
         # a TEE so local dev boots normally.
@@ -195,11 +188,32 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             await asyncio.to_thread(attestation.bootstrap)
         except Exception as e:
             logger.warning("attestation bootstrap raised: %s", e)
+
+        # Kick off agent-base image provisioning in the background — do
+        # NOT block HTTP readiness on it. GHCR pull can fail (private
+        # repo, network blip) and fall back to a multi-minute inline
+        # Dockerfile build that will OOM-kill a 2GB CVM. When that ran
+        # under `await`, lifespan never completed and uvicorn served
+        # "Empty reply from server" until the whole container restart-
+        # looped. Uploading agents before this task completes returns
+        # the usual "agent-base not present" error — acceptable vs. a
+        # hung control plane.
+        async def _bootstrap_agent_base():
+            try:
+                from .agent_base_bootstrap import ensure_agent_base_image
+                await asyncio.to_thread(ensure_agent_base_image)
+            except Exception as e:
+                logger.warning("agent-base bootstrap raised: %s", e)
+
+        agent_base_task = asyncio.create_task(_bootstrap_agent_base())
+
         registry = TenantRegistry(settings)
         app.state.registry = registry
+        app.state.agent_base_task = agent_base_task
         yield
         # Close per-tenant Hivemind instances + control DB.
         await asyncio.to_thread(registry.close)
+        agent_base_task.cancel()
 
     app = FastAPI(title="Hivemind Core", version=APP_VERSION, lifespan=lifespan)
 
