@@ -30,6 +30,9 @@ Zero external dependencies beyond psycopg[binary] — uses stdlib http.server.
 
 from __future__ import annotations
 
+import base64
+import hashlib
+import hmac
 import json
 import logging
 import os
@@ -67,6 +70,62 @@ _DB_NAME_RE = re.compile(r"^[a-z][a-z0-9_]{0,62}$")
 # Reserved DB names the admin API refuses to create/drop.
 _RESERVED_DBS = {"postgres", "template0", "template1"}
 
+# Tenant DB naming convention: `tenant_<tenant_id>` where tenant_id is
+# `t_<hex>`. This is enforced by hivemind/tenants.py when provisioning.
+_TENANT_DB_RE = re.compile(r"^tenant_(t_[0-9a-f]+)$")
+
+# ---------- Per-tenant role derivation (Layer 1 isolation) ----------
+#
+# Keep in sync with `hivemind/_pg_roles.py` — this file intentionally has
+# no hivemind imports (stdlib + psycopg only). If you change the
+# derivation here, mirror the change there, and vice versa.
+
+
+def _derive_role_password(seed: bytes, tenant_id: str) -> str:
+    """Deterministic Postgres password for a tenant's role.
+
+    Output: url-safe base64, no padding, 43 chars (256 bits of entropy).
+    """
+    if not seed:
+        raise ValueError("seed must be non-empty")
+    if not tenant_id:
+        raise ValueError("tenant_id must be non-empty")
+    info = f"pg-role-v1:{tenant_id}".encode("utf-8")
+    block = hmac.new(seed, info + b"\x01", hashlib.sha256).digest()
+    return base64.urlsafe_b64encode(block).rstrip(b"=").decode("ascii")
+
+
+def _role_name_for_tenant(tenant_id: str) -> str:
+    """`tenant_<id>_role`. Must fit in Postgres' 63-char identifier limit."""
+    if not tenant_id:
+        raise ValueError("tenant_id must be non-empty")
+    name = f"tenant_{tenant_id}_role"
+    if len(name) > 63:
+        raise ValueError(f"role name too long (>{63} chars): {name}")
+    return name
+
+
+def _parse_tenant_id_from_db_name(db_name: str | None) -> str | None:
+    """Extract `tenant_id` from a tenant DB name, or None if not tenant-shaped."""
+    if not db_name:
+        return None
+    m = _TENANT_DB_RE.match(db_name)
+    return m.group(1) if m else None
+
+
+def _tenant_role_seed() -> bytes | None:
+    """Return the seed bytes for role-password derivation, or None if unset.
+
+    Defaults to the same value as `PROXY_KEY` so operators don't need a
+    second secret — the proxy key is already server-held and rotates
+    together with the tenant roles (ALTER ROLE would be required on
+    rotation).
+    """
+    seed_str = os.environ.get("SQL_PROXY_ROLE_SEED") or PROXY_KEY
+    if not seed_str:
+        return None
+    return seed_str.encode("utf-8")
+
 # ---------- DB helpers ----------
 
 _pool_lock = threading.RLock()
@@ -76,11 +135,23 @@ _default_db_name: str | None = None
 
 
 def _dsn_for_db(db_name: str | None) -> str:
-    """Return a DSN targeting `db_name`, or DB_DSN unchanged if None."""
+    """Return a DSN targeting `db_name`, or DB_DSN unchanged if None.
+
+    For tenant DBs (matching `tenant_t_*`), rewrite `user` and `password`
+    to the per-tenant role so the data plane never connects as superuser.
+    Control DBs and the proxy's own default DB keep DB_DSN's credentials.
+    """
     if db_name is None:
         return DB_DSN
     parsed = pg_conninfo.conninfo_to_dict(DB_DSN)
     parsed["dbname"] = db_name
+
+    tenant_id = _parse_tenant_id_from_db_name(db_name)
+    if tenant_id is not None:
+        seed = _tenant_role_seed()
+        if seed is not None:
+            parsed["user"] = _role_name_for_tenant(tenant_id)
+            parsed["password"] = _derive_role_password(seed, tenant_id)
     return pg_conninfo.make_conninfo(**parsed)
 
 
@@ -360,6 +431,251 @@ def admin_list_dbs() -> list[str]:
         return [r["datname"] for r in cur.fetchall()]
 
 
+# ---------- Per-tenant role admin (Layer 1 isolation) ----------
+
+
+def _superuser_conn_to(db_name: str) -> psycopg.Connection:
+    """Open a one-shot superuser connection to `db_name` (autocommit).
+
+    Used by admin ops that must issue DDL inside the tenant DB — e.g.
+    `ALTER SCHEMA public OWNER`, `REASSIGN OWNED`. Caller is responsible
+    for closing.
+    """
+    parsed = pg_conninfo.conninfo_to_dict(DB_DSN)
+    parsed["dbname"] = db_name
+    return psycopg.connect(
+        pg_conninfo.make_conninfo(**parsed),
+        row_factory=dict_row,
+        autocommit=True,
+    )
+
+
+def _role_exists(role_name: str) -> bool:
+    conn = _get_admin_conn()
+    with conn.cursor() as cur:
+        cur.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", [role_name])
+        return cur.fetchone() is not None
+
+
+def _db_exists(db_name: str) -> bool:
+    conn = _get_admin_conn()
+    with conn.cursor() as cur:
+        cur.execute("SELECT 1 FROM pg_database WHERE datname = %s", [db_name])
+        return cur.fetchone() is not None
+
+
+def _ensure_role(tenant_id: str) -> str:
+    """CREATE ROLE or ALTER ROLE to match the derived password. Returns role name."""
+    seed = _tenant_role_seed()
+    if seed is None:
+        raise RuntimeError(
+            "cannot manage tenant roles: SQL_PROXY_ROLE_SEED/SQL_PROXY_KEY unset"
+        )
+    role_name = _role_name_for_tenant(tenant_id)
+    password = _derive_role_password(seed, tenant_id)
+    conn = _get_admin_conn()
+    with conn.cursor() as cur:
+        if _role_exists(role_name):
+            cur.execute(
+                psql.SQL(
+                    "ALTER ROLE {} WITH LOGIN PASSWORD {}"
+                ).format(psql.Identifier(role_name), psql.Literal(password))
+            )
+        else:
+            cur.execute(
+                psql.SQL(
+                    "CREATE ROLE {} WITH LOGIN PASSWORD {}"
+                ).format(psql.Identifier(role_name), psql.Literal(password))
+            )
+    return role_name
+
+
+def _apply_in_tenant_db(db_name: str, role_name: str) -> None:
+    """Inside the tenant DB: own `public` + transfer existing user objects.
+
+    We deliberately don't use `REASSIGN OWNED BY <superuser>`: that also
+    tries to move system-critical objects (e.g. extension catalog rows),
+    which fails with `DependentObjectsStillExist`. Instead we enumerate
+    just the user-level objects living in schema `public` and ALTER each
+    one's owner. New tables created by the tenant role belong to it by
+    default, so this only matters on first provisioning / migration.
+    """
+    conn = _superuser_conn_to(db_name)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                psql.SQL("ALTER SCHEMA public OWNER TO {}").format(
+                    psql.Identifier(role_name)
+                )
+            )
+
+            # Tables + matviews
+            cur.execute(
+                "SELECT tablename FROM pg_tables WHERE schemaname = 'public' "
+                "UNION ALL "
+                "SELECT matviewname FROM pg_matviews WHERE schemaname = 'public'"
+            )
+            for row in cur.fetchall():
+                name = row["tablename"]
+                cur.execute(
+                    psql.SQL(
+                        "ALTER TABLE public.{} OWNER TO {}"
+                    ).format(
+                        psql.Identifier(name), psql.Identifier(role_name)
+                    )
+                )
+
+            # Sequences (auto-created for SERIAL / GENERATED columns)
+            cur.execute(
+                "SELECT sequence_name FROM information_schema.sequences "
+                "WHERE sequence_schema = 'public'"
+            )
+            for row in cur.fetchall():
+                name = row["sequence_name"]
+                cur.execute(
+                    psql.SQL(
+                        "ALTER SEQUENCE public.{} OWNER TO {}"
+                    ).format(
+                        psql.Identifier(name), psql.Identifier(role_name)
+                    )
+                )
+
+            # Views
+            cur.execute(
+                "SELECT table_name FROM information_schema.views "
+                "WHERE table_schema = 'public'"
+            )
+            for row in cur.fetchall():
+                name = row["table_name"]
+                cur.execute(
+                    psql.SQL(
+                        "ALTER VIEW public.{} OWNER TO {}"
+                    ).format(
+                        psql.Identifier(name), psql.Identifier(role_name)
+                    )
+                )
+    finally:
+        conn.close()
+
+
+def admin_create_tenant_with_role(db_name: str, tenant_id: str) -> None:
+    """Provision a tenant DB that is owned by a per-tenant Postgres role.
+
+    Flow:
+      1. CREATE ROLE tenant_<id>_role LOGIN PASSWORD <derived>
+      2. CREATE DATABASE tenant_<id> OWNER tenant_<id>_role
+      3. REVOKE CONNECT ON DATABASE tenant_<id> FROM PUBLIC
+      4. (inside tenant_<id>) ALTER SCHEMA public OWNER TO tenant_<id>_role
+    """
+    _validate_db_name(db_name)
+    if _parse_tenant_id_from_db_name(db_name) != tenant_id:
+        raise ValueError(
+            f"db_name '{db_name}' does not match tenant_id '{tenant_id}'"
+        )
+    role_name = _ensure_role(tenant_id)
+
+    conn = _get_admin_conn()
+    with conn.cursor() as cur:
+        cur.execute(
+            psql.SQL("CREATE DATABASE {} OWNER {}").format(
+                psql.Identifier(db_name), psql.Identifier(role_name)
+            )
+        )
+        cur.execute(
+            psql.SQL("REVOKE CONNECT ON DATABASE {} FROM PUBLIC").format(
+                psql.Identifier(db_name)
+            )
+        )
+
+    _apply_in_tenant_db(db_name, role_name)
+
+
+def admin_drop_tenant_with_role(db_name: str, tenant_id: str) -> None:
+    """Inverse of `admin_create_tenant_with_role`.
+
+    DROP DATABASE first (which removes any objects the role owns in that
+    DB), then DROP ROLE. If the role still owns objects elsewhere the
+    DROP ROLE will fail — we let that surface as an error rather than
+    silently leaking state.
+    """
+    _validate_db_name(db_name)
+    if _parse_tenant_id_from_db_name(db_name) != tenant_id:
+        raise ValueError(
+            f"db_name '{db_name}' does not match tenant_id '{tenant_id}'"
+        )
+    _drop_pool_entry(db_name)
+
+    conn = _get_admin_conn()
+    with conn.cursor() as cur:
+        cur.execute(
+            psql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(
+                psql.Identifier(db_name)
+            )
+        )
+        role_name = _role_name_for_tenant(tenant_id)
+        cur.execute(
+            psql.SQL("DROP ROLE IF EXISTS {}").format(
+                psql.Identifier(role_name)
+            )
+        )
+
+
+def admin_migrate_tenant_to_role(db_name: str) -> dict:
+    """Idempotently retrofit a role onto an existing tenant DB.
+
+    - Skips DBs whose names don't match `tenant_t_*`.
+    - Creates the role if missing (else ALTERs password to the derived value).
+    - Transfers DB ownership to the role.
+    - Reassigns in-DB objects (REASSIGN OWNED BY <superuser>).
+    - REVOKE CONNECT ... FROM PUBLIC.
+
+    Safe to re-run. Returns a small summary dict for the migration report.
+    """
+    tenant_id = _parse_tenant_id_from_db_name(db_name)
+    if tenant_id is None:
+        return {"db_name": db_name, "skipped": "not a tenant DB"}
+    if not _db_exists(db_name):
+        return {"db_name": db_name, "skipped": "database does not exist"}
+
+    role_name = _ensure_role(tenant_id)
+
+    _drop_pool_entry(db_name)
+
+    conn = _get_admin_conn()
+    with conn.cursor() as cur:
+        cur.execute(
+            psql.SQL("ALTER DATABASE {} OWNER TO {}").format(
+                psql.Identifier(db_name), psql.Identifier(role_name)
+            )
+        )
+        cur.execute(
+            psql.SQL("REVOKE CONNECT ON DATABASE {} FROM PUBLIC").format(
+                psql.Identifier(db_name)
+            )
+        )
+
+    _apply_in_tenant_db(db_name, role_name)
+    return {
+        "db_name": db_name,
+        "tenant_id": tenant_id,
+        "role": role_name,
+        "migrated": True,
+    }
+
+
+def admin_migrate_all_tenants() -> list[dict]:
+    """Run `admin_migrate_tenant_to_role` for every `tenant_t_*` DB."""
+    results = []
+    for db_name in admin_list_dbs():
+        if _parse_tenant_id_from_db_name(db_name) is None:
+            continue
+        try:
+            results.append(admin_migrate_tenant_to_role(db_name))
+        except Exception as e:
+            results.append({"db_name": db_name, "error": str(e)})
+    return results
+
+
 # ---------- JSON serializer ----------
 
 def _default_json(obj):
@@ -484,7 +800,11 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 self._json_response(400, {"error": str(e)})
                 return
             try:
-                admin_drop_db(db_name)
+                tenant_id = _parse_tenant_id_from_db_name(db_name)
+                if tenant_id is not None and _tenant_role_seed() is not None:
+                    admin_drop_tenant_with_role(db_name, tenant_id)
+                else:
+                    admin_drop_db(db_name)
                 self._json_response(200, {"status": "ok", "dropped": db_name})
             except ValueError as e:
                 self._json_response(400, {"error": str(e)})
@@ -508,7 +828,13 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 return
             db_name = (body.get("db_name") or "").strip()
             try:
-                admin_create_db(db_name)
+                tenant_id = _parse_tenant_id_from_db_name(db_name)
+                if tenant_id is not None and _tenant_role_seed() is not None:
+                    admin_create_tenant_with_role(db_name, tenant_id)
+                    created_role = _role_name_for_tenant(tenant_id)
+                else:
+                    admin_create_db(db_name)
+                    created_role = None
             except ValueError as e:
                 self._json_response(400, {"error": str(e)})
                 return
@@ -521,8 +847,35 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 self._json_response(500, {"error": str(e)})
                 return
             self._json_response(
-                200, {"status": "ok", "db_name": db_name, "created": True}
+                200,
+                {
+                    "status": "ok",
+                    "db_name": db_name,
+                    "created": True,
+                    "role": created_role,
+                },
             )
+            return
+
+        if self.path == "/admin/migrate-to-roles":
+            if not self._check_admin():
+                return
+            if _tenant_role_seed() is None:
+                self._json_response(
+                    503,
+                    {
+                        "error": (
+                            "tenant-role derivation disabled: "
+                            "SQL_PROXY_ROLE_SEED/SQL_PROXY_KEY unset"
+                        )
+                    },
+                )
+                return
+            try:
+                results = admin_migrate_all_tenants()
+                self._json_response(200, {"status": "ok", "results": results})
+            except Exception as e:
+                self._json_response(500, {"error": str(e)})
             return
 
         if self.path == "/admin/rename-database":

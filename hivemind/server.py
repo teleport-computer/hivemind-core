@@ -330,6 +330,31 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         tenants = await asyncio.to_thread(registry.list_tenants)
         return {"tenants": tenants}
 
+    @app.post(
+        "/v1/admin/migrate-to-roles",
+        dependencies=[Depends(check_admin)],
+    )
+    async def admin_migrate_to_roles(request: Request):
+        """Retrofit per-tenant Postgres roles onto pre-existing tenant DBs.
+
+        Idempotent. Required once after upgrading to the Layer-1 build of
+        the SQL proxy; tenants provisioned after the upgrade already have
+        roles. Returns one result dict per tenant DB encountered.
+        """
+        registry = _registry(request)
+        admin = registry._pg_admin
+        if admin is None:
+            raise HTTPException(
+                503,
+                "migrate-to-roles requires HIVEMIND_SQL_PROXY_ADMIN_KEY "
+                "(HTTP deploys)",
+            )
+        try:
+            results = await asyncio.to_thread(admin.migrate_tenants_to_roles)
+        except RuntimeError as e:
+            raise HTTPException(400, str(e))
+        return {"status": "ok", "results": results}
+
     @app.delete(
         "/v1/admin/tenants/{tenant_id}",
         dependencies=[Depends(check_admin)],

@@ -1382,5 +1382,65 @@ def admin_rename_database(
     click.echo(f"Renamed: {old_name} → {new_name}")
 
 
+@admin_cli.command("migrate-to-roles")
+@click.option("--service", default=None, help="Hivemind service URL")
+@click.option(
+    "--admin-key",
+    envvar="HIVEMIND_ADMIN_KEY",
+    required=True,
+    help="Admin bearer token",
+)
+@click.option(
+    "--as-json/--no-as-json", default=False, help="Emit JSON output",
+)
+def admin_migrate_to_roles(service: str | None, admin_key: str, as_json: bool):
+    """Retrofit per-tenant Postgres roles onto pre-existing tenant DBs.
+
+    Idempotent: creates the role if missing, ALTERs the password to the
+    current derivation, transfers DB + public-schema ownership, and
+    REVOKEs CONNECT from PUBLIC. Required once after upgrading to the
+    Layer-1 build of the SQL proxy; tenants provisioned after the
+    upgrade already have roles.
+    """
+    import json as _json
+
+    url = _resolve_admin_service(service)
+    try:
+        resp = httpx.post(
+            f"{url}/v1/admin/migrate-to-roles",
+            headers=_admin_headers(admin_key),
+            timeout=180,
+        )
+    except httpx.RequestError as e:
+        click.echo(f"Error: {e}", err=True)
+        raise SystemExit(2)
+    if resp.status_code >= 400:
+        click.echo(f"Error {resp.status_code}: {_api_error(resp)}", err=True)
+        raise SystemExit(3)
+
+    results = resp.json().get("results", [])
+    if as_json:
+        click.echo(_json.dumps(results, indent=2, default=str))
+        return
+
+    if not results:
+        click.echo("(no tenant DBs found)")
+        return
+    migrated = sum(1 for r in results if r.get("migrated"))
+    skipped = sum(1 for r in results if r.get("skipped"))
+    errored = sum(1 for r in results if r.get("error"))
+    click.echo(
+        f"Processed {len(results)} databases: "
+        f"{migrated} migrated, {skipped} skipped, {errored} errored"
+    )
+    for r in results:
+        if r.get("migrated"):
+            click.echo(f"  OK   {r['db_name']} → role {r['role']}")
+        elif r.get("skipped"):
+            click.echo(f"  SKIP {r['db_name']} ({r['skipped']})")
+        elif r.get("error"):
+            click.echo(f"  ERR  {r['db_name']}: {r['error']}", err=True)
+
+
 if __name__ == "__main__":
     cli()

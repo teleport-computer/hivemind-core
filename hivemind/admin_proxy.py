@@ -54,6 +54,15 @@ class SqlProxyAdmin:
         )
         self._check(resp)
 
+    def migrate_tenants_to_roles(self) -> list[dict]:
+        """Retrofit per-tenant Postgres roles onto pre-existing tenant DBs.
+
+        Idempotent. Returns one result dict per tenant DB encountered.
+        Raises RuntimeError when the proxy was started without a role seed.
+        """
+        resp = self._client.post("/admin/migrate-to-roles", timeout=120)
+        return self._check(resp).get("results", [])
+
     def close(self) -> None:
         try:
             self._client.close()
@@ -126,6 +135,15 @@ class LocalPgAdmin:
                         psql.Identifier(new_name),
                     )
                 )
+
+    def migrate_tenants_to_roles(self) -> list[dict]:
+        """LocalPgAdmin doesn't enforce per-tenant roles today.
+
+        Layer 1 is a property of the HTTP SQL proxy; direct-psycopg deploys
+        share the superuser credential already, so the migration is a
+        no-op here rather than a silent failure.
+        """
+        return []
 
     def close(self) -> None:
         pass
