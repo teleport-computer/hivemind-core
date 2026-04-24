@@ -49,10 +49,11 @@ def _new_api_key() -> str:
     return _API_KEY_PREFIX + secrets.token_urlsafe(32)
 
 
-def _hash_api_key(key: str) -> bytes:
+def _hash_api_key(key: str) -> str:
     # SHA-256 is fine here — the key has >=256 bits of entropy, so brute
-    # force is infeasible even without slow hashing.
-    return hashlib.sha256(key.encode()).digest()
+    # force is infeasible even without slow hashing. Return hex so the
+    # value survives JSON serialization across the sql-proxy boundary.
+    return hashlib.sha256(key.encode()).hexdigest()
 
 
 class TenantRegistry:
@@ -134,13 +135,22 @@ class TenantRegistry:
             CREATE TABLE IF NOT EXISTS _tenants (
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
-                api_key_hash BYTEA NOT NULL,
+                api_key_hash TEXT NOT NULL,
                 db_name TEXT NOT NULL UNIQUE,
                 created_at DOUBLE PRECISION NOT NULL,
                 suspended BOOLEAN NOT NULL DEFAULT FALSE
             )
             """
         )
+        # Migrate legacy BYTEA → TEXT for DBs initialized with the older
+        # schema. hex-encode existing rows so lookups continue to work.
+        try:
+            self._control_db.execute_commit(
+                "ALTER TABLE _tenants ALTER COLUMN api_key_hash TYPE TEXT "
+                "USING encode(api_key_hash::bytea, 'hex')"
+            )
+        except Exception:
+            pass
         self._control_db.execute_commit(
             "CREATE INDEX IF NOT EXISTS _tenants_api_key_hash_idx "
             "ON _tenants (api_key_hash)"

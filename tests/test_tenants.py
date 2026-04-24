@@ -129,9 +129,10 @@ def test_api_key_stored_only_as_hash(registry):
         "SELECT api_key_hash FROM _tenants WHERE id = %s",
         [result["tenant_id"]],
     )
-    stored = bytes(rows[0]["api_key_hash"])
+    stored = rows[0]["api_key_hash"]
+    assert isinstance(stored, str) and len(stored) == 64
     # Plaintext key is never persisted.
-    assert result["api_key"].encode() not in stored
+    assert result["api_key"] not in stored
     # Hash matches.
     assert stored == _hash_api_key(result["api_key"])
 
