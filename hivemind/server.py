@@ -187,6 +187,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             await asyncio.to_thread(ensure_agent_base_image)
         except Exception as e:
             logger.warning("agent-base bootstrap raised: %s", e)
+        # Fetch TDX quote + measurements for /v1/attestation. Cheap,
+        # cached for process lifetime; falls back to ready=false outside
+        # a TEE so local dev boots normally.
+        try:
+            from . import attestation
+            await asyncio.to_thread(attestation.bootstrap)
+        except Exception as e:
+            logger.warning("attestation bootstrap raised: %s", e)
         registry = TenantRegistry(settings)
         app.state.registry = registry
         yield
@@ -390,6 +398,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/v1/healthz")
     async def healthz():
         return {"status": "ok", "version": APP_VERSION}
+
+    # ── Remote attestation (unauthed; pattern from feedling-mcp-v1) ──
+    # The bundle is public — anyone holding Intel's root CA can verify
+    # the quote. Gating it would create a chicken-and-egg: the CLI needs
+    # to know it trusts this CVM before it can authenticate.
+
+    @app.get("/v1/attestation")
+    async def attestation_endpoint():
+        from . import attestation as _att
+        return _att.get_bundle()
 
     # ── Pipeline endpoints ──
 

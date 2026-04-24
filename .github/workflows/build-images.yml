@@ -6,8 +6,9 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Release version (e.g. 1.0.0). Images will be tagged with this version."
-        required: true
+        description: "Optional extra tag (e.g. 1.0.0). Leave empty for :<short-sha> + :latest only."
+        required: false
+        default: ""
       targets:
         description: "Images to build (comma-separated: core,postgres,sql-proxy,base-sdk or all)"
         required: false

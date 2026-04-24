@@ -15,6 +15,7 @@ Usage:
 
 import io
 import json as _json
+import os
 import sys
 import tarfile
 import time
@@ -23,6 +24,8 @@ from pathlib import Path
 import click
 import httpx
 import yaml
+
+from . import trust as _trust
 
 _CONFIG_DIR = ".hivemind"
 _CONFIG_FILE = "config.yaml"
@@ -46,8 +49,15 @@ def _config_path() -> Path:
     return Path(_CONFIG_DIR) / _CONFIG_FILE
 
 
-def _load_config() -> dict:
-    """Load .hivemind/config.yaml or exit with error."""
+def _load_config(*, check_trust: bool = True) -> dict:
+    """Load .hivemind/config.yaml or exit with error.
+
+    When ``check_trust`` is True (default) this also runs the remote
+    compose-hash consent check — prompting the user on first-use or on
+    hash change. Pass ``check_trust=False`` from local-only commands
+    (e.g. ``hivemind trust`` subcommands that inspect the store without
+    contacting the CVM).
+    """
     p = _config_path()
     if not p.exists():
         click.echo(
@@ -67,6 +77,8 @@ def _load_config() -> dict:
             err=True,
         )
         raise SystemExit(1)
+    if check_trust:
+        _require_trust(config)
     return config
 
 
@@ -141,6 +153,124 @@ def _http_get(url: str, headers: dict, timeout: float = 30) -> dict:
         click.echo(f"Error {r.status_code}: {_api_error(r)}", err=True)
         raise SystemExit(3)
     return r.json()
+
+
+# ── Remote attestation / compose-hash consent ──
+#
+# Every command that hits the service calls ``_require_trust`` before
+# the first request. It fetches ``GET /v1/attestation`` and compares
+# the CVM's current ``compose_hash`` against the locally-cached
+# approval. Three environment-variable escape hatches for CI:
+#
+#   HIVEMIND_TRUST_ALL=1          auto-approve any change
+#   HIVEMIND_TRUST_HASH=0x...     abort unless hash matches (strict CI)
+#   HIVEMIND_NO_TRUST_CHECK=1     skip the check entirely (dev)
+
+
+def _fetch_attestation(service: str) -> dict:
+    url = f"{service.rstrip('/')}/v1/attestation"
+    try:
+        r = httpx.get(url, timeout=5)
+    except (httpx.ConnectError, httpx.TimeoutException) as e:
+        return {"ready": False, "reason": f"fetch_failed: {e!r}"}
+    if r.status_code != 200:
+        return {
+            "ready": False,
+            "reason": f"http_{r.status_code}: {_api_error(r)}",
+        }
+    try:
+        return r.json()
+    except ValueError:
+        return {"ready": False, "reason": "invalid_json"}
+
+
+def _require_trust(config: dict) -> None:
+    """Gate on the remote compose_hash matching the local approval.
+
+    Prompts the user on first-use (TOFU) or on hash change. Aborts
+    with exit code 4 if the user declines. No-op when the remote is
+    not TEE-backed (local dev); prints an amber warning on stderr.
+    """
+    if os.environ.get("HIVEMIND_NO_TRUST_CHECK"):
+        click.echo(
+            "! Trust check skipped (HIVEMIND_NO_TRUST_CHECK set).",
+            err=True,
+        )
+        return
+
+    service = config["service"]
+    bundle = _fetch_attestation(service)
+    decision = _trust.evaluate(service, bundle)
+
+    if decision.status == "trusted":
+        return
+
+    if decision.status == "degraded":
+        click.echo(
+            f"! Remote attestation unavailable ({decision.reason}). "
+            f"Treating as dev mode.",
+            err=True,
+        )
+        return
+
+    pinned_hash = os.environ.get("HIVEMIND_TRUST_HASH", "").strip()
+    if pinned_hash:
+        if decision.current_hash == pinned_hash:
+            _trust.record_approval(
+                service, decision.current_hash, decision.app_id
+            )
+            return
+        click.echo(
+            f"Error: Remote compose_hash {decision.current_hash} does not "
+            f"match HIVEMIND_TRUST_HASH={pinned_hash}.",
+            err=True,
+        )
+        raise SystemExit(4)
+
+    if os.environ.get("HIVEMIND_TRUST_ALL"):
+        _trust.record_approval(
+            service, decision.current_hash, decision.app_id
+        )
+        return
+
+    # Interactive prompt.
+    if decision.status == "tofu":
+        click.echo(
+            f"\nFirst connection to {service}.\n"
+            f"  App ID:        {decision.app_id or '(unknown)'}\n"
+            f"  Compose hash:  {decision.current_hash}\n",
+            err=True,
+        )
+        prompt = "Trust this compose hash and continue? [y/N]: "
+    else:  # changed
+        click.echo(
+            f"\n! Remote compose hash changed since last connection.\n"
+            f"  Service:   {service}\n"
+            f"  App ID:    {decision.app_id or '(unknown)'}\n"
+            f"  Old hash:  {decision.approved_hash}\n"
+            f"  New hash:  {decision.current_hash}\n",
+            err=True,
+        )
+        prompt = "Approve the new hash and continue? [y/N]: "
+
+    try:
+        answer = (
+            click.prompt(prompt, default="N", show_default=False)
+            .strip()
+            .lower()
+        )
+    except (click.Abort, EOFError):
+        click.echo(
+            "Aborted — no input available. Set HIVEMIND_TRUST_ALL=1, "
+            "HIVEMIND_TRUST_HASH=<hex>, or HIVEMIND_NO_TRUST_CHECK=1 "
+            "for non-interactive use.",
+            err=True,
+        )
+        raise SystemExit(4)
+    if answer not in {"y", "yes"}:
+        click.echo("Aborted — compose hash not approved.", err=True)
+        raise SystemExit(4)
+    _trust.record_approval(service, decision.current_hash, decision.app_id)
 
 
 # ── CLI ──
@@ -1440,6 +1570,93 @@ def admin_migrate_to_roles(service: str | None, admin_key: str, as_json: bool):
             click.echo(f"  SKIP {r['db_name']} ({r['skipped']})")
         elif r.get("error"):
             click.echo(f"  ERR  {r['db_name']}: {r['error']}", err=True)
+
+
+# ── Trust store inspection (``hivemind trust ...``) ──
+
+
+@cli.group("trust")
+def trust_group():
+    """Manage the local compose-hash trust store (``~/.hivemind/trust.json``)."""
+    pass
+
+
+@trust_group.command("show")
+@click.argument("service", required=False)
+def trust_show(service: str | None):
+    """Print the trust entry for SERVICE (or all services)."""
+    store = _trust.load_trust()
+    services = store.get("services", {})
+    if service:
+        entry = services.get(service.rstrip("/"))
+        if entry is None:
+            click.echo(f"No trust entry for {service}.", err=True)
+            raise SystemExit(1)
+        click.echo(_json.dumps(entry, indent=2, sort_keys=True))
+        return
+    if not services:
+        click.echo("(trust store empty)")
+        return
+    for url, entry in sorted(services.items()):
+        click.echo(f"{url}")
+        click.echo(f"  app_id:        {entry.get('app_id', '')}")
+        click.echo(
+            f"  compose_hash:  {entry.get('approved_compose_hash', '')}"
+        )
+        click.echo(f"  approved_at:   {entry.get('approved_at', '')}")
+        click.echo(f"  first_seen_at: {entry.get('first_seen_at', '')}")
+        hist = entry.get("history", [])
+        if hist:
+            click.echo(f"  history: {len(hist)} prior hash(es)")
+
+
+@trust_group.command("reset")
+@click.argument("service", required=False)
+@click.option("--all", "all_services", is_flag=True, help="Clear every service.")
+def trust_reset(service: str | None, all_services: bool):
+    """Clear the trust entry for SERVICE (or --all)."""
+    if all_services and service:
+        click.echo("Pass either SERVICE or --all, not both.", err=True)
+        raise SystemExit(1)
+    if not all_services and not service:
+        click.echo(
+            "Specify a SERVICE URL or --all.\n"
+            "Run 'hivemind trust show' to see what's stored.",
+            err=True,
+        )
+        raise SystemExit(1)
+    n = _trust.clear(None if all_services else service)
+    click.echo(f"Cleared {n} trust entr{'y' if n == 1 else 'ies'}.")
+
+
+@trust_group.command("approve")
+@click.argument("service", required=False)
+def trust_approve(service: str | None):
+    """Force-approve the current remote compose_hash for SERVICE.
+
+    Equivalent to answering "y" to the next prompt, without waiting for
+    it. Uses the configured service URL when SERVICE is omitted.
+    """
+    if service is None:
+        config = _load_config(check_trust=False)
+        service = config["service"]
+    service = service.rstrip("/")
+    bundle = _fetch_attestation(service)
+    if not bundle.get("ready"):
+        click.echo(
+            f"Cannot approve — attestation unavailable: "
+            f"{bundle.get('reason', 'unknown')}",
+            err=True,
+        )
+        raise SystemExit(2)
+    att = bundle.get("attestation") or {}
+    compose_hash = att.get("compose_hash") or ""
+    app_id = att.get("app_id") or ""
+    if not compose_hash:
+        click.echo("Cannot approve — bundle has no compose_hash.", err=True)
+        raise SystemExit(2)
+    _trust.record_approval(service, compose_hash, app_id)
+    click.echo(f"Approved {compose_hash} for {service}.")
 
 
 if __name__ == "__main__":
