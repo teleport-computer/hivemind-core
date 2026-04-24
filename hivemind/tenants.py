@@ -143,11 +143,32 @@ class TenantRegistry:
             """
         )
         # Migrate legacy BYTEA → TEXT for DBs initialized with the older
-        # schema. hex-encode existing rows so lookups continue to work.
+        # schema. Guard on the actual column type: if it's already TEXT,
+        # running the ALTER with USING encode(...::bytea, 'hex') would
+        # re-encode the stored hex string as ASCII bytes → double-hex,
+        # breaking every tenant lookup on the next boot.
+        rows = self._control_db.execute(
+            "SELECT data_type FROM information_schema.columns "
+            "WHERE table_name = '_tenants' AND column_name = 'api_key_hash'"
+        )
+        if rows and rows[0]["data_type"] == "bytea":
+            try:
+                self._control_db.execute_commit(
+                    "ALTER TABLE _tenants ALTER COLUMN api_key_hash TYPE TEXT "
+                    "USING encode(api_key_hash, 'hex')"
+                )
+            except Exception:
+                pass
+        # Repair rows that were already double-encoded by the previous
+        # unguarded migration: a 128-char hex string whose decoded bytes
+        # are themselves valid 64-char hex is almost certainly a
+        # double-encoded hash. Unwrap in place.
         try:
             self._control_db.execute_commit(
-                "ALTER TABLE _tenants ALTER COLUMN api_key_hash TYPE TEXT "
-                "USING encode(api_key_hash::bytea, 'hex')"
+                "UPDATE _tenants SET api_key_hash = "
+                "convert_from(decode(api_key_hash, 'hex'), 'UTF8') "
+                "WHERE length(api_key_hash) = 128 "
+                "AND api_key_hash ~ '^[0-9a-f]+$'"
             )
         except Exception:
             pass

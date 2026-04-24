@@ -340,6 +340,58 @@ def test_local_pg_admin_rename_database(registry):
     assert new in dbs
 
 
+def test_migration_does_not_double_encode_existing_hashes(registry):
+    """Regression: a previous version of _bootstrap_control_schema ran
+    `ALTER ... USING encode(api_key_hash::bytea, 'hex')` unconditionally,
+    which re-encoded hex TEXT values as ASCII bytes → double-hex on every
+    restart. After provisioning a tenant, a subsequent bootstrap must
+    leave the stored hash byte-for-byte identical."""
+    t = registry.provision("rebootproof")
+    registry._test_created_dbs.append(t["db_name"])
+
+    before = registry._control_db.execute(
+        "SELECT api_key_hash FROM _tenants WHERE id = %s", [t["tenant_id"]]
+    )[0]["api_key_hash"]
+
+    registry._bootstrap_control_schema()
+
+    after = registry._control_db.execute(
+        "SELECT api_key_hash FROM _tenants WHERE id = %s", [t["tenant_id"]]
+    )[0]["api_key_hash"]
+    assert before == after
+    # And the live bearer still resolves after the re-bootstrap.
+    assert registry.resolve(t["api_key"]) is not None
+
+
+def test_migration_repairs_double_encoded_hashes(registry):
+    """If a tenant row was corrupted by the old unguarded migration
+    (the hash stored as the hex of its ASCII bytes), bootstrap must
+    unwrap it in place so lookups work again."""
+    t = registry.provision("corruption-victim")
+    registry._test_created_dbs.append(t["db_name"])
+
+    good = registry._control_db.execute(
+        "SELECT api_key_hash FROM _tenants WHERE id = %s", [t["tenant_id"]]
+    )[0]["api_key_hash"]
+    # Simulate the double-hex bug: store hex(ascii(good)).
+    corrupted = good.encode("ascii").hex()
+    registry._control_db.execute_commit(
+        "UPDATE _tenants SET api_key_hash = %s WHERE id = %s",
+        [corrupted, t["tenant_id"]],
+    )
+
+    # Lookup should be broken right now.
+    assert registry.resolve(t["api_key"]) is None
+
+    registry._bootstrap_control_schema()
+
+    after = registry._control_db.execute(
+        "SELECT api_key_hash FROM _tenants WHERE id = %s", [t["tenant_id"]]
+    )[0]["api_key_hash"]
+    assert after == good
+    assert registry.resolve(t["api_key"]) is not None
+
+
 def test_docker_image_tag_scoping():
     """Image tags must embed tenant_id so shared daemons don't collide."""
     from hivemind.server import _tenant_image_tag

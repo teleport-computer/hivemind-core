@@ -8,9 +8,75 @@
 #   phala deploy -n hivemind-core -c deploy/phala/docker-compose.core.yaml -e deploy/phala/.env --wait
 
 services:
+  # One-shot init: ensures `hivemind-agent-base:latest` exists in the CVM's
+  # Docker daemon so agent Dockerfiles (`FROM hivemind-agent-base:latest`)
+  # can build. Strategy:
+  #   1. If GHCR_BASE_IMAGE is pullable (public or creds provided), pull+tag.
+  #   2. Otherwise build from inline Dockerfile — same recipe as
+  #      agents/base/Dockerfile. No external dependency beyond pypi/npm.
+  # Always exits 0 so the main hivemind service boots even if both paths
+  # fail; agent uploads will surface the error at build time.
+  agent-base-bootstrap:
+    image: docker:27-cli
+    restart: "no"
+    environment:
+      GHCR_BASE_IMAGE: ${GHCR_BASE_IMAGE:-ghcr.io/account-link/hivemind-agent-base:latest}
+      GHCR_USERNAME: ${GHCR_USERNAME:-}
+      GHCR_TOKEN: ${GHCR_TOKEN:-}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    command:
+      - sh
+      - -c
+      - |
+        set -u
+        if docker image inspect hivemind-agent-base:latest >/dev/null 2>&1; then
+          echo "[bootstrap] hivemind-agent-base:latest already present"
+          exit 0
+        fi
+        if [ -n "$$GHCR_TOKEN" ] && [ -n "$$GHCR_USERNAME" ]; then
+          echo "[bootstrap] logging in to ghcr.io as $$GHCR_USERNAME"
+          echo "$$GHCR_TOKEN" | docker login ghcr.io -u "$$GHCR_USERNAME" --password-stdin || true
+        fi
+        echo "[bootstrap] attempting pull of $$GHCR_BASE_IMAGE"
+        if docker pull "$$GHCR_BASE_IMAGE" 2>&1; then
+          docker tag "$$GHCR_BASE_IMAGE" hivemind-agent-base:latest
+          echo "[bootstrap] tagged hivemind-agent-base:latest from pulled image"
+          exit 0
+        fi
+        echo "[bootstrap] pull failed — building from inline Dockerfile"
+        mkdir -p /tmp/agent-base
+        cat > /tmp/agent-base/Dockerfile <<'DOCKERFILE'
+        FROM python:3.12-slim
+        RUN apt-get update && \
+            apt-get install -y --no-install-recommends curl ca-certificates && \
+            curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
+            apt-get install -y --no-install-recommends nodejs && \
+            rm -rf /var/lib/apt/lists/*
+        RUN npm install -g @anthropic-ai/claude-code@latest
+        RUN pip install --no-cache-dir --upgrade "claude-agent-sdk>=0.1.61" aiohttp
+        RUN useradd -m -s /bin/bash agent
+        WORKDIR /app
+        RUN chown agent:agent /app
+        ENV PYTHONPATH=/app
+        USER agent
+        DOCKERFILE
+        if docker build -t hivemind-agent-base:latest /tmp/agent-base; then
+          echo "[bootstrap] built hivemind-agent-base:latest from source"
+        else
+          echo "[bootstrap] build failed — agent uploads will fail until fixed"
+        fi
+        exit 0
+
   hivemind:
-    image: ghcr.io/account-link/hivemind-core:latest
+    # Pin to the multi-tenant build (v0.4.3-rotate). The `:latest` tag in GHCR
+    # was last refreshed from main pre-multi-tenant and lacks admin_key/tenant
+    # routes — don't use it until v0.4+ lands on main.
+    image: ghcr.io/account-link/hivemind-core:v0.4.3-rotate
     network_mode: host
+    depends_on:
+      agent-base-bootstrap:
+        condition: service_completed_successfully
     environment:
       # Database — set to the SQL proxy URL on the postgres CVM
       # Format: https://<pg_cvm_id>-8080.app.phala.network
