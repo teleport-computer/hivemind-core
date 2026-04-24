@@ -17,7 +17,8 @@ services:
     # and lacks admin_key/tenant routes — don't use it until v0.4+ lands
     # on main.
     image: ghcr.io/account-link/hivemind-core:v0.4.5-base-bootstrap
-    network_mode: host
+    ports:
+      - "8100:8100"
     environment:
       # Database — set to the SQL proxy URL on the postgres CVM
       # Format: https://<pg_cvm_id>-8080.app.phala.network
