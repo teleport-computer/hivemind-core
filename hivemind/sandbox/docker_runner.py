@@ -47,6 +47,14 @@ class DockerRunner:
         self.settings = settings
         self._client: docker.DockerClient | None = None
         self._network_id: str | None = None
+        # When hivemind-core itself runs inside a container and spawns
+        # sibling containers via the host Docker socket (e.g., Phala CVM),
+        # the spawned containers cannot reach the parent's bridge port via
+        # the sandbox network's gateway — the gateway routes to the host,
+        # not into the parent container. Workaround: attach self to the
+        # sandbox network at startup and use self's IP on that network as
+        # the bridge host. Populated lazily in _ensure_network().
+        self._self_sandbox_ip: str | None = None
 
     def _client_from_base_url(self, base_url: str) -> docker.DockerClient:
         return docker.DockerClient(base_url=base_url)
@@ -213,14 +221,100 @@ class DockerRunner:
             self._network_id = network.id
             logger.info("Created Docker network %s (internal=%s)", name, internal)
 
+        # When running inside a container (e.g., Phala CVM), attach self to
+        # the sandbox network so spawned siblings can reach our bridge.
+        self._attach_self_to_network(client, network)
+
         return name
+
+    def _detect_self_container_id(self) -> str | None:
+        """Return our own Docker container short-id if running in a container.
+
+        HOSTNAME inside a container is the container's 12-char short-id by
+        default. Fall back to /etc/hostname. Returns None on host/bare-metal.
+        """
+        hostname = os.environ.get("HOSTNAME", "").strip()
+        if not hostname:
+            try:
+                with open("/etc/hostname", "r", encoding="utf-8") as f:
+                    hostname = f.read().strip()
+            except OSError:
+                return None
+        # Plain-host hostnames usually contain dots or are short/long words;
+        # docker container IDs are 12 hex chars. Accept anything the daemon
+        # can resolve.
+        return hostname or None
+
+    def _attach_self_to_network(self, client, network) -> None:
+        """Connect the hivemind-core container to the sandbox network.
+
+        No-op when we can't find ourselves via the daemon (e.g., hivemind
+        runs on the host directly, or the mounted socket belongs to a
+        different daemon). Safe to call repeatedly.
+        """
+        if self._self_sandbox_ip:
+            return
+        hostname = self._detect_self_container_id()
+        if not hostname:
+            return
+        try:
+            self_container = client.containers.get(hostname)
+        except docker.errors.NotFound:
+            return
+        except Exception as e:
+            logger.debug("self-container lookup failed: %s", e)
+            return
+        try:
+            self_container.reload()
+            networks = (
+                (self_container.attrs or {})
+                .get("NetworkSettings", {})
+                .get("Networks", {})
+            )
+            net_name = network.name
+            if net_name not in networks:
+                try:
+                    network.connect(self_container)
+                    logger.info(
+                        "Attached self (%s) to sandbox network %s",
+                        hostname,
+                        net_name,
+                    )
+                except docker.errors.APIError as e:
+                    # Race: another worker might have connected us.
+                    logger.info("self connect to %s noted: %s", net_name, e)
+                self_container.reload()
+                networks = (
+                    (self_container.attrs or {})
+                    .get("NetworkSettings", {})
+                    .get("Networks", {})
+                )
+            ip = (networks.get(net_name) or {}).get("IPAddress", "").strip()
+            if ip:
+                self._self_sandbox_ip = ip
+                logger.info(
+                    "Self IP on sandbox network %s = %s", net_name, ip
+                )
+        except Exception as e:
+            logger.warning(
+                "Failed to attach self to sandbox network: %s", e
+            )
 
     def _resolve_bridge_url(self, port: int) -> str:
         """Build the bridge URL that containers can reach.
 
-        On macOS/Windows: host.docker.internal resolves to the host.
-        On Linux: use the Docker network gateway IP.
+        Priority:
+          1. If hivemind is in a container and we've attached ourselves to
+             the sandbox network, use our own IP on that network. This is
+             the only path that works when the host Docker daemon is
+             shared (e.g., Phala CVM): the sandbox-network gateway routes
+             to the host, not into the parent container.
+          2. macOS/Windows desktop: host.docker.internal.
+          3. Linux host: sandbox-network gateway IP.
         """
+        if self._self_sandbox_ip:
+            return f"http://{self._self_sandbox_ip}:{port}"
+
         if platform.system() in ("Darwin", "Windows"):
             return f"http://host.docker.internal:{port}"
 

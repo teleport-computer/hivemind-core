@@ -9,14 +9,15 @@
 
 services:
   hivemind:
-    # Pin to the build carrying the tenant-hash migration fix +
-    # in-process agent-base bootstrap (v0.4.5-base-bootstrap). The server
-    # pulls or builds `hivemind-agent-base:latest` during startup so agent
-    # uploads work on fresh CVMs without a separate init container. The
-    # `:latest` tag in GHCR was last refreshed from main pre-multi-tenant
-    # and lacks admin_key/tenant routes — don't use it until v0.4+ lands
-    # on main.
-    image: ghcr.io/account-link/hivemind-core:v0.4.5-base-bootstrap
+    # Pin to the build that attaches hivemind-core to the
+    # hivemind-sandbox Docker network at startup and uses self-IP as the
+    # bridge URL (v0.4.7-sandbox-net). Without this, spawned agent
+    # containers cannot reach the in-process LLM bridge — the sandbox
+    # network's gateway routes to the host, not into the hivemind
+    # container. Symptom before the fix: claude-code crashes with
+    # "Command failed with exit code 1", zero LLM calls, empty stderr.
+    # The `:latest` tag in GHCR is from pre-multi-tenant main — don't use.
+    image: ghcr.io/account-link/hivemind-core:v0.4.7-sandbox-net
     ports:
       - "8100:8100"
     environment:
