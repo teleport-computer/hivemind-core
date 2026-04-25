@@ -360,15 +360,32 @@ def copy_table(
     if src_count == 0:
         return 0, 0
 
+    # Build select expressions: cast types the proxy can't JSON-serialize
+    # to text. UUID is the known offender (uuid.UUID is not JSON-native);
+    # numeric/Decimal would be the next likely if it shows up in any
+    # tenant table. The destination COPY parses the text form back into
+    # the typed column.
+    def _select_expr(col: dict) -> str:
+        name = quote_ident(col["column_name"])
+        udt = (col.get("udt_name") or "").lower()
+        dt = (col.get("data_type") or "").lower()
+        if udt == "uuid" or dt == "uuid":
+            # Alias back to the original name so the JSON dict key matches.
+            return f"{name}::text AS {name}"
+        return name
+
+    select_list = ", ".join(_select_expr(c) for c in cols_meta)
+    order_by = quote_ident(columns[0])
+
     copied = 0
     offset = 0
     started = time.time()
     while offset < src_count:
         batch = src.execute(
             db,
-            f"SELECT {', '.join(quote_ident(c) for c in columns)} "
+            f"SELECT {select_list} "
             f"FROM {quote_ident(table)} "
-            f"ORDER BY {', '.join(quote_ident(c) for c in columns[:1])} "
+            f"ORDER BY {order_by} "
             f"OFFSET {offset} LIMIT {batch_size}",
         )
         if not batch:
