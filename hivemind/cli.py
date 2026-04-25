@@ -711,8 +711,9 @@ def _require_trust(config: dict) -> None:
 
     # Interactive prompt.
     skip_hint = (
-        "  To skip this prompt next time, rerun with --trust-all (auto-approve\n"
-        "  redeploys) or --no-trust-check (DEV ONLY — disable every gate)."
+        "  Skip this prompt next time:\n"
+        "    --yes        auto-approve (TLS pin + on-chain revoke still enforced)\n"
+        "    --insecure   disable all verification (DEV / localhost only)"
     )
     if decision.status == "tofu":
         click.echo(
@@ -743,8 +744,8 @@ def _require_trust(config: dict) -> None:
         )
     except (click.Abort, EOFError):
         click.echo(
-            "Aborted — no input available. Re-run with --trust-all "
-            "(or --no-trust-check for full skip) for non-interactive use.\n"
+            "Aborted — no input available. Re-run with --yes (auto-approve) "
+            "or --insecure (full skip, dev only) for non-interactive use.\n"
             "Env-var equivalents: HIVEMIND_TRUST_ALL=1, "
             "HIVEMIND_TRUST_HASH=<hex>, HIVEMIND_NO_TRUST_CHECK=1.",
             err=True,
@@ -761,27 +762,30 @@ def _require_trust(config: dict) -> None:
 
 @click.group()
 @click.option(
-    "--trust-all",
+    "-y",
+    "--yes",
+    "auto_yes",
     is_flag=True,
-    help="Auto-approve any TOFU/changed compose-hash prompt. Still hard-aborts "
-    "on revoked-on-chain hashes. Equivalent to HIVEMIND_TRUST_ALL=1.",
+    help="Auto-answer 'yes' to the compose-hash approval prompt. "
+    "TLS pinning and the on-chain revoke kill-switch still apply, so a "
+    "tampered or revoked hash still hard-aborts. Use in CI / scripts.",
 )
 @click.option(
-    "--no-trust-check",
+    "--insecure",
     is_flag=True,
-    help="Skip the entire attestation/trust check (DEV ONLY — disables every "
-    "compose-hash, TLS-pin, and on-chain gate). Equivalent to "
-    "HIVEMIND_NO_TRUST_CHECK=1.",
+    help="Disable ALL attestation verification — no TLS pin, no on-chain "
+    "check, no compose-hash prompt. Only meaningful against a local "
+    "dev server (no TEE). Never use against a Phala CVM.",
 )
-def cli(trust_all: bool, no_trust_check: bool) -> None:
+def cli(auto_yes: bool, insecure: bool) -> None:
     """Hivemind — conditional recall for the privacy-quality frontier."""
     # Set the same env vars the trust layer already reads, so we don't
     # have to thread a context object into every subcommand. Flags win
     # over the absence of an env var; if the env var is already set,
     # leave it alone (most permissive of {flag, env} wins).
-    if trust_all:
+    if auto_yes:
         os.environ["HIVEMIND_TRUST_ALL"] = "1"
-    if no_trust_check:
+    if insecure:
         os.environ["HIVEMIND_NO_TRUST_CHECK"] = "1"
 
 
