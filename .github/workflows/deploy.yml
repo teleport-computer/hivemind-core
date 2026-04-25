@@ -92,6 +92,8 @@ jobs:
           EC2_USER: ${{ secrets.EC2_USER }}
         run: |
           ssh -i ~/.ssh/id_ed25519 -o BatchMode=yes \
+            -o ServerAliveInterval=30 -o ServerAliveCountMax=20 \
+            -o TCPKeepAlive=yes \
             "${EC2_USER}@${EC2_HOST}" \
             'echo "relay: $(hostname) $(whoami)"; phala --version; phala status | head -10'
 
@@ -111,6 +113,8 @@ jobs:
           # leading `KEY=VALUE` pairs on the command line instead.
 
           ssh -i ~/.ssh/id_ed25519 -o BatchMode=yes \
+            -o ServerAliveInterval=30 -o ServerAliveCountMax=20 \
+            -o TCPKeepAlive=yes \
             "${EC2_USER}@${EC2_HOST}" \
             "TARGET='${TARGET}' DEPLOY_REF='${DEPLOY_REF}' IMAGE_SHA='${IMAGE_SHA}' PHALA_CLOUD_API_KEY='${PHALA_CLOUD_API_KEY}' bash -s" <<'REMOTE'
           set -euo pipefail
