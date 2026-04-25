@@ -135,19 +135,20 @@ jobs:
           : "${SQL_PROXY_ADMIN_KEY:?SQL_PROXY_ADMIN_KEY missing from deploy/phala/.env on relay}"
           echo "proxy keys: present"
 
-          echo "── ensure python + httpx available ─────────────"
-          # Prefer uv if present (the relay sometimes has it from prior
-          # work); otherwise fall back to a one-shot venv.
-          if command -v uv >/dev/null 2>&1; then
-            RUN_PY=(uv run --with httpx python)
-          else
-            python3 -m venv .migrate-venv
-            # shellcheck disable=SC1091
-            . .migrate-venv/bin/activate
-            pip install --quiet --upgrade pip
-            pip install --quiet httpx
-            RUN_PY=(python)
+          echo "── ensure uv available ──────────────────────────"
+          # The relay doesn't have python3-venv installed and we don't
+          # have sudo here. uv is a single static binary, installs to
+          # ~/.local/bin without root, and brings its own python.
+          if ! command -v uv >/dev/null 2>&1; then
+            export PATH="$HOME/.local/bin:$PATH"
           fi
+          if ! command -v uv >/dev/null 2>&1; then
+            echo "installing uv to ~/.local/bin (no sudo)"
+            curl -LsSf https://astral.sh/uv/install.sh | sh
+            export PATH="$HOME/.local/bin:$PATH"
+          fi
+          uv --version
+          RUN_PY=(uv run --with httpx --python 3.12 python)
 
           ARGS=(
             scripts/migrate_pg.py
