@@ -133,7 +133,17 @@ class Proxy:
                 "columns": columns,
             },
         )
-        r.raise_for_status()
+        if r.status_code != 200:
+            # Surface the proxy's actual error string. raise_for_status
+            # alone discards the body, which on COPY failures is the
+            # Postgres error message — exactly what we need for triage.
+            try:
+                err = (r.json() or {}).get("error") or r.text
+            except Exception:
+                err = r.text
+            raise RuntimeError(
+                f"/import/csv {r.status_code} (table={table}): {err}"
+            )
         body = r.json()
         if "error" in body:
             raise RuntimeError(f"/import/csv error: {body['error']} (table={table})")
@@ -337,7 +347,20 @@ def copy_table(
         if not batch:
             break
         csv_payload = rows_to_csv(batch, columns)
-        n = dst.import_csv(db, table, csv_payload, columns)
+        try:
+            n = dst.import_csv(db, table, csv_payload, columns)
+        except Exception:
+            # Surface a sample row so we can see which value tripped
+            # COPY (most often: a jsonb-vs-array column or a CSV
+            # quoting edge case). 200 chars is plenty for triage and
+            # doesn't drown the log on wide rows.
+            sample = batch[0] if batch else {}
+            print(
+                f"      ! batch failed at offset={offset}, sample row keys={list(sample)[:6]}, "
+                f"first 200 chars of csv={csv_payload[:200]!r}",
+                flush=True,
+            )
+            raise
         copied += n
         offset += len(batch)
         elapsed = time.time() - started
