@@ -1419,13 +1419,30 @@ def share():
 @click.option(
     "--async", "use_async", is_flag=True, help="Use async submit+poll"
 )
-def query_cmd(question: str, endpoint: str | None, use_async: bool):
+@click.option(
+    "--agent",
+    "query_agent",
+    default=None,
+    help="Query agent ID (persists to profile as the default).",
+)
+def query_cmd(
+    question: str,
+    endpoint: str | None,
+    use_async: bool,
+    query_agent: str | None,
+):
     """Send a natural-language query to the hivemind service."""
     config = _load_config()
     service = endpoint or config["service"]
     headers = _headers(config)
 
+    if query_agent:
+        config["query_agent_id"] = query_agent
+        _save_config(config)
+
     payload: dict = {"query": question}
+    if config.get("query_agent_id"):
+        payload["query_agent_id"] = config["query_agent_id"]
     if config.get("scope_agent_id"):
         payload["scope_agent_id"] = config["scope_agent_id"]
 
