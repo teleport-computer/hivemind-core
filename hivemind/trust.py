@@ -114,13 +114,44 @@ def record_approval(
         )
 
     first_seen = (existing or {}).get("first_seen_at", now)
-    store["services"][key] = {
+    new_entry = {
         "app_id": app_id or (existing or {}).get("app_id", ""),
         "approved_compose_hash": compose_hash,
         "approved_at": now,
         "first_seen_at": first_seen,
         "history": history,
     }
+    # Carry forward the pinned-cert fingerprint when re-approving the
+    # same enclave (different compose_hash but same TLS identity is
+    # impossible, but a cert rotation will be picked up next request
+    # and re-pinned).
+    if existing and existing.get("cert_fingerprint_sha256_hex"):
+        new_entry["cert_fingerprint_sha256_hex"] = existing[
+            "cert_fingerprint_sha256_hex"
+        ]
+    store["services"][key] = new_entry
+    save_trust(store)
+
+
+def record_cert_fingerprint(service: str, fingerprint_hex: str) -> None:
+    """Persist the verified enclave cert fingerprint for ``service``.
+
+    Used by the CLI right after ``_verify_tls_pin`` confirms the cert is
+    bound into the TDX quote. Subsequent invocations of any CLI command
+    can then look up this fingerprint, derive the saved PEM path
+    (``~/.hivemind/enclave-tls-<fp16>.pem``), and pin every HTTP call
+    against it without re-running the full attestation handshake.
+    """
+    store = load_trust()
+    key = _normalize_service(service)
+    entry = store["services"].get(key)
+    if not entry:
+        # No approval on file — nothing to attach the pin to. The next
+        # ``record_approval`` will create the entry; we just bail here.
+        return
+    if entry.get("cert_fingerprint_sha256_hex") == fingerprint_hex:
+        return
+    entry["cert_fingerprint_sha256_hex"] = fingerprint_hex
     save_trust(store)
 
 

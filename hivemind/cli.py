@@ -85,27 +85,85 @@ def _hdelete(url: str, **kw):
     return httpx.delete(url, **kw)
 
 
-def _pin_service_cert(observed_fp: bytes, cert_pem: str) -> None:
+def _pin_path_for_fingerprint(fingerprint_hex: str) -> Path:
+    """Path of the saved enclave PEM for ``fingerprint_hex``.
+
+    Filename is keyed by the first 16 hex chars of sha256(cert.DER).
+    That's plenty unique for a CLI's set of trusted enclaves and gives
+    us one stable location per cert without leaking the full hash into
+    the filesystem.
+    """
+    return Path.home() / ".hivemind" / f"enclave-tls-{fingerprint_hex[:16]}.pem"
+
+
+def _pin_service_cert(
+    observed_fp: bytes,
+    cert_pem: str,
+    service: str | None = None,
+) -> None:
     """Persist the verified enclave cert and wire it as the default verify.
 
-    Called by ``_require_trust`` after ``_verify_tls_pin`` has
-    cryptographically confirmed the cert. Subsequent service requests
-    through ``_hget/_hpost/...`` will use this cert as their CA — so a
-    mid-session MITM that serves a different cert fails the TLS
-    handshake rather than returning plausible garbage.
+    Called after ``_verify_tls_pin`` has cryptographically confirmed
+    the cert. Subsequent service requests through ``_hget/_hpost/...``
+    will use this cert as their CA — so a mid-session MITM that serves
+    a different cert fails the TLS handshake rather than returning
+    plausible garbage.
+
+    When ``service`` is provided we also stash the fingerprint in the
+    trust store. Future CLI invocations for that URL can then warm up
+    the pin from disk via ``_warm_pin_from_trust`` without redoing the
+    quote verification. Without this stash, every fresh shell would
+    re-fall-back to system CAs and break against -8100s. URLs.
     """
     global _SERVICE_VERIFY
     if not cert_pem:
         return
     pin_dir = Path.home() / ".hivemind"
     pin_dir.mkdir(parents=True, exist_ok=True)
-    fp8 = observed_fp.hex()[:16]
-    pin_path = pin_dir / f"enclave-tls-{fp8}.pem"
+    fp_hex = observed_fp.hex()
+    pin_path = _pin_path_for_fingerprint(fp_hex)
     try:
         pin_path.write_text(cert_pem, encoding="utf-8")
     except OSError:
         return
     _SERVICE_VERIFY = str(pin_path)
+    if service:
+        try:
+            _trust.record_cert_fingerprint(service, fp_hex)
+        except Exception:
+            # Trust store write failures shouldn't break the live
+            # request — we already have the pin in-memory for this run.
+            pass
+
+
+def _warm_pin_from_trust(service: str) -> None:
+    """Set ``_SERVICE_VERIFY`` from a previously-pinned cert on disk.
+
+    The trust store tracks the verified cert fingerprint per service
+    URL (set by ``_pin_service_cert``). When the matching PEM exists
+    on disk we wire it as the default verify path so admin / init /
+    everyday commands can talk to a -8100s. URL without first running
+    ``_require_trust`` (admin commands have no tenant config to feed
+    into ``_require_trust``).
+
+    No-ops when the trust store has no fingerprint for the URL or the
+    PEM file is missing — the request will then fall through to the
+    normal verify path and (for HTTPS) fail loudly, which is exactly
+    what we want when nothing has been pinned yet.
+    """
+    global _SERVICE_VERIFY
+    if isinstance(_SERVICE_VERIFY, str):
+        # Already pinned this process.
+        return
+    entry = _trust.get_approved(service)
+    if not entry:
+        return
+    fp_hex = entry.get("cert_fingerprint_sha256_hex") or ""
+    if not fp_hex:
+        return
+    pin_path = _pin_path_for_fingerprint(fp_hex)
+    if pin_path.exists():
+        _SERVICE_VERIFY = str(pin_path)
 
 
 # ── Config helpers ──
@@ -143,6 +201,11 @@ def _load_config(*, check_trust: bool = True) -> dict:
             err=True,
         )
         raise SystemExit(1)
+    # Restore any pinned enclave cert for this URL before any HTTP call
+    # so the trust-check fetch + downstream commands see the right CA
+    # for self-signed Tier-3 certs. Cheap on every invocation: a single
+    # JSON read + one stat() call.
+    _warm_pin_from_trust(config["service"])
     if check_trust:
         _require_trust(config)
     return config
@@ -451,7 +514,11 @@ def _consult_app_auth(bundle: dict, compose_hash: str) -> bool | None:
     return _onchain.is_app_allowed(rpc_url, contract, compose_hash)
 
 
-def _verify_tls_pin(bundle: dict, observed_fp: bytes | None) -> None:
+def _verify_tls_pin(
+    bundle: dict,
+    observed_fp: bytes | None,
+    service: str | None = None,
+) -> None:
     """Verify the live TLS fingerprint matches what's bound into the quote.
 
     This is feedling's first binding translated for hivemind: the
@@ -525,7 +592,7 @@ def _verify_tls_pin(bundle: dict, observed_fp: bytes | None) -> None:
         # httpx call to verify against it.
         cert_pem = (att.get("tls") or {}).get("cert_pem", "")
         if cert_pem:
-            _pin_service_cert(observed_fp, cert_pem)
+            _pin_service_cert(observed_fp, cert_pem, service=service)
         return
 
     # The cert on the wire is NOT the one bound into the quote.
@@ -576,7 +643,7 @@ def _require_trust(config: dict) -> None:
     # first-32-byte binding from (app_version, observed_fp) and compare
     # against the quote. Mismatch → MITM. Layout matches feedling's
     # build_report_data exactly, so the verifier is a direct translation.
-    _verify_tls_pin(bundle, observed_fp)
+    _verify_tls_pin(bundle, observed_fp, service=service)
 
     decision = _trust.evaluate(service, bundle)
 
@@ -703,6 +770,12 @@ def init(service: str, api_key: str):
     """Connect to a hivemind service and save config."""
     service = service.rstrip("/")
     headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+
+    # If the operator has already run ``hivemind trust approve`` for this
+    # URL, that flow saved the enclave's pinned cert. Wire it as the
+    # default verify so the health check below doesn't blow up on the
+    # self-signed -8100s. cert.
+    _warm_pin_from_trust(service)
 
     try:
         resp = _hget(f"{service}/v1/health", headers=headers, timeout=10)
@@ -1693,12 +1766,19 @@ def _admin_headers(admin_key: str) -> dict:
 
 def _resolve_admin_service(service: str | None) -> str:
     if service:
-        return service.rstrip("/")
-    # Fall back to the regular init config (admins often manage locally).
-    try:
-        return _load_config()["service"]
-    except SystemExit:
-        return _DEFAULT_SERVICE
+        url = service.rstrip("/")
+    else:
+        # Fall back to the regular init config (admins often manage locally).
+        try:
+            url = _load_config()["service"]
+        except SystemExit:
+            url = _DEFAULT_SERVICE
+    # Admin commands don't go through ``_require_trust``, so pin the
+    # enclave cert from the trust store here. Without this, every
+    # ``hivemind admin *`` against an -8100s. URL fails the self-signed
+    # handshake and exits before reaching the server.
+    _warm_pin_from_trust(url)
+    return url
 
 
 @cli.group("admin")
@@ -2269,7 +2349,7 @@ def trust_approve(service: str | None):
         config = _load_config(check_trust=False)
         service = config["service"]
     service = service.rstrip("/")
-    bundle, _observed_fp = _fetch_attestation(service)
+    bundle, observed_fp = _fetch_attestation(service)
     if not bundle.get("ready"):
         click.echo(
             f"Cannot approve — attestation unavailable: "
@@ -2284,6 +2364,12 @@ def trust_approve(service: str | None):
         click.echo("Cannot approve — bundle has no compose_hash.", err=True)
         raise SystemExit(2)
     _trust.record_approval(service, compose_hash, app_id)
+    # If the enclave terminates TLS, verify the cert binding and stash
+    # the PEM so subsequent CLI commands can pin against it without
+    # re-running the full quote check. Without this, every command
+    # against an -8100s. URL hits CERTIFICATE_VERIFY_FAILED on the
+    # self-signed cert.
+    _verify_tls_pin(bundle, observed_fp, service=service)
     click.echo(f"Approved {compose_hash} for {service}.")
 
 
