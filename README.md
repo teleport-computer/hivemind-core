@@ -250,8 +250,8 @@ uv run pytest tests/test_integration_docker.py -v
 
 Live instances:
 - **hivemind-core** (friendly URL):  https://hivemind.teleport.computer
-  - Raw / Tier-3 pin URL: `https://<core_app_id>-8100s.dstack-pha-prod9.phala.network`
-- **hivemind-pg** (sql proxy): `https://<pg_app_id>-8080.dstack-pha-prod9.phala.network`
+  - Raw / Tier-3 pin URL: `https://0c86afa84ff128820dc201c1549b603566aa55a1-8100s.dstack-pha-prod9.phala.network`
+- **hivemind-pg** (sql proxy): `https://2181af2d134123a46613f62a0311dd1f5af984be-8080.dstack-pha-prod5.phala.network` (legacy cluster — pending migration to prod9)
 
 The friendly URL is fronted by `dstack-ingress` (the Phase E pattern feedling and hermes both ship). It terminates LE-issued TLS inside the enclave (ACME DNS-01 via Cloudflare). Tier-3 cert pinning still works — the CLI auto-discovers the raw passthrough URL from `/v1/attestation` and verifies the enclave cert there.
 
