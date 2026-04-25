@@ -169,6 +169,95 @@ jobs:
           NODE_ID="${NODE_ID:-}" ./deploy/phala/deploy.sh "${TARGET}"
           REMOTE
 
+      # On-chain compose-hash registration. After a successful core
+      # deploy, the new image's `compose_hash` (which dstack writes
+      # into the TDX quote's `mr_config_id`) must be approved on the
+      # HivemindAppAuth contract before any CLI client can connect
+      # without a manual TOFU prompt. We do this from CI rather than
+      # by hand because (a) the hash changes every time the compose
+      # file or any image pin changes, and (b) `cast send` with the
+      # owner key is the actual gate — keeping that key in GH secrets
+      # means the owner doesn't have to be online to ship.
+      #
+      # Idempotent: skipped silently if `isAppAllowed` already true,
+      # so re-runs of the same image are no-ops.
+      #
+      # Skipped on postgres-only deploys (hivemind-pg has its own
+      # compose_hash but isn't gated by this contract).
+      - name: Install foundry (for cast)
+        if: github.event.inputs.target != 'postgres'
+        uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: stable
+
+      - name: Approve compose_hash on-chain
+        if: github.event.inputs.target != 'postgres'
+        env:
+          PRIVATE_KEY: ${{ secrets.PRIVATE_KEY }}
+          CONTRACT: "0x29b475E6D2e10bd3266569D4c5cf27BFd4f8c36E"
+          RPC_URL: "https://ethereum-sepolia-rpc.publicnode.com"
+          DEPLOY_REF: ${{ github.event.inputs.ref }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${PRIVATE_KEY:-}" ]; then
+            echo "::warning::PRIVATE_KEY secret not set — skipping on-chain approval. Hash will need manual approval before non-trust clients can connect."
+            exit 0
+          fi
+
+          # Fetch the *live* compose_hash from the freshly-deployed
+          # CVM rather than re-deriving it locally. This is the same
+          # hash the CLI's TOFU prompt would show, sourced from
+          # `mr_config_id` in the TDX quote — i.e. what dstack
+          # actually measured, not what we *thought* we shipped.
+          ATTEST_URL="https://hivemind.teleport.computer/v1/attestation"
+          echo "fetching compose_hash from ${ATTEST_URL}"
+          HASH=""
+          for i in 1 2 3 4 5; do
+            HASH=$(curl -fsk --max-time 15 "${ATTEST_URL}" 2>/dev/null \
+              | jq -r '.attestation.compose_hash // empty')
+            [ -n "${HASH}" ] && break
+            echo "  attempt ${i}: empty/unavailable, retrying in 10s…"
+            sleep 10
+          done
+          if [ -z "${HASH}" ]; then
+            echo "::error::could not fetch compose_hash from ${ATTEST_URL}"
+            exit 1
+          fi
+          echo "live compose_hash: ${HASH}"
+
+          # Idempotent guard: skip if the contract already lists
+          # this hash as approved (re-deploys of the same image, or
+          # workflow re-runs).
+          ALREADY=$(cast call --rpc-url "${RPC_URL}" "${CONTRACT}" \
+            'isAppAllowed(bytes32)(bool)' "0x${HASH}" 2>/dev/null || echo "false")
+          if [ "${ALREADY}" = "true" ]; then
+            echo "compose_hash 0x${HASH} already approved — skipping cast send"
+            exit 0
+          fi
+
+          GIT_SHA=$(git rev-parse HEAD)
+          COMPOSE_URI="https://github.com/Account-Link/hivemind-core/blob/${GIT_SHA}/deploy/phala/docker-compose.core.yaml"
+
+          echo "approving on ${CONTRACT} (Sepolia)"
+          cast send "${CONTRACT}" \
+            'addComposeHash(bytes32,string,string)' \
+            "0x${HASH}" \
+            "${GIT_SHA}" \
+            "${COMPOSE_URI}" \
+            --rpc-url "${RPC_URL}" \
+            --private-key "${PRIVATE_KEY}" \
+            --confirmations 1
+
+          echo "verifying…"
+          AFTER=$(cast call --rpc-url "${RPC_URL}" "${CONTRACT}" \
+            'isAppAllowed(bytes32)(bool)' "0x${HASH}")
+          if [ "${AFTER}" != "true" ]; then
+            echo "::error::post-tx verification failed (isAppAllowed=${AFTER})"
+            exit 1
+          fi
+          echo "✓ compose_hash 0x${HASH} approved on-chain"
+
       - name: Cleanup SSH key
         if: always()
         run: rm -f ~/.ssh/id_ed25519
