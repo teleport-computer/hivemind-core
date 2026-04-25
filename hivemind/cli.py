@@ -65,33 +65,55 @@ CMD ["python", "/app/agent.py"]
 # ``httpx.get/post/...`` would reject it with a CA-chain error. After
 # ``_require_trust`` has cryptographically verified that the live
 # cert fingerprint matches what's bound into the TDX quote, we save
-# the verified PEM and pin *every* subsequent service call to it via
-# ``verify=<path>``. That turns the one-shot quote check into a
-# continuous transport-level binding for the rest of the process.
+# the verified PEM and pin subsequent calls *to that host* against it.
+# That turns the one-shot quote check into a continuous transport-level
+# binding for the rest of the process.
 #
-# When TLS-in-enclave is off, ``_SERVICE_VERIFY`` stays ``True`` and
-# behavior is identical to plain ``httpx.get/post``.
+# Pins are keyed by host (scheme://host[:port]) so that a deployment
+# fronted by both a friendly URL (LE cert via dstack-ingress) and a
+# raw -8100s pinning URL (self-signed enclave cert) coexist correctly:
+# the friendly URL keeps verifying against system CAs; only the raw
+# URL uses the pinned enclave PEM. Without per-host scoping a request
+# to the friendly URL would try to validate an LE cert against the
+# enclave PEM and fail with CERTIFICATE_VERIFY_FAILED.
 
-_SERVICE_VERIFY: str | bool = True
+_SERVICE_VERIFY_BY_HOST: dict[str, str] = {}
+
+
+def _host_key(url: str) -> str:
+    """``scheme://host[:port]`` for ``url``. Empty when not parseable."""
+    try:
+        p = _urlparse(url)
+    except Exception:
+        return ""
+    if not p.scheme or not p.netloc:
+        return ""
+    return f"{p.scheme}://{p.netloc}".lower()
+
+
+def _verify_for_url(url: str) -> str | bool:
+    """Pin path for ``url``'s host, or ``True`` (default system CAs)."""
+    pin = _SERVICE_VERIFY_BY_HOST.get(_host_key(url))
+    return pin if pin else True
 
 
 def _hget(url: str, **kw):
-    kw.setdefault("verify", _SERVICE_VERIFY)
+    kw.setdefault("verify", _verify_for_url(url))
     return httpx.get(url, **kw)
 
 
 def _hpost(url: str, **kw):
-    kw.setdefault("verify", _SERVICE_VERIFY)
+    kw.setdefault("verify", _verify_for_url(url))
     return httpx.post(url, **kw)
 
 
 def _hput(url: str, **kw):
-    kw.setdefault("verify", _SERVICE_VERIFY)
+    kw.setdefault("verify", _verify_for_url(url))
     return httpx.put(url, **kw)
 
 
 def _hdelete(url: str, **kw):
-    kw.setdefault("verify", _SERVICE_VERIFY)
+    kw.setdefault("verify", _verify_for_url(url))
     return httpx.delete(url, **kw)
 
 
@@ -124,8 +146,11 @@ def _pin_service_cert(
     the pin from disk via ``_warm_pin_from_trust`` without redoing the
     quote verification. Without this stash, every fresh shell would
     re-fall-back to system CAs and break against -8100s. URLs.
+
+    The pin is registered against ``service``'s host only. Other hosts
+    (e.g. a friendly LE-fronted URL for the same deployment) keep
+    using system CAs.
     """
-    global _SERVICE_VERIFY
     if not cert_pem:
         return
     pin_dir = Path.home() / ".hivemind"
@@ -136,8 +161,10 @@ def _pin_service_cert(
         pin_path.write_text(cert_pem, encoding="utf-8")
     except OSError:
         return
-    _SERVICE_VERIFY = str(pin_path)
     if service:
+        host = _host_key(service)
+        if host:
+            _SERVICE_VERIFY_BY_HOST[host] = str(pin_path)
         try:
             _trust.record_cert_fingerprint(service, fp_hex)
         except Exception:
@@ -147,23 +174,22 @@ def _pin_service_cert(
 
 
 def _warm_pin_from_trust(service: str) -> None:
-    """Set ``_SERVICE_VERIFY`` from a previously-pinned cert on disk.
+    """Register the previously-pinned cert for ``service``'s host.
 
     The trust store tracks the verified cert fingerprint per service
     URL (set by ``_pin_service_cert``). When the matching PEM exists
-    on disk we wire it as the default verify path so admin / init /
+    on disk we wire it under ``service``'s host so admin / init /
     everyday commands can talk to a -8100s. URL without first running
     ``_require_trust`` (admin commands have no tenant config to feed
     into ``_require_trust``).
 
     No-ops when the trust store has no fingerprint for the URL or the
-    PEM file is missing — the request will then fall through to the
-    normal verify path and (for HTTPS) fail loudly, which is exactly
-    what we want when nothing has been pinned yet.
+    PEM file is missing — requests fall through to system CAs and (for
+    HTTPS) fail loudly if untrusted, which is the correct behavior
+    when nothing has been pinned yet.
     """
-    global _SERVICE_VERIFY
-    if isinstance(_SERVICE_VERIFY, str):
-        # Already pinned this process.
+    host = _host_key(service)
+    if not host or host in _SERVICE_VERIFY_BY_HOST:
         return
     entry = _trust.get_approved(service)
     if not entry:
@@ -173,7 +199,7 @@ def _warm_pin_from_trust(service: str) -> None:
         return
     pin_path = _pin_path_for_fingerprint(fp_hex)
     if pin_path.exists():
-        _SERVICE_VERIFY = str(pin_path)
+        _SERVICE_VERIFY_BY_HOST[host] = str(pin_path)
 
 
 # ── Config helpers ──
