@@ -1977,6 +1977,210 @@ def agents_cmd(agent_type: str | None, as_json: bool):
         )
 
 
+@cli.command("agent-rm")
+@click.argument("agent_id")
+@click.option("--json", "as_json", is_flag=True, help="Emit JSON on stdout")
+def agent_rm_cmd(agent_id: str, as_json: bool):
+    """Delete a single agent by ID.
+
+    Use ``hivemind agents`` to list. Bulk cleanup of agents whose
+    Docker images are missing is ``hivemind admin sweep-broken-agents``.
+    """
+    config = _load_config()
+    service = config["service"]
+    headers = _headers(config)
+    try:
+        r = _hdelete(
+            f"{service}/v1/agents/{agent_id}",
+            headers=headers,
+            timeout=30,
+        )
+    except httpx.RequestError as e:
+        click.echo(f"Error: {e}", err=True)
+        raise SystemExit(2)
+    if r.status_code == 404:
+        click.echo(f"Error: agent {agent_id} not found", err=True)
+        raise SystemExit(3)
+    if r.status_code >= 400:
+        click.echo(f"Error {r.status_code}: {_api_error(r)}", err=True)
+        raise SystemExit(3)
+    if as_json:
+        click.echo(_json.dumps(r.json(), indent=2))
+    else:
+        click.echo(f"deleted {agent_id}")
+
+
+@cli.command("schema")
+@click.option("--json", "as_json", is_flag=True, help="Emit JSON on stdout")
+def schema_cmd(as_json: bool):
+    """Print the tenant's table schema (column names + types per table)."""
+    config = _load_config()
+    service = config["service"]
+    data = _http_get(
+        f"{service}/v1/admin/schema", headers=_headers(config), timeout=30
+    )
+    schema = data.get("schema") or {}
+    if as_json:
+        click.echo(_json.dumps(schema, indent=2, default=str))
+        return
+    if not schema:
+        click.echo("(no tables)")
+        return
+    for table, cols in sorted(schema.items()):
+        click.echo(f"{table}")
+        for col in cols:
+            name = col.get("name") or col.get("column_name") or "?"
+            typ = col.get("type") or col.get("data_type") or "?"
+            click.echo(f"  {name:<28} {typ}")
+
+
+@cli.command("attestation")
+@click.option(
+    "--service",
+    default=None,
+    help="Service URL (defaults to active profile, or HIVEMIND_SERVICE).",
+)
+@click.option(
+    "--raw", is_flag=True, help="Emit the full /v1/attestation JSON payload."
+)
+def attestation_cmd(service: str | None, raw: bool):
+    """Fetch and print the CVM's attestation bundle (TDX quote + binding).
+
+    No auth — this endpoint is public so out-of-band verifiers can pin
+    the cert + replay the quote against Intel/dstack KMS.
+    """
+    if service:
+        url = service.rstrip("/")
+    else:
+        try:
+            url = _load_config(check_trust=False)["service"]
+        except SystemExit:
+            url = _DEFAULT_SERVICE
+    _warm_pin_from_trust(url)
+    try:
+        r = _hget(f"{url}/v1/attestation", timeout=15)
+    except httpx.RequestError as e:
+        click.echo(f"Error: {e}", err=True)
+        raise SystemExit(2)
+    if r.status_code >= 400:
+        click.echo(f"Error {r.status_code}: {_api_error(r)}", err=True)
+        raise SystemExit(3)
+    bundle = r.json()
+    if raw:
+        click.echo(_json.dumps(bundle, indent=2, default=str))
+        return
+    if not bundle.get("ready"):
+        click.echo(f"ready:    false")
+        click.echo(f"reason:   {bundle.get('reason', '?')}")
+        click.echo(f"version:  {bundle.get('hivemind_version', '?')}")
+        return
+    att = bundle.get("attestation") or {}
+    click.echo(f"ready:        true")
+    click.echo(f"booted_at:    {bundle.get('booted_at', '?')}")
+    click.echo(f"app_id:       {att.get('app_id', '?')}")
+    click.echo(f"compose_hash: {att.get('compose_hash', '?')}")
+    click.echo(f"version:      {att.get('hivemind_version', '?')}")
+    if app_auth := att.get("app_auth"):
+        click.echo(f"app_auth:")
+        click.echo(f"  contract:   {app_auth.get('contract', '?')}")
+        click.echo(f"  chain_id:   {app_auth.get('chain_id', '?')}")
+    if tls := att.get("tls"):
+        if tls.get("enabled"):
+            click.echo(f"tls:")
+            click.echo(
+                f"  fingerprint: {tls.get('cert_fingerprint_sha256_hex', '?')}"
+            )
+            if pin := tls.get("pinning_url"):
+                click.echo(f"  pin URL:     {pin}")
+    click.echo("(use --raw for full JSON including the TDX quote)")
+
+
+@cli.command("index")
+@click.argument("data", required=False)
+@click.option(
+    "--from-file",
+    "from_file",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="Read DATA from a file.",
+)
+@click.option(
+    "--metadata",
+    "metadata_json",
+    default=None,
+    help='JSON object passed through to the index agent (e.g. \'{"source":"x"}\').',
+)
+@click.option(
+    "--agent",
+    "index_agent",
+    default=None,
+    help="Index agent ID (overrides the profile default).",
+)
+@click.option(
+    "--max-tokens",
+    type=int,
+    default=None,
+    help="Per-call token budget for the index agent.",
+)
+@click.option("--json", "as_json", is_flag=True, help="Emit JSON on stdout")
+def index_cmd(
+    data: str | None,
+    from_file: Path | None,
+    metadata_json: str | None,
+    index_agent: str | None,
+    max_tokens: int | None,
+    as_json: bool,
+):
+    """Run the index agent against DATA and store the resulting summary.
+
+    The index agent receives the input plus tenant tools, writes
+    summaries / extractions back into Postgres, and returns the
+    canonical index_text.
+    """
+    if (data is None) == (from_file is None):
+        click.echo(
+            "Error: provide exactly one of DATA argument or --from-file.",
+            err=True,
+        )
+        raise SystemExit(1)
+    if from_file is not None:
+        data = from_file.read_text()
+    metadata: dict = {}
+    if metadata_json:
+        try:
+            metadata = _json.loads(metadata_json)
+            if not isinstance(metadata, dict):
+                raise ValueError("must be a JSON object")
+        except (ValueError, _json.JSONDecodeError) as e:
+            click.echo(f"Error: --metadata: {e}", err=True)
+            raise SystemExit(1)
+
+    config = _load_config()
+    service = config["service"]
+    headers = {**_headers(config), "Content-Type": "application/json"}
+    payload: dict = {"data": data, "metadata": metadata}
+    if index_agent:
+        payload["index_agent_id"] = index_agent
+    if max_tokens is not None:
+        payload["max_tokens"] = max_tokens
+
+    try:
+        r = _hpost(
+            f"{service}/v1/index", headers=headers, json=payload, timeout=300
+        )
+    except httpx.RequestError as e:
+        click.echo(f"Error: {e}", err=True)
+        raise SystemExit(2)
+    if r.status_code >= 400:
+        click.echo(f"Error {r.status_code}: {_api_error(r)}", err=True)
+        raise SystemExit(3)
+    body = r.json()
+    if as_json:
+        click.echo(_json.dumps(body, indent=2, default=str))
+        return
+    click.echo(body.get("index_text", ""))
+
+
 @cli.command("rotate-key")
 @click.option("--json", "as_json", is_flag=True, help="Emit JSON on stdout")
 @click.confirmation_option(
