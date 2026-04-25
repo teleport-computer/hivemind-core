@@ -29,7 +29,11 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
 ENV_FILE="${SCRIPT_DIR}/.env"
-HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-300}"
+# 300s isn't enough for a Tier 3 (HIVEMIND_ENCLAVE_TLS=1) restart: the
+# enclave has to derive a fresh KMS-bound cert and the gateway's
+# TCP-passthrough route only starts answering after the new cert is
+# served. Observed ~5–7 minutes end-to-end on dstack-pha-prod5.
+HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-600}"
 
 CORE_NAME="hivemind-core"
 CORE_COMPOSE="${SCRIPT_DIR}/docker-compose.core.yaml"
@@ -150,7 +154,12 @@ wait_healthy() {
         if [ $(( $(date +%s) - started )) -ge "${timeout}" ]; then
             warn "${name} not healthy after ${timeout}s (last code: ${code})"
             warn "── serial logs (last 40 lines) ──"
-            phala cvms serial-logs --cvm-id "${name}" 2>/dev/null | tail -40 >&2 || true
+            # `phala cvms serial-logs` has been observed to hang for many
+            # minutes when the gateway is misbehaving — wrap it in a hard
+            # kill so the failure path doesn't stretch the SSH session
+            # past GH Actions' idle timeout (caught us once on 24919620715).
+            timeout 30 phala cvms serial-logs --cvm-id "${name}" 2>/dev/null \
+                | tail -40 >&2 || warn "(serial-logs timed out after 30s)"
             die "${name} failed to become healthy — see serial logs above"
         fi
         sleep 5
