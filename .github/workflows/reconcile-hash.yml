@@ -39,6 +39,11 @@ jobs:
   reconcile:
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    permissions:
+      # Needed so the auto-injected GITHUB_TOKEN can resolve a short SHA
+      # to a full one via `gh api repos/.../commits/<short>` on this
+      # private repo. Read-only — we never write back from here.
+      contents: read
     steps:
       - name: Install foundry (for cast)
         uses: foundry-rs/foundry-toolchain@v1
@@ -48,40 +53,131 @@ jobs:
       - name: Fetch live compose_hash and reconcile
         env:
           PRIVATE_KEY: ${{ secrets.PRIVATE_KEY }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CONTRACT: "0x29b475E6D2e10bd3266569D4c5cf27BFd4f8c36E"
           RPC_URL: "https://ethereum-sepolia-rpc.publicnode.com"
           SERVICE: ${{ github.event.inputs.service }}
           DRY_RUN: ${{ github.event.inputs.dry_run }}
+          REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
 
+          # ── Step 1: live attestation → compose_hash + app_id + gateway ──
+          # Same chain the CLI walks: /v1/attestation gives us what dstack
+          # actually measured (mr_config_id), plus the app_id and pinning
+          # URL we need to reach the public 8090 tcb-info page.
           ATTEST_URL="${SERVICE%/}/v1/attestation"
-          echo "fetching compose_hash from ${ATTEST_URL}"
-          HASH=""
+          echo "fetching attestation from ${ATTEST_URL}"
+          ATT=""
           for i in 1 2 3 4 5; do
-            HASH=$(curl -fsk --max-time 15 "${ATTEST_URL}" 2>/dev/null \
-              | jq -r '.attestation.compose_hash // empty')
-            [ -n "${HASH}" ] && break
+            ATT=$(curl -fsk --max-time 15 "${ATTEST_URL}" 2>/dev/null || echo "")
+            [ -n "${ATT}" ] && break
             echo "  attempt ${i}: empty/unavailable, retrying in 5s…"
             sleep 5
           done
-          if [ -z "${HASH}" ]; then
-            echo "::error::could not fetch compose_hash from ${ATTEST_URL}"
+          if [ -z "${ATT}" ]; then
+            echo "::error::could not fetch ${ATTEST_URL}"
             exit 1
           fi
+          HASH=$(echo "${ATT}" | jq -r '.attestation.compose_hash // empty')
+          APP_ID=$(echo "${ATT}" | jq -r '.attestation.app_id // empty')
+          PIN_URL=$(echo "${ATT}" | jq -r '.attestation.tls.pinning_url // empty')
+          if [ -z "${HASH}" ] || [ -z "${APP_ID}" ] || [ -z "${PIN_URL}" ]; then
+            echo "::error::attestation missing compose_hash/app_id/pinning_url"
+            exit 1
+          fi
+          # pinning_url shape: https://<app_id>-<port>s.<gateway>
+          GATEWAY=$(echo "${PIN_URL}" | sed -E 's|^https?://[^.]+\.||; s|/$||')
           echo "live compose_hash: ${HASH}"
+          echo "app_id:            ${APP_ID}"
+          echo "gateway:           ${GATEWAY}"
 
+          # ── Step 2: idempotent guard ──
+          # Cheap on-chain check before pulling the 8090 page, so a
+          # no-op reconcile doesn't pay for HTML parsing or gh calls.
           ALREADY=$(cast call --rpc-url "${RPC_URL}" "${CONTRACT}" \
             'isAppAllowed(bytes32)(bool)' "0x${HASH}" 2>/dev/null || echo "false")
           echo "on-chain isAppAllowed: ${ALREADY}"
-
           if [ "${ALREADY}" = "true" ]; then
             echo "✓ already approved — nothing to do"
             exit 0
           fi
 
+          # ── Step 3: app_compose → image short SHA → full SHA ──
+          # The dstack 8090 page exposes the raw app_compose JSON whose
+          # sha256 IS the compose_hash (self-verifying). We extract the
+          # ghcr.io/account-link/hivemind-core image tag from the embedded
+          # docker_compose_file — that tag is the short git SHA written
+          # by the build-images workflow (`type=sha,prefix=`). Resolving
+          # it to a full SHA via `gh api` gives us the actual git_commit
+          # that produced this build, instead of a "reconcile" placeholder.
+          TCB_URL="https://${APP_ID}-8090.${GATEWAY}/"
+          echo "fetching app_compose from ${TCB_URL}"
+          TCB_HTML=$(curl -fsk --max-time 20 "${TCB_URL}")
+          if [ -z "${TCB_HTML}" ]; then
+            echo "::error::tcb-info page empty at ${TCB_URL}"
+            exit 1
+          fi
+
+          # Parse <textarea> + verify sha256 + extract image short SHA in
+          # one Python pass. Layering: the textarea wraps the tcb_info
+          # object; app_compose is a STRING FIELD inside it whose sha256
+          # is the compose_hash. We verify that, then parse app_compose
+          # as JSON to reach docker_compose_file. Script lives in a temp
+          # file because mixing a heredoc with a stdin pipe to `python3 -`
+          # makes the heredoc shadow the pipe.
+          cat > /tmp/parse-app-compose.py <<'PYEOF'
+          import sys, re, json, hashlib, html as H
+          claimed = sys.argv[1].lower()
+          body = sys.stdin.read()
+          start = "<textarea readonly>"
+          s = body.find(start)
+          e = body.find("</textarea>", s) if s >= 0 else -1
+          if s < 0 or e < 0:
+              print("ERR:no-textarea", file=sys.stderr); sys.exit(2)
+          raw = H.unescape(body[s + len(start):e])
+          tcb = json.loads(raw)
+          app_compose_str = tcb.get("app_compose") or ""
+          h = hashlib.sha256(app_compose_str.encode("utf-8")).hexdigest()
+          if h != claimed:
+              print(
+                  f"ERR:hash-mismatch attested={claimed} computed={h}",
+                  file=sys.stderr,
+              )
+              sys.exit(3)
+          inner = json.loads(app_compose_str)
+          yaml_text = inner.get("docker_compose_file") or ""
+          m = re.search(
+              r"image:\s*ghcr\.io/account-link/hivemind-core:([A-Za-z0-9._-]+)",
+              yaml_text,
+          )
+          if not m:
+              print("ERR:no-image-tag", file=sys.stderr); sys.exit(4)
+          print(m.group(1))
+          PYEOF
+          PARSED=$(printf '%s' "${TCB_HTML}" \
+            | python3 /tmp/parse-app-compose.py "${HASH}")
+          if [ -z "${PARSED}" ]; then
+            echo "::error::failed to parse app_compose / extract image tag"
+            exit 1
+          fi
+          IMAGE_TAG="${PARSED}"
+          echo "deployed image tag: ${IMAGE_TAG}"
+
+          # Resolve short→full SHA (no-op if IMAGE_TAG is already a full
+          # 40-char hex, or a tag like 'latest' — `gh api commits/<ref>`
+          # accepts any ref the repo recognizes and returns the full SHA).
+          FULL_SHA=$(gh api "repos/${REPO}/commits/${IMAGE_TAG}" \
+            --jq '.sha' 2>/dev/null || echo "")
+          if [ -z "${FULL_SHA}" ]; then
+            echo "::error::could not resolve image tag '${IMAGE_TAG}' to a commit on ${REPO}. The tag may be from a deleted branch, a non-CI build, or an override."
+            exit 1
+          fi
+          echo "resolved full git SHA: ${FULL_SHA}"
+
+          # ── Step 4: dry-run / approve ──
           if [ "${DRY_RUN}" = "true" ]; then
-            echo "── dry-run: would approve 0x${HASH} ──"
+            echo "── dry-run: would approve 0x${HASH} with git_sha=${FULL_SHA} ──"
             exit 0
           fi
 
@@ -90,8 +186,8 @@ jobs:
             exit 1
           fi
 
-          GIT_SHA=$(git rev-parse HEAD 2>/dev/null || echo "reconcile")
-          COMPOSE_URI="https://github.com/Account-Link/hivemind-core/blob/main/deploy/phala/docker-compose.core.yaml"
+          GIT_SHA="${FULL_SHA}"
+          COMPOSE_URI="https://github.com/${REPO}/blob/${GIT_SHA}/deploy/phala/docker-compose.core.yaml"
 
           echo "approving on ${CONTRACT} (Sepolia)"
           cast send "${CONTRACT}" \
@@ -110,3 +206,5 @@ jobs:
             exit 1
           fi
           echo "✓ compose_hash 0x${HASH} approved on-chain"
+          echo "  git_commit:  ${GIT_SHA}"
+          echo "  compose_uri: ${COMPOSE_URI}"
