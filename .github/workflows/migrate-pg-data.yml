@@ -66,10 +66,11 @@ jobs:
   migrate:
     name: "pg migrate (dry_run=${{ github.event.inputs.dry_run }})"
     runs-on: ubuntu-latest
-    # The watch_history table is ~2.27M rows / 1.7 GB. At 5k/batch over
-    # HTTP (gateway latency + CSV serialization + COPY parse on dst) we
-    # see ~3-5k rows/s in practice → ~10 min. Round up generously.
-    timeout-minutes: 60
+    # The watch_history table is ~2.28M rows / 1.7 GB. With keyset
+    # pagination we see ~750-820 rows/s steady, so watch_history alone
+    # is ~50 min and the full set with smaller tables + indexes lands
+    # around 75 min. 180 min gives generous slack for retries.
+    timeout-minutes: 180
 
     steps:
       - name: Validate confirm token
