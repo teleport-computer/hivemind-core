@@ -22,12 +22,14 @@ direct DB access (sql_proxy's data key lives only inside core).
 from __future__ import annotations
 
 import hashlib
+import json as _json
 import logging
 import secrets
 import threading
 import time
 from collections import OrderedDict
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, Literal
 
 from .admin_proxy import make_admin
 from .config import Settings
@@ -40,6 +42,36 @@ logger = logging.getLogger(__name__)
 _TENANT_ID_PREFIX = "t_"
 _API_KEY_PREFIX = "hmk_"
 
+# Capability-token prefixes. Owner tokens stay on hmk_ for backward compat;
+# the new prefixes let the resolver pick the right table without trying
+# both lookups on every request.
+_QUERY_TOKEN_PREFIX = "hmq_"  # query-only: submit prompts via the active scope agent
+_WRITE_TOKEN_PREFIX = "hmw_"  # write-only: INSERT into a fixed table allowlist
+
+
+Role = Literal["owner", "query", "write"]
+
+
+@dataclass(frozen=True)
+class Caller:
+    """Resolved bearer-token identity.
+
+    Carries the per-tenant Hivemind plus the role / constraints that
+    server endpoints use for access decisions. ``constraints`` schema
+    depends on role:
+      - owner: ``{}``
+      - query: ``{"scope_agent_id": <id>}`` — every query through this
+        token is forced to use this scope agent (enforced in /v1/query).
+      - write: ``{"allowed_tables": [<table>, ...]}`` — /v1/store accepts
+        only INSERTs into these tables for this caller.
+    """
+
+    tenant_id: str
+    role: Role
+    constraints: dict
+    hive: Hivemind
+    token_id: str = ""  # hex digest prefix; "" for owner tokens (no row)
+
 
 def _new_tenant_id() -> str:
     return _TENANT_ID_PREFIX + secrets.token_hex(6)
@@ -49,11 +81,23 @@ def _new_api_key() -> str:
     return _API_KEY_PREFIX + secrets.token_urlsafe(32)
 
 
+def _new_capability_token(prefix: str) -> str:
+    """Mint a fresh capability token with the given prefix (hmq_ / hmw_)."""
+    return prefix + secrets.token_urlsafe(32)
+
+
 def _hash_api_key(key: str) -> str:
     # SHA-256 is fine here — the key has >=256 bits of entropy, so brute
     # force is infeasible even without slow hashing. Return hex so the
     # value survives JSON serialization across the sql-proxy boundary.
     return hashlib.sha256(key.encode()).hexdigest()
+
+
+def _token_id(token_hash_hex: str) -> str:
+    """Short, user-visible id for a capability token (first 12 hex chars
+    of its sha256). Stable, collision-resistant for in-tenant listings,
+    and never reveals the token itself."""
+    return token_hash_hex[:12]
 
 
 class TenantRegistry:
@@ -176,6 +220,138 @@ class TenantRegistry:
             "CREATE INDEX IF NOT EXISTS _tenants_api_key_hash_idx "
             "ON _tenants (api_key_hash)"
         )
+        # Capability tokens. One row per delegated token; owner key stays
+        # in _tenants. ON DELETE CASCADE so tenant deletion sweeps the
+        # delegated tokens too.
+        self._control_db.execute_commit(
+            """
+            CREATE TABLE IF NOT EXISTS _capability_tokens (
+                token_hash  TEXT PRIMARY KEY,
+                tenant_id   TEXT NOT NULL REFERENCES _tenants(id)
+                                ON DELETE CASCADE,
+                kind        TEXT NOT NULL CHECK (kind IN ('query','write')),
+                label       TEXT NOT NULL DEFAULT '',
+                constraints TEXT NOT NULL DEFAULT '{}',
+                created_at  DOUBLE PRECISION NOT NULL,
+                revoked_at  DOUBLE PRECISION
+            )
+            """
+        )
+        self._control_db.execute_commit(
+            "CREATE INDEX IF NOT EXISTS _capability_tokens_tenant_idx "
+            "ON _capability_tokens (tenant_id)"
+        )
+
+    # ── Capability-token operations ─────────────────────────────────
+
+    def mint_capability(
+        self,
+        tenant_id: str,
+        kind: str,
+        label: str,
+        constraints: dict | None,
+    ) -> dict:
+        """Issue a new query/write token for ``tenant_id``.
+
+        Returns ``{"token": "<plaintext>", "token_id": "<short>", "kind",
+        "label", "constraints"}``. The plaintext is shown only at this
+        call; only the hash is stored. Validates that the tenant exists
+        and that constraints match the kind.
+        """
+        if kind not in ("query", "write"):
+            raise ValueError("kind must be 'query' or 'write'")
+        constraints = dict(constraints or {})
+        if kind == "query":
+            sid = (constraints.get("scope_agent_id") or "").strip()
+            if not sid:
+                raise ValueError(
+                    "query token requires constraints.scope_agent_id"
+                )
+            constraints = {"scope_agent_id": sid}
+        else:  # write
+            tables = constraints.get("allowed_tables") or []
+            if not isinstance(tables, list) or not tables:
+                raise ValueError(
+                    "write token requires constraints.allowed_tables (non-empty list)"
+                )
+            cleaned = [str(t).strip() for t in tables if str(t).strip()]
+            if not cleaned:
+                raise ValueError("allowed_tables must contain at least one table")
+            for t in cleaned:
+                if t.lower().startswith("_hivemind_"):
+                    raise ValueError(
+                        f"write token cannot grant access to internal table {t!r}"
+                    )
+            constraints = {"allowed_tables": cleaned}
+
+        rows = self._control_db.execute(
+            "SELECT id FROM _tenants WHERE id = %s", [tenant_id]
+        )
+        if not rows:
+            raise KeyError(f"tenant '{tenant_id}' not found")
+
+        prefix = _QUERY_TOKEN_PREFIX if kind == "query" else _WRITE_TOKEN_PREFIX
+        token = _new_capability_token(prefix)
+        token_hash = _hash_api_key(token)
+        self._control_db.execute_commit(
+            "INSERT INTO _capability_tokens "
+            "(token_hash, tenant_id, kind, label, constraints, created_at) "
+            "VALUES (%s, %s, %s, %s, %s, %s)",
+            [
+                token_hash,
+                tenant_id,
+                kind,
+                label.strip(),
+                _json.dumps(constraints),
+                time.time(),
+            ],
+        )
+        return {
+            "token": token,
+            "token_id": _token_id(token_hash),
+            "kind": kind,
+            "label": label.strip(),
+            "constraints": constraints,
+        }
+
+    def list_capabilities(self, tenant_id: str) -> list[dict]:
+        """List non-revoked capability tokens for a tenant. Hashes only."""
+        rows = self._control_db.execute(
+            "SELECT token_hash, kind, label, constraints, created_at, revoked_at "
+            "FROM _capability_tokens WHERE tenant_id = %s "
+            "ORDER BY created_at DESC",
+            [tenant_id],
+        )
+        out: list[dict] = []
+        for r in rows:
+            try:
+                cons = _json.loads(r["constraints"]) if r["constraints"] else {}
+            except (TypeError, ValueError):
+                cons = {}
+            out.append(
+                {
+                    "token_id": _token_id(r["token_hash"]),
+                    "kind": r["kind"],
+                    "label": r["label"] or "",
+                    "constraints": cons,
+                    "created_at": r["created_at"],
+                    "revoked_at": r["revoked_at"],
+                }
+            )
+        return out
+
+    def revoke_capability(self, tenant_id: str, token_id_prefix: str) -> bool:
+        """Revoke a token by its short id. Returns True if a row updated."""
+        token_id_prefix = (token_id_prefix or "").strip().lower()
+        if len(token_id_prefix) < 6:
+            raise ValueError("token_id prefix must be at least 6 hex chars")
+        rowcount = self._control_db.execute_commit(
+            "UPDATE _capability_tokens SET revoked_at = %s "
+            "WHERE tenant_id = %s AND substr(token_hash,1,%s) = %s "
+            "AND revoked_at IS NULL",
+            [time.time(), tenant_id, len(token_id_prefix), token_id_prefix],
+        )
+        return bool(rowcount)
 
     # ── Admin operations ────────────────────────────────────────────
 
@@ -378,6 +554,76 @@ class TenantRegistry:
                 except Exception:
                     pass
         return hm
+
+    def resolve_any(self, token: str) -> Caller | None:
+        """Bearer token → ``Caller``, regardless of role.
+
+        Dispatches by prefix:
+          - ``hmk_…`` → owner via :meth:`resolve`
+          - ``hmq_…`` → query capability via ``_capability_tokens``
+          - ``hmw_…`` → write capability via ``_capability_tokens``
+
+        Returns ``None`` if the token doesn't match any active row, the
+        backing tenant is suspended, or the row is revoked. Callers
+        should treat ``None`` as a 401.
+        """
+        if not token:
+            return None
+        if token.startswith(_API_KEY_PREFIX):
+            res = self.resolve(token)
+            if res is None:
+                return None
+            tenant_id, hive = res
+            return Caller(
+                tenant_id=tenant_id,
+                role="owner",
+                constraints={},
+                hive=hive,
+                token_id="",
+            )
+        if token.startswith(_QUERY_TOKEN_PREFIX):
+            kind: Role = "query"
+        elif token.startswith(_WRITE_TOKEN_PREFIX):
+            kind = "write"
+        else:
+            return None
+
+        token_hash = _hash_api_key(token)
+        rows = self._control_db.execute(
+            "SELECT c.tenant_id, c.kind, c.constraints, c.revoked_at, "
+            "       t.suspended "
+            "FROM _capability_tokens c "
+            "JOIN _tenants t ON t.id = c.tenant_id "
+            "WHERE c.token_hash = %s",
+            [token_hash],
+        )
+        if not rows:
+            return None
+        row = rows[0]
+        if row["revoked_at"] is not None:
+            return None
+        if row["suspended"]:
+            return None
+        if row["kind"] != kind:
+            # Prefix and stored kind disagree — treat as forgery.
+            return None
+        try:
+            constraints = (
+                _json.loads(row["constraints"]) if row["constraints"] else {}
+            )
+        except (TypeError, ValueError):
+            constraints = {}
+        tenant_id = row["tenant_id"]
+        hive = self.for_tenant(tenant_id)
+        if hive is None:
+            return None
+        return Caller(
+            tenant_id=tenant_id,
+            role=kind,
+            constraints=constraints,
+            hive=hive,
+            token_id=_token_id(token_hash),
+        )
 
     def resolve(self, api_key: str) -> tuple[str, Hivemind] | None:
         """Bearer token → (tenant_id, per-tenant Hivemind). None if invalid."""

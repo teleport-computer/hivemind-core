@@ -28,7 +28,7 @@ from .models import (
     StoreResponse,
 )
 from .sandbox.settings import build_sandbox_settings
-from .tenants import TenantRegistry
+from .tenants import Caller, Role, TenantRegistry
 from .version import APP_VERSION
 
 logger = logging.getLogger(__name__)
@@ -239,21 +239,55 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(status_code=401, detail="Unauthorized")
         return auth.removeprefix("Bearer ").strip()
 
-    async def get_tenant_hive(request: Request) -> Hivemind:
-        """Auth + tenant resolution in one dep.
+    async def get_caller(request: Request) -> Caller:
+        """Auth + role resolution. Recognizes hmk_/hmq_/hmw_ tokens.
 
-        Extracts the bearer token, looks it up in the control DB, and
-        returns the caller's per-tenant Hivemind (LRU-cached). Raises
-        401 for any missing/invalid/suspended key.
+        Stashes ``tenant_id`` and ``caller`` on ``request.state`` so
+        downstream code (logging, role-specific handlers) can read them
+        without re-resolving. 401 on any missing/invalid/revoked token.
         """
         registry = _registry(request)
         token = _bearer(request)
-        resolved = await asyncio.to_thread(registry.resolve, token)
-        if resolved is None:
+        caller = await asyncio.to_thread(registry.resolve_any, token)
+        if caller is None:
             raise HTTPException(status_code=401, detail="Unauthorized")
-        tenant_id, hm = resolved
-        request.state.tenant_id = tenant_id
-        return hm
+        request.state.tenant_id = caller.tenant_id
+        request.state.caller = caller
+        return caller
+
+    def requires_role(*roles: Role):
+        """Build a FastAPI dependency that gates by caller role.
+
+        Use as ``Depends(requires_role("owner"))`` or
+        ``Depends(requires_role("owner", "query"))``. Returns the resolved
+        :class:`Caller` so handlers can read constraints / hive directly.
+        """
+        allowed = set(roles)
+
+        async def _dep(caller: Caller = Depends(get_caller)) -> Caller:
+            if caller.role not in allowed:
+                raise HTTPException(
+                    status_code=403,
+                    detail=(
+                        f"role '{caller.role}' not permitted "
+                        f"(need one of: {sorted(allowed)})"
+                    ),
+                )
+            return caller
+
+        return _dep
+
+    async def get_tenant_hive(
+        caller: Caller = Depends(requires_role("owner")),
+    ) -> Hivemind:
+        """Owner-only Hivemind dependency.
+
+        Backward-compatible shim for endpoints that pre-date capability
+        tokens — they all run as the tenant owner. New endpoints that
+        accept query/write tokens should depend on :func:`get_caller` or
+        :func:`requires_role` directly.
+        """
+        return caller.hive
 
     async def check_admin(request: Request):
         """Gate admin endpoints with the separate HIVEMIND_ADMIN_KEY."""
@@ -488,6 +522,71 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(404, f"tenant '{tenant_id}' not found")
         return result
 
+    # ── Capability tokens (delegated query / write) ──
+    #
+    # Owner mints query/write tokens to share narrow capabilities with
+    # third parties without exposing their hmk_ key. Plaintext is shown
+    # exactly once at /issue; only the hash is stored. Listing reveals
+    # token_id (a short hex prefix of the hash) for revocation; the
+    # plaintext is never recoverable.
+
+    @app.post("/v1/tokens")
+    async def issue_capability(
+        payload: dict,
+        request: Request,
+        hm: Hivemind = Depends(get_tenant_hive),
+    ):
+        """Issue a capability token. Body: {kind, label, constraints}.
+
+        For ``kind="query"``: ``constraints.scope_agent_id`` is required
+        and pins every query through the token to that scope agent.
+
+        For ``kind="write"``: ``constraints.allowed_tables`` is required
+        and restricts ``/v1/store`` to single INSERTs into that allowlist
+        (no internal ``_hivemind_*`` tables).
+        """
+        kind = (payload or {}).get("kind", "")
+        label = (payload or {}).get("label", "") or ""
+        constraints = (payload or {}).get("constraints") or {}
+        registry = _registry(request)
+        tenant_id = request.state.tenant_id
+        try:
+            result = await asyncio.to_thread(
+                registry.mint_capability, tenant_id, kind, label, constraints
+            )
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        except KeyError as e:
+            raise HTTPException(404, str(e))
+        return result
+
+    @app.get("/v1/tokens")
+    async def list_tokens(
+        request: Request, hm: Hivemind = Depends(get_tenant_hive),
+    ):
+        registry = _registry(request)
+        tenant_id = request.state.tenant_id
+        rows = await asyncio.to_thread(registry.list_capabilities, tenant_id)
+        return {"tokens": rows}
+
+    @app.delete("/v1/tokens/{token_id}")
+    async def revoke_token(
+        token_id: str,
+        request: Request,
+        hm: Hivemind = Depends(get_tenant_hive),
+    ):
+        registry = _registry(request)
+        tenant_id = request.state.tenant_id
+        try:
+            ok = await asyncio.to_thread(
+                registry.revoke_capability, tenant_id, token_id
+            )
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        if not ok:
+            raise HTTPException(404, f"token '{token_id}' not found")
+        return {"status": "ok", "token_id": token_id}
+
     # ── Liveness (unauthed, no tenant scope) ──
 
     @app.get("/v1/healthz")
@@ -510,19 +609,53 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         "/v1/store",
         response_model=StoreResponse,
     )
-    async def store(req: StoreRequest, hm: Hivemind = Depends(get_tenant_hive)):
+    async def store(
+        req: StoreRequest,
+        caller: Caller = Depends(requires_role("owner", "write")),
+    ):
+        # Write tokens are restricted to INSERTs into a fixed table list.
+        # Owners run the request as-is.
+        if caller.role == "write":
+            from .tools import is_insert_only_into
+
+            allowed = caller.constraints.get("allowed_tables") or []
+            try:
+                is_insert_only_into(req.sql, allowed)
+            except ValueError as e:
+                raise HTTPException(status_code=403, detail=str(e))
         try:
-            return await hm.pipeline.run_store(req)
+            return await caller.hive.pipeline.run_store(req)
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
+
+    def _force_scope_for_query_token(
+        req: QueryRequest, caller: Caller
+    ) -> QueryRequest:
+        """If caller is a query-token holder, pin scope_agent_id to the
+        token's bound scope agent. Owner-supplied scope_agent_id is left
+        alone."""
+        if caller.role != "query":
+            return req
+        bound = caller.constraints.get("scope_agent_id") or ""
+        if not bound:
+            raise HTTPException(
+                status_code=500,
+                detail="query token missing scope_agent_id constraint",
+            )
+        # Always overwrite — query tokens cannot bypass their bound scope.
+        return req.model_copy(update={"scope_agent_id": bound})
 
     @app.post(
         "/v1/query",
         response_model=QueryResponse,
     )
-    async def query(req: QueryRequest, hm: Hivemind = Depends(get_tenant_hive)):
+    async def query(
+        req: QueryRequest,
+        caller: Caller = Depends(requires_role("owner", "query")),
+    ):
+        req = _force_scope_for_query_token(req, caller)
         try:
-            return await hm.pipeline.run_query(req)
+            return await caller.hive.pipeline.run_query(req)
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
 
@@ -532,8 +665,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     _pending_queries: dict[str, dict] = {}
 
     @app.post("/v1/query/submit")
-    async def submit_query(req: QueryRequest, hm: Hivemind = Depends(get_tenant_hive)):
+    async def submit_query(
+        req: QueryRequest,
+        caller: Caller = Depends(requires_role("owner", "query")),
+    ):
         """Submit a query for async processing. Returns a run_id to poll."""
+        req = _force_scope_for_query_token(req, caller)
+        hm = caller.hive
         run_id = uuid4().hex[:12]
         _pending_queries[run_id] = {
             "status": "running",
@@ -564,11 +702,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/v1/query/runs/{run_id}")
     async def get_query_status(
-        run_id: str, hm: Hivemind = Depends(get_tenant_hive)
+        run_id: str,
+        caller: Caller = Depends(requires_role("owner", "query")),
     ):
         """Poll the status of an async query."""
         entry = _pending_queries.get(run_id)
-        if not entry or entry.get("tenant_id") != hm.tenant_id:
+        if not entry or entry.get("tenant_id") != caller.tenant_id:
             raise HTTPException(404, "Query run not found")
         payload = {k: v for k, v in entry.items() if k != "tenant_id"}
         return JSONResponse(
@@ -591,8 +730,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get(
         "/v1/admin/schema",
     )
-    async def get_schema(hm: Hivemind = Depends(get_tenant_hive)):
-        schema = await asyncio.to_thread(hm.db.get_schema)
+    async def get_schema(
+        caller: Caller = Depends(requires_role("owner", "query")),
+    ):
+        schema = await asyncio.to_thread(caller.hive.db.get_schema)
         return {"schema": schema}
 
     # ── Agent CRUD ──
@@ -653,19 +794,31 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "files_extracted": file_count,
         }
 
+    def _query_token_visible_agent(caller: Caller, agent_id: str) -> bool:
+        """Query-token holders can only see the scope agent they're bound to."""
+        if caller.role != "query":
+            return True
+        return agent_id == (caller.constraints.get("scope_agent_id") or "")
+
     @app.get("/v1/agents")
     async def list_agents(
         type: str | None = None,
-        hm: Hivemind = Depends(get_tenant_hive),
+        caller: Caller = Depends(requires_role("owner", "query")),
     ):
-        agents = await asyncio.to_thread(hm.agent_store.list_agents, type)
+        agents = await asyncio.to_thread(caller.hive.agent_store.list_agents, type)
+        if caller.role == "query":
+            bound = caller.constraints.get("scope_agent_id") or ""
+            agents = [a for a in agents if a.agent_id == bound]
         return [a.model_dump() for a in agents]
 
     @app.get("/v1/agents/{agent_id}")
     async def get_agent(
-        agent_id: str, hm: Hivemind = Depends(get_tenant_hive)
+        agent_id: str,
+        caller: Caller = Depends(requires_role("owner", "query")),
     ):
-        agent = await asyncio.to_thread(hm.agent_store.get, agent_id)
+        if not _query_token_visible_agent(caller, agent_id):
+            raise HTTPException(404, "Agent not found")
+        agent = await asyncio.to_thread(caller.hive.agent_store.get, agent_id)
         if not agent:
             raise HTTPException(404, "Agent not found")
         return agent.model_dump()
@@ -677,6 +830,96 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if not await asyncio.to_thread(hm.agent_store.delete, agent_id):
             raise HTTPException(404, "Agent not found")
         return {"status": "ok"}
+
+    # ── Agent file inspection ──
+    #
+    # Designed for query-token holders to audit the scope agent they're
+    # bound to before submitting their own query agent. Returns the
+    # extracted source files saved at agent-build time. Owner sees every
+    # agent; query-token sees only the bound scope agent.
+
+    @app.get("/v1/agents/{agent_id}/files")
+    async def list_agent_files(
+        agent_id: str,
+        caller: Caller = Depends(requires_role("owner", "query")),
+    ):
+        if not _query_token_visible_agent(caller, agent_id):
+            raise HTTPException(404, "Agent not found")
+        agent = await asyncio.to_thread(caller.hive.agent_store.get, agent_id)
+        if not agent:
+            raise HTTPException(404, "Agent not found")
+        files = await asyncio.to_thread(
+            caller.hive.agent_store.list_file_paths, agent_id
+        )
+        return {"agent_id": agent_id, "files": files}
+
+    @app.get("/v1/agents/{agent_id}/files/{file_path:path}")
+    async def read_agent_file(
+        agent_id: str,
+        file_path: str,
+        caller: Caller = Depends(requires_role("owner", "query")),
+    ):
+        if not _query_token_visible_agent(caller, agent_id):
+            raise HTTPException(404, "Agent not found")
+        content = await asyncio.to_thread(
+            caller.hive.agent_store.read_file, agent_id, file_path
+        )
+        if content is None:
+            raise HTTPException(404, "File not found")
+        return Response(content=content, media_type="text/plain; charset=utf-8")
+
+    # ── Scope attestation digest ──
+    #
+    # One-call helper for a recipient to confirm "the scope agent I see
+    # right now is the one the token authorized". Returns the bound
+    # scope_agent_id, its config, the live attestation bundle (so the
+    # CLI can pin compose_hash / quote / TLS pubkey), and a sha256 over
+    # the full set of saved source files. The recipient can re-fetch the
+    # files via /v1/agents/{id}/files and recompute the digest by hand.
+
+    @app.get("/v1/scope-attest")
+    async def scope_attest(
+        caller: Caller = Depends(requires_role("owner", "query")),
+    ):
+        from . import attestation as _att
+
+        scope_id = caller.constraints.get("scope_agent_id") or ""
+        if not scope_id:
+            if caller.role != "query":
+                raise HTTPException(
+                    400,
+                    "owner must pass ?scope_agent_id=… (no token binding)",
+                )
+            raise HTTPException(
+                500, "query token missing scope_agent_id constraint"
+            )
+        agent = await asyncio.to_thread(
+            caller.hive.agent_store.get, scope_id
+        )
+        if not agent:
+            raise HTTPException(404, "Scope agent not found")
+        files = await asyncio.to_thread(
+            caller.hive.agent_store.get_files, scope_id
+        )
+        # sha256 of `path\0content\0` for each file in path-sorted order.
+        # Stable, lets the CLI re-derive without ambiguity. Files-empty
+        # case (Phala-built images on a clean CVM) → digest of empty.
+        import hashlib as _h
+
+        h = _h.sha256()
+        for path in sorted(files):
+            h.update(path.encode("utf-8"))
+            h.update(b"\0")
+            h.update(files[path].encode("utf-8", errors="replace"))
+            h.update(b"\0")
+        files_digest = h.hexdigest()
+        return {
+            "scope_agent_id": scope_id,
+            "agent": agent.model_dump(),
+            "files_count": len(files),
+            "files_digest_sha256": files_digest,
+            "attestation": _att.get_bundle(),
+        }
 
     # ── Agent upload ──
 
@@ -1102,9 +1345,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         timeout_seconds: Annotated[int, Form(ge=1)] = 120,
         scope_agent_id: str | None = Form(None),
         mediator_agent_id: str | None = Form(None),
-        hm: Hivemind = Depends(get_tenant_hive),
+        caller: Caller = Depends(requires_role("owner", "query")),
     ):
         """Upload query agent source, create a run record, and kick off execution."""
+        # Query-token callers cannot pick their own scope agent — pin it
+        # to the one the owner bound the token to.
+        if caller.role == "query":
+            scope_agent_id = caller.constraints.get("scope_agent_id") or ""
+        hm = caller.hive
         try:
             content = await _read_upload_bytes_limited(
                 archive, max_bytes=MAX_UPLOAD_SIZE,
@@ -1246,9 +1494,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/v1/query-agents/runs/{run_id}")
     async def get_query_run(
-        run_id: str, hm: Hivemind = Depends(get_tenant_hive)
+        run_id: str,
+        caller: Caller = Depends(requires_role("owner", "query")),
     ):
         """Get the status and result of a query agent run."""
+        hm = caller.hive
         run = await asyncio.to_thread(hm.run_store.get, run_id)
         if not run:
             raise HTTPException(404, "Run not found")
@@ -1265,18 +1515,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/v1/query-agents/runs")
     async def list_query_runs(
-        limit: int = 20, hm: Hivemind = Depends(get_tenant_hive)
+        limit: int = 20,
+        caller: Caller = Depends(requires_role("owner", "query")),
     ):
         """List recent query agent runs."""
-        return await asyncio.to_thread(hm.run_store.list_recent, min(limit, 100))
+        return await asyncio.to_thread(
+            caller.hive.run_store.list_recent, min(limit, 100)
+        )
 
     # ── Unified run status ──
 
     @app.get("/v1/agent-runs/{run_id}")
     async def get_agent_run(
-        run_id: str, hm: Hivemind = Depends(get_tenant_hive)
+        run_id: str,
+        caller: Caller = Depends(requires_role("owner", "query")),
     ):
         """Get the status and result of an agent run."""
+        hm = caller.hive
         run = await asyncio.to_thread(hm.run_store.get, run_id)
         if not run:
             raise HTTPException(404, "Run not found")
@@ -1291,10 +1546,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/v1/agent-runs")
     async def list_agent_runs(
-        limit: int = 20, hm: Hivemind = Depends(get_tenant_hive)
+        limit: int = 20,
+        caller: Caller = Depends(requires_role("owner", "query")),
     ):
         """List recent agent runs."""
-        return await asyncio.to_thread(hm.run_store.list_recent, min(limit, 100))
+        return await asyncio.to_thread(
+            caller.hive.run_store.list_recent, min(limit, 100)
+        )
 
     # ── Artifact fetch (Postgres-backed; no S3) ──
 
@@ -1302,8 +1560,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         "/v1/query/runs/{run_id}/artifacts/{filename:path}",
     )
     async def get_run_artifact(
-        run_id: str, filename: str, hm: Hivemind = Depends(get_tenant_hive)
+        run_id: str,
+        filename: str,
+        caller: Caller = Depends(requires_role("owner", "query")),
     ):
+        hm = caller.hive
         """Stream a query-agent artifact.
 
         Artifacts live in Postgres and expire after
@@ -1334,8 +1595,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # ── Health ──
 
     @app.get("/v1/health", response_model=HealthResponse)
-    async def health(hm: Hivemind = Depends(get_tenant_hive)):
-        return await asyncio.to_thread(hm.health)
+    async def health(
+        caller: Caller = Depends(requires_role("owner", "query", "write")),
+    ):
+        return await asyncio.to_thread(caller.hive.health)
 
     # ── Web UI ──
 

@@ -95,6 +95,81 @@ def _is_select_only(sql: str) -> bool:
     return True
 
 
+def is_insert_only_into(sql: str, allowed_tables: list[str]) -> None:
+    """Validate that ``sql`` is a single INSERT into one of ``allowed_tables``.
+
+    Used to enforce write-token constraints in ``/v1/store``: a write-token
+    holder may only insert rows into a fixed table allowlist. Raises
+    :class:`ValueError` with a human-readable reason on any of:
+
+      - ``sql`` doesn't parse as Postgres
+      - statement count != 1
+      - top-level node is not an INSERT
+      - target table isn't in ``allowed_tables`` (case-insensitive)
+      - any descendant DML (UPDATE/DELETE/DROP/etc) anywhere in the tree
+        — defends against ``INSERT ... RETURNING`` chained with CTE-DML or
+        compound statements.
+
+    Returns ``None`` on success — silent. Callers should ``except ValueError``
+    and translate to HTTP 403.
+    """
+    import sqlglot
+
+    if not allowed_tables:
+        raise ValueError("write-token has no allowed_tables — request rejected")
+    norm_allowed = {str(t).strip().lower() for t in allowed_tables if str(t).strip()}
+    if not norm_allowed:
+        raise ValueError("write-token has no allowed_tables — request rejected")
+
+    try:
+        statements = sqlglot.parse(
+            sql, dialect="postgres", error_level=sqlglot.ErrorLevel.IGNORE
+        )
+    except sqlglot.errors.ParseError as e:
+        raise ValueError(f"could not parse SQL: {e}") from e
+    if not statements or len(statements) != 1 or statements[0] is None:
+        raise ValueError("write-token allows exactly one INSERT statement")
+
+    stmt = statements[0]
+    if not isinstance(stmt, sqlglot.exp.Insert):
+        raise ValueError("write-token allows only INSERT statements")
+
+    # Block any nested DML — INSERT can carry SELECT/CTEs but never another
+    # DML node. We allow Insert as the root only.
+    _BAD = (
+        sqlglot.exp.Delete, sqlglot.exp.Update, sqlglot.exp.Drop,
+        sqlglot.exp.Create, sqlglot.exp.Alter, sqlglot.exp.Command,
+    )
+    for node in stmt.walk():
+        if isinstance(node, _BAD):
+            raise ValueError("write-token rejects nested DML in INSERT")
+        if isinstance(node, sqlglot.exp.Insert) and node is not stmt:
+            raise ValueError("write-token rejects nested INSERT in INSERT")
+
+    # Resolve the INSERT target. sqlglot stores it as the `this` field;
+    # for `INSERT INTO foo` it's a Table; for `INSERT INTO schema.foo` it's
+    # a Table with a `db` part. Internal tables are never permitted.
+    target: sqlglot.exp.Table | None = None
+    this = stmt.this
+    if isinstance(this, sqlglot.exp.Table):
+        target = this
+    elif isinstance(this, sqlglot.exp.Schema) and isinstance(this.this, sqlglot.exp.Table):
+        target = this.this
+    if target is None:
+        raise ValueError("write-token could not identify INSERT target table")
+
+    name = (target.name or "").lower()
+    if not name:
+        raise ValueError("write-token could not identify INSERT target table")
+    if name.startswith("_hivemind_"):
+        raise ValueError(f"write-token cannot insert into internal table {name!r}")
+    if name not in norm_allowed:
+        raise ValueError(
+            f"table {name!r} not in write-token allowed_tables "
+            f"({sorted(norm_allowed)})"
+        )
+
+
 def _references_internal_tables(sql: str) -> bool:
     """Check if SQL references _hivemind_* internal tables using AST parsing.
 
