@@ -978,10 +978,34 @@ def init(service: str, api_key: str):
     # self-signed -8100s. cert.
     _warm_pin_from_trust(service)
 
+    # Probe /v1/health (tenant key). If the key turns out to be the
+    # admin key (HIVEMIND_ADMIN_KEY), /v1/health 401s — try the
+    # admin-only /v1/admin/tenants probe before giving up. This lets the
+    # operator set up an admin profile the same way as a tenant profile.
+    health: dict = {}
+    role = "tenant"
     try:
         resp = _hget(f"{service}/v1/health", headers=headers, timeout=10)
-        resp.raise_for_status()
-        health = resp.json()
+        if resp.status_code == 401 and api_key:
+            ar = _hget(
+                f"{service}/v1/admin/tenants", headers=headers, timeout=10
+            )
+            if ar.status_code < 400:
+                role = "admin"
+                health = {
+                    "table_count": "(admin)",
+                    "version": "(admin)",
+                }
+            else:
+                click.echo(
+                    f"Error: 401 from {service} — key authorizes neither "
+                    "a tenant nor admin role.",
+                    err=True,
+                )
+                raise SystemExit(1)
+        else:
+            resp.raise_for_status()
+            health = resp.json()
     except httpx.ConnectError:
         click.echo(f"Error: Cannot reach {service}", err=True)
         raise SystemExit(1)
@@ -996,10 +1020,10 @@ def init(service: str, api_key: str):
         )
         raise SystemExit(1)
 
-    _save_config({"service": service, "api_key": api_key})
+    _save_config({"service": service, "api_key": api_key, "role": role})
     profile = _profile_name()
     click.echo(
-        f"Initialized profile '{profile}' at {_config_path()} "
+        f"Initialized profile '{profile}' (role={role}) at {_config_path()} "
         f"— connected to {service}"
     )
     click.echo(f"  Tables: {health.get('table_count', '?')}")
@@ -2029,7 +2053,7 @@ def profile_list():
     if not _PROFILES_DIR.exists():
         click.echo(f"No profiles yet. Run 'hivemind init …' to create '{active}'.")
         return
-    rows: list[tuple[str, str, str]] = []
+    rows: list[tuple[str, str, str, str]] = []
     for p in sorted(_PROFILES_DIR.glob("*.yaml")):
         name = p.stem
         try:
@@ -2038,14 +2062,19 @@ def profile_list():
             cfg = {}
         service = str(cfg.get("service") or "?")
         has_key = "yes" if cfg.get("api_key") else "no"
-        rows.append((name, service, has_key))
+        role = str(cfg.get("role") or "tenant")
+        rows.append((name, service, has_key, role))
     if not rows:
         click.echo(f"No profiles in {_PROFILES_DIR}.")
         return
-    click.echo(f"{'ACTIVE':<7} {'NAME':<24} {'API_KEY':<8} SERVICE")
-    for name, service, has_key in rows:
+    click.echo(
+        f"{'ACTIVE':<7} {'NAME':<24} {'ROLE':<8} {'API_KEY':<8} SERVICE"
+    )
+    for name, service, has_key, role in rows:
         marker = "*" if name == active else " "
-        click.echo(f"  {marker:<5} {name:<24} {has_key:<8} {service}")
+        click.echo(
+            f"  {marker:<5} {name:<24} {role:<8} {has_key:<8} {service}"
+        )
 
 
 @profile_cli.command("show")
@@ -2097,6 +2126,35 @@ def _admin_headers(admin_key: str) -> dict:
     }
 
 
+def _resolve_admin_key(admin_key: str) -> str:
+    """Resolve the admin bearer.
+
+    Order of preference:
+    1. ``--admin-key`` flag (Click also fills this from
+       ``HIVEMIND_ADMIN_KEY`` env via the option's ``envvar=``).
+    2. The active profile's ``api_key`` IF it was registered with
+       ``role: admin`` (set by ``hivemind init`` when /v1/health 401s
+       and /v1/admin/tenants accepts the key).
+    Otherwise, abort. We never silently use a tenant key for admin
+    operations.
+    """
+    if admin_key:
+        return admin_key
+    try:
+        cfg = _load_config(check_trust=False)
+    except SystemExit:
+        cfg = {}
+    if cfg.get("role") == "admin" and cfg.get("api_key"):
+        return cfg["api_key"]
+    click.echo(
+        "Error: admin key required. Pass --admin-key, set "
+        "HIVEMIND_ADMIN_KEY, or 'hivemind --profile <admin> init "
+        "--api-key <admin-key>' to wire up an admin profile.",
+        err=True,
+    )
+    raise SystemExit(2)
+
+
 def _resolve_admin_service(service: str | None) -> str:
     if service:
         url = service.rstrip("/")
@@ -2130,12 +2188,14 @@ def admin_cli():
 @click.option(
     "--admin-key",
     envvar="HIVEMIND_ADMIN_KEY",
-    required=True,
-    help="Admin bearer token (or set HIVEMIND_ADMIN_KEY)",
+    default="",
+    help="Admin bearer token. Defaults to HIVEMIND_ADMIN_KEY or "
+    "the active profile's api_key when role=admin.",
 )
 @click.option("--json", "as_json", is_flag=True, help="Emit JSON only")
 def admin_create_tenant(name: str, service: str | None, admin_key: str, as_json: bool):
     """Provision a new tenant. Prints the one-time API key."""
+    admin_key = _resolve_admin_key(admin_key)
     url = _resolve_admin_service(service)
     try:
         resp = _hpost(
@@ -2178,8 +2238,9 @@ def admin_create_tenant(name: str, service: str | None, admin_key: str, as_json:
 @click.option(
     "--admin-key",
     envvar="HIVEMIND_ADMIN_KEY",
-    required=True,
-    help="Admin bearer token",
+    default="",
+    help="Admin bearer token. Defaults to HIVEMIND_ADMIN_KEY or "
+    "the active profile's api_key when role=admin.",
 )
 @click.option("--json", "as_json", is_flag=True, help="Emit JSON only")
 def admin_register_existing(
@@ -2192,6 +2253,7 @@ def admin_register_existing(
     as_json: bool,
 ):
     """Adopt a pre-populated Postgres database as a tenant."""
+    admin_key = _resolve_admin_key(admin_key)
     url = _resolve_admin_service(service)
     body: dict[str, str] = {"name": name, "db_name": db_name}
     if api_key:
@@ -2226,12 +2288,14 @@ def admin_register_existing(
 @click.option(
     "--admin-key",
     envvar="HIVEMIND_ADMIN_KEY",
-    required=True,
-    help="Admin bearer token",
+    default="",
+    help="Admin bearer token. Defaults to HIVEMIND_ADMIN_KEY or "
+    "the active profile's api_key when role=admin.",
 )
 @click.option("--json", "as_json", is_flag=True, help="Emit JSON only")
 def admin_list_tenants(service: str | None, admin_key: str, as_json: bool):
     """List all tenants."""
+    admin_key = _resolve_admin_key(admin_key)
     url = _resolve_admin_service(service)
     try:
         resp = _hget(
@@ -2268,14 +2332,16 @@ def admin_list_tenants(service: str | None, admin_key: str, as_json: bool):
 @click.option(
     "--admin-key",
     envvar="HIVEMIND_ADMIN_KEY",
-    required=True,
-    help="Admin bearer token",
+    default="",
+    help="Admin bearer token. Defaults to HIVEMIND_ADMIN_KEY or "
+    "the active profile's api_key when role=admin.",
 )
 @click.confirmation_option(
     prompt="Drop the tenant DB and all its data? This cannot be undone."
 )
 def admin_delete_tenant(tenant_id: str, service: str | None, admin_key: str):
     """Delete a tenant: drops its Postgres DB and revokes its key."""
+    admin_key = _resolve_admin_key(admin_key)
     url = _resolve_admin_service(service)
     try:
         resp = _hdelete(
@@ -2299,8 +2365,9 @@ def admin_delete_tenant(tenant_id: str, service: str | None, admin_key: str):
 @click.option(
     "--admin-key",
     envvar="HIVEMIND_ADMIN_KEY",
-    required=True,
-    help="Admin bearer token",
+    default="",
+    help="Admin bearer token. Defaults to HIVEMIND_ADMIN_KEY or "
+    "the active profile's api_key when role=admin.",
 )
 @click.confirmation_option(
     prompt=(
@@ -2317,6 +2384,7 @@ def admin_rename_database(
     'hivemind admin register-existing <name> <new_name> --tenant-id <t_...>'
     to adopt the renamed DB as a tenant.
     """
+    admin_key = _resolve_admin_key(admin_key)
     url = _resolve_admin_service(service)
     try:
         resp = _hpost(
@@ -2339,8 +2407,9 @@ def admin_rename_database(
 @click.option(
     "--admin-key",
     envvar="HIVEMIND_ADMIN_KEY",
-    required=True,
-    help="Admin bearer token",
+    default="",
+    help="Admin bearer token. Defaults to HIVEMIND_ADMIN_KEY or "
+    "the active profile's api_key when role=admin.",
 )
 @click.option(
     "--as-json/--no-as-json", default=False, help="Emit JSON output",
@@ -2356,6 +2425,7 @@ def admin_migrate_to_roles(service: str | None, admin_key: str, as_json: bool):
     """
     import json as _json
 
+    admin_key = _resolve_admin_key(admin_key)
     url = _resolve_admin_service(service)
     try:
         resp = _hpost(
