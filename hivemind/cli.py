@@ -39,6 +39,7 @@ from . import trust as _trust
 # vs. alice tenant) on one laptop without `cd`-ing between dirs.
 _HIVEMIND_HOME = Path.home() / ".hivemind"
 _PROFILES_DIR = _HIVEMIND_HOME / "profiles"
+_ACTIVE_POINTER = _HIVEMIND_HOME / "active"
 _DEFAULT_PROFILE = "default"
 
 # Legacy CWD-scoped config we auto-migrate from (one-shot).
@@ -206,8 +207,46 @@ def _warm_pin_from_trust(service: str) -> None:
 
 
 def _profile_name() -> str:
-    """Active profile name. Set by --profile (which exports HIVEMIND_PROFILE)."""
-    return os.environ.get("HIVEMIND_PROFILE", "").strip() or _DEFAULT_PROFILE
+    """Active profile name. Resolution order:
+
+    1. ``HIVEMIND_PROFILE`` env var (set by ``--profile NAME``)
+    2. The persistent pointer file at ``~/.hivemind/active``
+       (written by ``hivemind profile use NAME``)
+    3. ``"default"`` — the legacy fallback
+
+    Step 2 is what lets plain ``hivemind <cmd>`` work after a cluster
+    migration leaves the literal "default" profile pointing at dead
+    infra: the operator picks a real profile once via ``profile use``
+    and forgets about it.
+    """
+    env = os.environ.get("HIVEMIND_PROFILE", "").strip()
+    if env:
+        return env
+    try:
+        if _ACTIVE_POINTER.exists():
+            name = _ACTIVE_POINTER.read_text().strip()
+            if name:
+                return name
+    except OSError:
+        pass
+    return _DEFAULT_PROFILE
+
+
+def _set_active_profile(name: str) -> None:
+    _HIVEMIND_HOME.mkdir(parents=True, exist_ok=True)
+    _ACTIVE_POINTER.write_text(name + "\n")
+
+
+def _clear_active_profile_if(name: str) -> None:
+    """Remove the active pointer iff it currently points at ``name``."""
+    try:
+        if (
+            _ACTIVE_POINTER.exists()
+            and _ACTIVE_POINTER.read_text().strip() == name
+        ):
+            _ACTIVE_POINTER.unlink()
+    except OSError:
+        pass
 
 
 def _config_path(profile: str | None = None) -> Path:
@@ -256,11 +295,21 @@ def _load_config(*, check_trust: bool = True) -> dict:
     _maybe_migrate_legacy(p)
     if not p.exists():
         profile = _profile_name()
-        hint = (
-            f"Run 'hivemind init --api-key …' to create profile '{profile}'."
-            if profile == _DEFAULT_PROFILE
-            else f"Run 'hivemind --profile {profile} init --api-key …' to create it."
+        existing = (
+            sorted(x.stem for x in _PROFILES_DIR.glob("*.yaml"))
+            if _PROFILES_DIR.exists()
+            else []
         )
+        if profile == _DEFAULT_PROFILE and existing:
+            hint = (
+                f"Profile '{profile}' doesn't exist. Pick one of "
+                f"{existing} via 'hivemind profile use NAME', "
+                f"or pass --profile NAME on each command."
+            )
+        elif profile == _DEFAULT_PROFILE:
+            hint = f"Run 'hivemind init --api-key …' to create profile '{profile}'."
+        else:
+            hint = f"Run 'hivemind --profile {profile} init --api-key …' to create it."
         click.echo(
             f"Error: profile '{profile}' not found at {p}. {hint}",
             err=True,
@@ -293,6 +342,12 @@ def _save_config(config: dict) -> None:
     p.parent.mkdir(parents=True, exist_ok=True)
     with open(p, "w") as f:
         yaml.dump(config, f, default_flow_style=False)
+    # First-init UX: if no profile is currently marked as active, mark
+    # this one. Subsequent inits don't change the pointer — switch
+    # explicitly via `hivemind profile use NAME`. This makes a
+    # one-tenant laptop work without ever passing --profile.
+    if not _ACTIVE_POINTER.exists():
+        _set_active_profile(_profile_name())
 
 
 def _headers(config: dict) -> dict:
@@ -2310,11 +2365,42 @@ def profile_delete(name: str):
         click.echo(f"Error: profile not found at {p}", err=True)
         raise SystemExit(1)
     p.unlink()
+    pointer_was_set = (
+        _ACTIVE_POINTER.exists()
+        and _ACTIVE_POINTER.read_text().strip() == name
+    )
+    _clear_active_profile_if(name)
     click.echo(f"Deleted {p}")
+    if pointer_was_set:
+        click.echo(
+            f"Active-profile pointer cleared (it was pointing at '{name}'). "
+            "Run 'hivemind profile use NAME' to set a new one."
+        )
     click.echo(
         "Note: the API key on the server is still valid until you "
         "rotate it via 'hivemind rotate-key' or delete the tenant."
     )
+
+
+@profile_cli.command("use")
+@click.argument("name")
+def profile_use(name: str):
+    """Make NAME the persistent active profile.
+
+    Plain ``hivemind <cmd>`` (no --profile flag, no HIVEMIND_PROFILE env)
+    will use this profile from now on. Per-command overrides via
+    ``--profile`` and ``HIVEMIND_PROFILE`` still win.
+    """
+    p = _config_path(name)
+    if not p.exists():
+        click.echo(
+            f"Error: profile '{name}' not found at {p}. "
+            f"Run 'hivemind --profile {name} init …' first.",
+            err=True,
+        )
+        raise SystemExit(1)
+    _set_active_profile(name)
+    click.echo(f"Active profile is now '{name}' (pointer: {_ACTIVE_POINTER}).")
 
 
 @profile_cli.command("path")
