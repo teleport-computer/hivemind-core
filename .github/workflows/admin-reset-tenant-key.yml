@@ -1,0 +1,128 @@
+name: Admin reset tenant key (via EC2 relay)
+
+# Mints (or rotates) the API key for a tenant whose Postgres DB already
+# exists — typical case is adopting a pre-populated DB after a cluster
+# move (e.g. tenant_t_234bab3e4bf1 / watch-history). Mirrors the
+# deploy.yml relay pattern: GH runner SSHes into EC2, sources
+# SQL_PROXY_KEY + HIVEMIND_DATABASE_URL from deploy/phala/.env, and
+# runs scripts/admin_reset_tenant_key.py.
+#
+# WARNING: the resulting hmk_ is printed to the workflow log. GH Actions
+# logs are private to repo collaborators, but treat the key as
+# bootstrap-only — rotate via /v1/tenant/rotate-key on first use.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tenant_id:
+        description: "Tenant id (e.g. t_234bab3e4bf1)"
+        required: true
+        default: "t_234bab3e4bf1"
+      db_name:
+        description: "DB name (only used with --register; defaults to tenant_<tenant_id>)"
+        required: false
+        default: ""
+      register:
+        description: "If no _tenants row exists, INSERT one (default: fail loudly)."
+        required: true
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+      friendly_name:
+        description: "Friendly name to store in _tenants.name (only used with --register)."
+        required: false
+        default: ""
+
+concurrency:
+  group: phala-admin-reset-key
+  cancel-in-progress: false
+
+jobs:
+  reset:
+    name: "reset key → ${{ github.event.inputs.tenant_id }}"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Configure SSH
+        env:
+          SSH_KEY: ${{ secrets.EC2_SSH_PRIVATE_KEY }}
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -H "$EC2_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Run reset on relay
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_USER: ${{ secrets.EC2_USER }}
+          TENANT_ID: ${{ github.event.inputs.tenant_id }}
+          DB_NAME: ${{ github.event.inputs.db_name }}
+          REGISTER: ${{ github.event.inputs.register }}
+          FRIENDLY_NAME: ${{ github.event.inputs.friendly_name }}
+        run: |
+          set -euo pipefail
+          ssh -i ~/.ssh/id_ed25519 -o BatchMode=yes \
+            -o ServerAliveInterval=30 -o ServerAliveCountMax=20 \
+            -o TCPKeepAlive=yes \
+            "${EC2_USER}@${EC2_HOST}" \
+            "TENANT_ID='${TENANT_ID}' DB_NAME='${DB_NAME}' REGISTER='${REGISTER}' FRIENDLY_NAME='${FRIENDLY_NAME}' bash -s" <<'REMOTE'
+          set -euo pipefail
+          cd ~/hivemind-core
+
+          echo "── fetch + checkout main ────────────────────────"
+          git fetch --prune origin
+          git checkout --detach origin/main
+          echo "HEAD: $(git rev-parse --short HEAD)"
+
+          echo "── source proxy keys + base URL from .env ───────"
+          set -a
+          # shellcheck disable=SC1091
+          . deploy/phala/.env
+          set +a
+          : "${SQL_PROXY_KEY:?SQL_PROXY_KEY missing from deploy/phala/.env on relay}"
+          : "${HIVEMIND_DATABASE_URL:?HIVEMIND_DATABASE_URL missing from deploy/phala/.env on relay}"
+
+          # HIVEMIND_DATABASE_URL is the sql_proxy URL with maybe a path
+          # tail; strip any path so it becomes a clean base URL the
+          # script can hit /execute and /execute_commit on.
+          BASE_URL=$(echo "${HIVEMIND_DATABASE_URL}" | sed -E 's#(https?://[^/]+).*#\1#')
+          echo "base url: ${BASE_URL}"
+
+          echo "── ensure uv available ──────────────────────────"
+          if ! command -v uv >/dev/null 2>&1; then
+            export PATH="$HOME/.local/bin:$PATH"
+          fi
+          if ! command -v uv >/dev/null 2>&1; then
+            curl -LsSf https://astral.sh/uv/install.sh | sh
+            export PATH="$HOME/.local/bin:$PATH"
+          fi
+
+          ARGS=(--tenant-id "${TENANT_ID}")
+          if [ "${REGISTER}" = "true" ]; then
+            ARGS+=(--register)
+            if [ -n "${DB_NAME}" ]; then
+              ARGS+=(--db-name "${DB_NAME}")
+            else
+              ARGS+=(--db-name "tenant_${TENANT_ID}")
+            fi
+            if [ -n "${FRIENDLY_NAME}" ]; then
+              ARGS+=(--name "${FRIENDLY_NAME}")
+            fi
+          fi
+
+          echo "── running admin_reset_tenant_key.py ────────────"
+          HIVEMIND_BASE_URL="${BASE_URL}" \
+          SQL_PROXY_KEY="${SQL_PROXY_KEY}" \
+            uv run --with httpx --python 3.12 python \
+            scripts/admin_reset_tenant_key.py "${ARGS[@]}"
+          REMOTE
+
+      - name: Cleanup SSH key
+        if: always()
+        run: rm -f ~/.ssh/id_ed25519
