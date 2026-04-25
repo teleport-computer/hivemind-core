@@ -22,13 +22,13 @@ on:
   workflow_dispatch:
     inputs:
       src_url:
-        description: "Source sql-proxy base URL (old pg, port-8080 gateway URL)"
+        description: "Source sql-proxy base URL (current pg, port-8080 gateway URL)"
         required: true
-        default: "https://2181af2d134123a46613f62a0311dd1f5af984be-8080.dstack-pha-prod5.phala.network"
+        default: "https://ec76f3a3947408e0f22ac52eacc52222155a9d9f-8080.dstack-pha-prod9.phala.network"
       dst_url:
         description: "Destination sql-proxy base URL (new pg, port-8080 gateway URL)"
         required: true
-        default: "https://ec76f3a3947408e0f22ac52eacc52222155a9d9f-8080.dstack-pha-prod9.phala.network"
+        default: ""
       dbs:
         description: "Comma-separated DB names to migrate. Empty = all non-system DBs on src."
         required: false

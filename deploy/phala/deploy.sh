@@ -35,10 +35,10 @@ ENV_FILE="${SCRIPT_DIR}/.env"
 # Observed ~5–8 minutes end-to-end on dstack-pha-prod9.
 HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-600}"
 
-# CVM names are env-overridable so a one-time prod9 first-deploy can
-# use a fresh name (e.g. `hivemind-core-prod9`) without colliding with
-# the legacy prod5 CVM still listed in the workspace. Subsequent CICD
-# redeploys leave these unset → use the canonical name.
+# CVM names are env-overridable so a fresh-cluster first-deploy can
+# use a temporary name (e.g. `hivemind-core-prod10`) without colliding
+# with the in-flight one in the workspace. Subsequent CICD redeploys
+# leave these unset → use the canonical name.
 CORE_NAME="${CORE_NAME:-hivemind-core}"
 CORE_COMPOSE="${SCRIPT_DIR}/docker-compose.core.yaml"
 CORE_HEALTH_PATH="/v1/attestation"

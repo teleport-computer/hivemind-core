@@ -4,27 +4,28 @@ A forkable agent platform with raw Postgres and a scope-function query firewall.
 
 Core provides only the irreducible primitives: raw SQL execution, Docker sandboxes, scope function enforcement, and pipeline orchestration. In production, runs inside a dstack Confidential VM where LUKS2 disk encryption and TDX memory encryption protect data-at-rest — no application-level encryption needed.
 
-## Quickstart — one command
+## Install the CLI
+
+The `hivemind` CLI is a remote client — it talks to a hivemind-core server over HTTP. You don't need to run a local server to use it; if all you want is to query the live CVM (or someone else's deployment), this is the only step.
 
 ```bash
-# Prereqs: docker, uv (astral.sh/uv)
-./scripts/quickstart.sh
-```
-
-That's it. The script:
-1. Scaffolds `.env` (prompts for an LLM key if you don't already have one)
-2. Builds the agent base image + all four default agent images in parallel
-3. Starts Postgres, runs `uv sync`, boots `hivemind.server` on http://localhost:8100
-4. Does a real end-to-end demo: inserts rows, registers a scope policy, runs a query, prints the answer
-
-Pass `--no-demo` to skip step 4 and stop after the server is healthy.
-
-To use the CLI without the `uv run` prefix, install it as a top-level tool:
-
-```bash
+# Prereq: uv (astral.sh/uv)
 uv tool install --editable .
 hivemind --help
 ```
+
+Then jump to **[Using the CLI](#using-the-cli)** below.
+
+## Run a server (only if you want one)
+
+If you want to host your own hivemind-core (or hack on this repo), spin up the full local stack:
+
+```bash
+# Prereqs: docker, uv
+./scripts/quickstart.sh
+```
+
+The script scaffolds `.env`, builds the agent base + four default agent images in parallel, starts Postgres, runs `uv sync`, boots `hivemind.server` on http://localhost:8100, and ends with a real demo run (insert rows → register scope → run query). Pass `--no-demo` to stop after the server is healthy.
 
 ### Manual path (if you prefer)
 
@@ -42,11 +43,15 @@ curl http://localhost:8100/v1/health
 
 ## Using the CLI
 
-The `hivemind` CLI is the fastest path from "I have an agent" to "it ran and here are the artifacts." Single command owns build → upload → poll → fetch.
+The `hivemind` CLI owns the full lifecycle for an agent: build → upload → poll → fetch artifacts.
 
 ```bash
-# One-time: point the CLI at the server and paste your tenant key
-hivemind init --api-key hmk_...   # mint one via `hivemind admin create-tenant`
+# One-time: point at a service and paste your tenant key.
+# Local server (after quickstart):
+hivemind init --api-key hmk_...
+# Live Phala CVM:
+hivemind init --service https://hivemind.teleport.computer --api-key hmk_...
+# (mint a key via `hivemind admin create-tenant` if you're the operator)
 
 # Load a dataset (SQL dump / CSV / JSONL) into Postgres via /v1/store
 hivemind load dump.sql
@@ -251,7 +256,7 @@ uv run pytest tests/test_integration_docker.py -v
 Live instances:
 - **hivemind-core** (friendly URL):  https://hivemind.teleport.computer
   - Raw / Tier-3 pin URL: `https://0c86afa84ff128820dc201c1549b603566aa55a1-8100s.dstack-pha-prod9.phala.network`
-- **hivemind-pg** (sql proxy): `https://2181af2d134123a46613f62a0311dd1f5af984be-8080.dstack-pha-prod5.phala.network` (legacy cluster — pending migration to prod9)
+- **hivemind-pg** (sql proxy): `https://ec76f3a3947408e0f22ac52eacc52222155a9d9f-8080.dstack-pha-prod9.phala.network`
 
 The friendly URL is fronted by `dstack-ingress` (the Phase E pattern feedling and hermes both ship). It terminates LE-issued TLS inside the enclave (ACME DNS-01 via Cloudflare). Tier-3 cert pinning still works — the CLI auto-discovers the raw passthrough URL from `/v1/attestation` and verifies the enclave cert there.
 

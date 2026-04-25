@@ -7,12 +7,12 @@ name: Delete Phala CVM (via EC2 relay)
 #
 # Intended use: after a cluster move (e.g. prod5 → prod9 hivemind-pg
 # migration), once the new CVM has been fully validated end-to-end, use
-# this workflow to retire the old one. Defaults are populated for the
-# prod5 hivemind-pg CVM that was migrated to prod9 on 2026-04-25.
+# this workflow to retire the old one. The prod5 hivemind-pg CVM that
+# kicked this workflow into existence was deleted on 2026-04-25; from
+# here on the operator must paste a real CVM app_id.
 #
 # Guards:
-#   - default cvm_id IS the prod5 pg app_id; change it if deleting
-#     something else
+#   - cvm_id has no default — operator must paste it explicitly
 #   - non-dry-run requires `confirm` input set to "DELETE" (typo guard)
 #   - workflow prints the CVM metadata before deletion so the audit log
 #     shows exactly what was destroyed
@@ -23,9 +23,9 @@ on:
   workflow_dispatch:
     inputs:
       cvm_id:
-        description: "CVM app_id to delete (40-char hex, e.g. 2181af2d... for prod5 pg)"
+        description: "CVM app_id to delete (40-char hex)"
         required: true
-        default: "2181af2d134123a46613f62a0311dd1f5af984be"
+        default: ""
       dry_run:
         description: "Plan only — fetch + print metadata, no delete."
         required: true
