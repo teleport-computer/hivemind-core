@@ -6,8 +6,9 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Release version (e.g. 1.0.0). Images will be tagged with this version."
-        required: true
+        description: "Optional extra tag (e.g. 1.0.0). Leave empty for :<short-sha> + :latest only."
+        required: false
+        default: ""
       targets:
         description: "Images to build (comma-separated: core,postgres,sql-proxy,base-sdk or all)"
         required: false
@@ -59,7 +60,7 @@ jobs:
       - uses: docker/metadata-action@v5
         id: meta
         with:
-          images: ${{ env.REGISTRY }}/${{ needs.prepare.outputs.ns }}/hivemind-agent-sdk-base
+          images: ${{ env.REGISTRY }}/${{ needs.prepare.outputs.ns }}/hivemind-agent-base
           tags: |
             type=raw,value=${{ needs.prepare.outputs.version }},enable=${{ needs.prepare.outputs.version != '' }}
             type=sha,prefix=
@@ -69,7 +70,7 @@ jobs:
         id: build
         with:
           context: agents/base
-          file: agents/base/Dockerfile.agent-sdk
+          file: agents/base/Dockerfile
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
@@ -78,7 +79,7 @@ jobs:
 
       - name: Print image info
         run: |
-          echo "### hivemind-agent-sdk-base" >> "$GITHUB_STEP_SUMMARY"
+          echo "### hivemind-agent-base" >> "$GITHUB_STEP_SUMMARY"
           echo "- **Digest:** \`${{ steps.build.outputs.digest }}\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- **Tags:** ${{ steps.meta.outputs.tags }}" >> "$GITHUB_STEP_SUMMARY"
 

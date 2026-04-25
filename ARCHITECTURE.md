@@ -334,78 +334,17 @@ Postgres tables (`_hivemind_agent_files`).
 ║  │                                                                          │  ║
 ║  │  WAL-G  (continuous backup to Cloudflare R2)                             │  ║
 ║  │                                                                          │  ║
-║  │  backup_key = getKey("/hivemind/backup")                                 │  ║
-║  │  = KDF(kms_root, [app_id, "/hivemind/backup"])                          │  ║
-║  │  = same on any CVM with same app_id (portable restore)                  │  ║
-║  │                                                                          │  ║
 ║  │  Encrypts WAL segments with libsodium before uploading to R2.           │  ║
+║  │  Backup key supplied via boot-time env var.                             │  ║
 ║  │  RPO: seconds (continuous archiving). Full base backup daily.           │  ║
 ║  │                                                                          │  ║
 ║  └──────────────────────────────────────────────────────────────────────────┘  ║
 ║                                                                                ║
 ╠════════════════════════════════════════════════════════════════════════════════╣
-║  LUKS2 ENCRYPTED DISK  (AES-XTS-256, key from KMS)                            ║
+║  LUKS2 ENCRYPTED DISK  (AES-XTS-256)                                          ║
 ║  dm-crypt encrypts every block. Postgres writes plaintext,                     ║
 ║  disk stores ciphertext. ~2-5% overhead with AES-NI.                           ║
 ╚════════════════════════════════════════════════════════════════════════════════╝
-```
-
----
-
-## Deploy Governance (Notarized Deploys)
-
-Every deploy is notarized by a monitoring TEE before the KMS releases keys.
-Auto-approves after logging and notifying — transparency log, not a gate.
-
-```
-  ┌──────────────────────────────────────────────────────────────────┐
-  │                                                                  │
-  │  BASE BLOCKCHAIN                                                 │
-  │                                                                  │
-  │  NotarizedAppAuth contract                                       │
-  │  ┌────────────────────────────────────────────────────────────┐  │
-  │  │  requestDeploy(hash) → only owner                          │  │
-  │  │    emits DeployRequested(hash, timestamp)                   │  │
-  │  │                                                            │  │
-  │  │  notarize(hash, logCID) → only notary (monitoring TEE)     │  │
-  │  │    adds hash to allowlist                                   │  │
-  │  │    emits DeployNotarized(hash, logCID, timestamp)           │  │
-  │  │                                                            │  │
-  │  │  isAppAllowed(bootInfo) → checks allowlist                  │  │
-  │  │    called by Phala's KMS via DstackKms                     │  │
-  │  └────────────────────────────────────────────────────────────┘  │
-  │                                                                  │
-  └──────────────────────────────────────────────────────────────────┘
-
-  ┌──────────────────────────────────────────────────────────────────┐
-  │                                                                  │
-  │  MONITORING TEE  (separate dstack app)                           │
-  │                                                                  │
-  │  Watches for DeployRequested events. On each:                    │
-  │    1. Log to append-only transparency log (IPFS)                 │
-  │    2. Email auditor list with compose hash + source link         │
-  │    3. Post to Telegram/Discord auditor group                     │
-  │    4. Call notarize(hash, logCID) on-chain                       │
-  │       using getKey("/notary/signer") derived private key         │
-  │                                                                  │
-  │  Notary key is credibly exclusive to this TEE:                   │
-  │    key = KDF(kms_root, [monitoring_app_id, "/notary/signer"])   │
-  │    Different code → different app_id → different key             │
-  │                                                                  │
-  │  Total time: ~10-30 seconds from request to notarize             │
-  │                                                                  │
-  └──────────────────────────────────────────────────────────────────┘
-
-  Deploy flow:
-    1. Push code → build Docker image (reproducible → deterministic hash)
-    2. requestDeploy(hash) on Base (~2 sec)
-    3. Monitoring TEE sees event → logs + emails + notarize() (~10 sec)
-    4. Restart CVM → KMS checks allowlist → releases keys → boots
-
-  What you CANNOT do:
-    - Deploy without notarize() (KMS rejects)
-    - Call notarize() yourself (wrong address)
-    - Deploy silently (emails already sent)
 ```
 
 ---
@@ -414,7 +353,7 @@ Auto-approves after logging and notifying — transparency log, not a gate.
 
 ```
   1. Boot new CVM on any host (same docker-compose → same app_id)
-  2. On boot: backup_key = getKey("/hivemind/backup") → same key
+  2. Restore supplies backup key from env var (same across CVMs)
   3. wal-g restore: download from R2 → decrypt → restore Postgres
   4. Resume normal operation + WAL archiving
 
@@ -424,50 +363,28 @@ Auto-approves after logging and notifying — transparency log, not a gate.
 
 ---
 
-## Key Derivation
-
-```
-  PHALA KMS (root of trust)
-    │
-    ├── disk_crypt_key = KDF(root, [app_id, instance_id, ...])
-    │                    Instance-specific. Dies with the host.
-    │
-    ├── backup_key = getKey("/hivemind/backup")
-    │              = KDF(root, [app_id, "/hivemind/backup"])
-    │                No instance_id. Portable across CVMs.
-    │
-    └── notary_key = getKey("/notary/signer")  (on monitoring TEE)
-                   = KDF(root, [monitoring_app_id, "/notary/signer"])
-                     Bound to monitoring TEE's compose hash.
-```
-
----
-
 ## Privacy Layers
 
 ```
-  LAYER 5: NOTARIZED DEPLOYS
-  Every code version is logged and announced before accessing data.
+  LAYER 4: MEDIATOR
+  LLM-based output audit. Strips PII, verbatim quotes.
 
-    LAYER 4: MEDIATOR
-    LLM-based output audit. Strips PII, verbatim quotes.
+    LAYER 3: BUDGET
+    Hard caps on LLM calls and tokens per query.
+    Prevents exhaustive enumeration.
 
-      LAYER 3: BUDGET
-      Hard caps on LLM calls and tokens per query.
-      Prevents exhaustive enumeration.
+      LAYER 2: SCOPE FUNCTION FIREWALL
+      Every SQL result passes through a scope function.
+      Can deny, filter, redact, or transform. Enforced by platform.
 
-        LAYER 2: SCOPE FUNCTION FIREWALL
-        Every SQL result passes through a scope function.
-        Can deny, filter, redact, or transform. Enforced by platform.
+        LAYER 1: SIMULATION + TAPE
+        Scope agent can test query agent behavior with proposed scope,
+        audit the tape, tighten constraints, revert and retry.
 
-          LAYER 1: SIMULATION + TAPE
-          Scope agent can test query agent behavior with proposed scope,
-          audit the tape, tighten constraints, revert and retry.
-
-            LAYER 0: ENCRYPTED STORAGE
-            LUKS2 disk encryption (AES-XTS-256).
-            TDX memory encryption.
-            Operator cannot read disk or RAM.
+          LAYER 0: ENCRYPTED STORAGE
+          LUKS2 disk encryption (AES-XTS-256).
+          TDX memory encryption.
+          Operator cannot read disk or RAM.
 ```
 
 ---
@@ -525,10 +442,8 @@ Auto-approves after logging and notifying — transparency log, not a gate.
 | Default agents (4) | ~400 | scope, query, mediator, index — all Claude Agent SDK |
 | Agent SDK base image | ~17 | Python 3.12 + Node.js 20 + Claude Code CLI |
 | Config/settings | ~80 | Pydantic settings with env mapping |
-| Production Postgres image | ~80 | WAL-G, supercronic, KMS key derivation |
-| Production app image | ~20 | Boot script with KMS-derived DB password |
-| Monitoring TEE | ~150 | Event watcher, IPFS logging, on-chain notarization |
-| NotarizedAppAuth contract | ~80 | Solidity on Base, deploy allowlist |
+| Production Postgres image | ~80 | WAL-G, supercronic, env-var secrets |
+| Production app image | ~20 | Boot script with env-var DB password |
 | WAL-G backup/restore | ~60 | Continuous archiving + R2 restore script |
 
 ---
@@ -567,12 +482,12 @@ agents/
   examples/            Example agents (simple-query, tool-loop, etc.)
 
 deploy/
-  boot.sh              CVM entrypoint (KMS key derivation, wait for Postgres)
-  Dockerfile           Production app image
-  docker-compose.yaml  Production dstack deployment (app + Postgres)
-  docker-compose.dev.yml  Local dev Postgres
-  contracts/           NotarizedAppAuth.sol (Solidity on Base)
-  monitor/             Monitoring TEE (event watcher + notarizer)
-  postgres/            Production Postgres image (WAL-G, supercronic, KMS)
-  restore.sh           Disaster recovery (WAL-G restore from R2)
+  boot.sh              CVM entrypoint (env-var secrets, wait for Postgres)
+  Dockerfile           Production app image (built by CI → GHCR)
+  phala/               Phala Cloud two-CVM deploy (postgres + core compose files, deploy.sh)
+  postgres/            Production Postgres image (WAL-G, supercronic, sql-proxy sidecar, restore.sh)
+
+scripts/
+  quickstart.sh             One-command dev loop (builds agents, boots Postgres, demos a query)
+  docker-compose.dev.yml    Local Postgres for `uv run python -m hivemind.server`
 ```

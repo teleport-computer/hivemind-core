@@ -24,6 +24,12 @@ class QueryRequest(BaseModel):
     scope_agent_id: str | None = None
     mediator_agent_id: str | None = None
     max_tokens: int | None = Field(default=None, ge=1)
+    # Optional privacy/utility policy the scope agent should enforce.
+    # Example: "Only allow conversations from the last 30 days; block
+    # content from before that window." The scope agent reads this as
+    # context and designs its scope_fn to honor it. If None, scope uses
+    # generic row-transformation defaults.
+    policy: str | None = None
 
     @model_validator(mode="before")
     @classmethod
@@ -82,3 +88,4 @@ class HealthResponse(BaseModel):
     status: str = "ok"
     table_count: int
     version: str
+    artifact_retention_seconds: int = 86400

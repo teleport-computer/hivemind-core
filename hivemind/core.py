@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from inspect import isawaitable
 
@@ -5,6 +6,7 @@ from .config import Settings
 from .db import Database, connect
 from .pipeline import Pipeline
 from .sandbox.agents import AgentStore
+from .sandbox.artifact_store import ArtifactStore
 from .sandbox.backend import _create_runner
 from .sandbox.models import AgentConfig, SandboxSettings
 from .sandbox.run_store import RunStore
@@ -15,20 +17,35 @@ logger = logging.getLogger(__name__)
 
 
 class Hivemind:
-    """Thin wrapper: database + pipeline + health."""
+    """Thin wrapper: database + pipeline + health.
 
-    def __init__(self, settings: Settings):
+    `tenant_db` (optional) narrows the DB connection to a specific tenant
+    database — the sql_proxy routes by X-Tenant-DB header, or a direct
+    psycopg DSN has its dbname swapped. `tenant_id` stamps docker image
+    tags so per-tenant agent images don't collide on a shared daemon.
+    """
+
+    def __init__(
+        self,
+        settings: Settings,
+        *,
+        tenant_db: str | None = None,
+        tenant_id: str | None = None,
+    ):
         self.settings = settings
-        self.db = connect(settings.database_url, proxy_key=settings.sql_proxy_key)
+        self.tenant_id = tenant_id
+        self.tenant_db = tenant_db
+        self.db = connect(
+            settings.database_url,
+            proxy_key=settings.sql_proxy_key,
+            tenant_db=tenant_db,
+        )
         self.agent_store = AgentStore(self.db)
         self.run_store = RunStore(self.db)
-        self.s3_uploader = None
+        self.artifact_store = ArtifactStore(self.db)
         self.pipeline: Pipeline | None = None
+        self._retention_task: asyncio.Task | None = None
         try:
-            if settings.s3_bucket:
-                from .s3 import S3Uploader
-                self.s3_uploader = S3Uploader(settings)
-
             self._bootstrap_default_agents()
             self.pipeline = Pipeline(settings, self.db, self.agent_store)
 
@@ -46,6 +63,51 @@ class Hivemind:
                     "Database close failed after init error: %s", close_error
                 )
             raise
+
+    def start_retention_sweeper(self) -> None:
+        """Kick off the periodic TTL sweep for artifacts + run output.
+
+        Called from the FastAPI lifespan startup hook so the task lives on
+        the server's event loop. Safe to call multiple times (idempotent).
+        """
+        if self._retention_task is not None and not self._retention_task.done():
+            return
+        self._retention_task = asyncio.create_task(self._retention_loop())
+
+    async def stop_retention_sweeper(self) -> None:
+        if self._retention_task is None:
+            return
+        self._retention_task.cancel()
+        try:
+            await self._retention_task
+        except (asyncio.CancelledError, Exception):
+            pass
+        self._retention_task = None
+
+    async def _retention_loop(self) -> None:
+        ttl = self.settings.artifact_retention_seconds
+        interval = self.settings.artifact_sweep_interval_seconds
+        # Run once immediately so a restart after downtime catches up.
+        while True:
+            try:
+                deleted = await asyncio.to_thread(
+                    self.artifact_store.delete_expired, ttl
+                )
+                scrubbed = await asyncio.to_thread(
+                    self.run_store.scrub_expired, ttl
+                )
+                if deleted or scrubbed:
+                    logger.info(
+                        "Retention sweep: deleted %d artifacts, "
+                        "scrubbed %d runs (ttl=%ds)",
+                        deleted, scrubbed, ttl,
+                    )
+            except Exception as e:
+                logger.warning("Retention sweep failed: %s", e)
+            try:
+                await asyncio.sleep(interval)
+            except asyncio.CancelledError:
+                return
 
     def _build_sandbox_settings(self) -> SandboxSettings:
         return build_sandbox_settings(self.settings)
@@ -138,11 +200,13 @@ class Hivemind:
         return {
             "status": "ok",
             "table_count": table_count,
+            "artifact_retention_seconds": self.settings.artifact_retention_seconds,
             "version": APP_VERSION,
         }
 
     async def close(self) -> None:
         """Release network/database resources owned by this instance."""
+        await self.stop_retention_sweeper()
         try:
             if self.pipeline is not None:
                 llm_close = getattr(self.pipeline.llm_client, "close", None)

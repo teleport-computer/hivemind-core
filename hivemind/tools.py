@@ -57,11 +57,18 @@ def _is_select_only(sql: str) -> bool:
 
     Walks the full AST including CTEs and subqueries to reject DML hidden
     inside otherwise-SELECT statements.
+
+    Uses the postgres dialect so PostgreSQL-specific operators (``~``, ``~*``,
+    ``!~``, ``!~*``, ``::`` casts, array/JSON operators, etc.) parse cleanly.
+    Without this, reconnaissance queries from the scope agent fail parsing
+    and the tool loops rejecting otherwise-legitimate SELECTs.
     """
     import sqlglot
 
     try:
-        statements = sqlglot.parse(sql, error_level=sqlglot.ErrorLevel.IGNORE)
+        statements = sqlglot.parse(
+            sql, dialect="postgres", error_level=sqlglot.ErrorLevel.IGNORE
+        )
     except sqlglot.errors.ParseError:
         return False
 
@@ -89,11 +96,17 @@ def _is_select_only(sql: str) -> bool:
 
 
 def _references_internal_tables(sql: str) -> bool:
-    """Check if SQL references _hivemind_* internal tables using AST parsing."""
+    """Check if SQL references _hivemind_* internal tables using AST parsing.
+
+    Uses the postgres dialect so PG-specific syntax doesn't trip a ParseError
+    which would flip this to True (fail-closed) and incorrectly deny the query.
+    """
     import sqlglot
 
     try:
-        for stmt in sqlglot.parse(sql, error_level=sqlglot.ErrorLevel.WARN):
+        for stmt in sqlglot.parse(
+            sql, dialect="postgres", error_level=sqlglot.ErrorLevel.WARN
+        ):
             if stmt is None:
                 continue
             for table in stmt.find_all(sqlglot.exp.Table):

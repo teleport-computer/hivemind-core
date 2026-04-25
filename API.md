@@ -8,13 +8,26 @@ Base URL (default): `http://localhost:8100`
 
 ## Authentication
 
-If `HIVEMIND_API_KEY` is set, every public endpoint except `GET /v1/health` requires:
+Hivemind-core is multi-tenant. Two kinds of credentials:
+
+**Tenant API key** (`hmk_...`) — required for every public endpoint except
+`GET /v1/health` and `GET /v1/healthz`. Routes to the tenant's isolated
+Postgres database.
 
 ```http
-Authorization: Bearer <your-api-key>
+Authorization: Bearer hmk_<tenant-api-key>
 ```
 
-Startup safety rule: if `HIVEMIND_HOST` is non-local (not `127.0.0.1`, `localhost`, or `::1`), `HIVEMIND_API_KEY` must be set.
+**Admin key** (operator-only, set via `HIVEMIND_ADMIN_KEY`) — required for
+`/v1/admin/tenants/*`. Can provision/list/delete tenants but cannot read
+tenant data through this API.
+
+```http
+Authorization: Bearer <admin-key>
+```
+
+To mint a tenant key: `POST /v1/admin/tenants` (see below) or `hivemind
+admin create-tenant`.
 
 ## Conventions And Gotchas
 
@@ -177,6 +190,58 @@ curl -X POST http://localhost:8100/v1/index \
 - `400` no index agent configured, agent not found, invalid agent output
 - `401` unauthorized (when API key enabled)
 - `422` validation errors (for example empty `data`, `max_tokens <= 0`)
+
+### `POST /v1/admin/tenants` (admin-only)
+
+Provision a new tenant. Creates an isolated Postgres database and returns
+the fresh API key **exactly once** — the server stores only its SHA-256
+hash. Save the key before the response is discarded.
+
+**Request body**
+
+```json
+{"name": "alice-corp"}
+```
+
+**Response 200**
+
+```json
+{
+  "tenant_id": "t_abc123def456",
+  "api_key": "hmk_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+  "db_name": "tenant_t_abc123def456",
+  "name": "alice-corp"
+}
+```
+
+### `POST /v1/admin/tenants/register` (admin-only)
+
+Adopt a pre-populated Postgres database as a tenant (does NOT touch the DB
+itself — assumes tables are already set up).
+
+**Request body**
+
+```json
+{"name": "adopted", "db_name": "my_existing_db", "api_key": null}
+```
+
+Set `api_key` to reuse a specific key, or omit to generate a fresh one.
+
+### `GET /v1/admin/tenants` (admin-only)
+
+List all tenants with metadata (id, name, db_name, created_at, suspended).
+Never returns plaintext API keys.
+
+### `DELETE /v1/admin/tenants/{tenant_id}` (admin-only)
+
+Drop the tenant's database, evict from cache, and remove the control-plane
+row. Irreversible.
+
+### `GET /v1/healthz`
+
+Unauthenticated liveness probe. Returns `{"ok": true}` when the server
+process is up — does not touch the database. Use for load-balancer
+healthchecks where you don't want to expose tenant-metadata counts.
 
 ### `GET /v1/admin/schema`
 

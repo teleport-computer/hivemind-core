@@ -15,8 +15,34 @@ venv/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.coverage
 .DS_Store
 .claude
+.hivemind/
 tests/artifacts/
 
 hivemind-core-amiller-cvm-deploy-demo
+
+bench/results/
+autoresearch/experiments/
+/tmp/iter*_*.txt
+*_bench.log
+
+# scope-claw build context (assembled by build_prep.sh)
+agents/default-scope-claw/claw
+agents/default-scope-claw/mcp_stdio_proxy.py
+agents/default-scope-claw/default-scope-agent.py
+
+# Research phase — raw third-party datasets (not committed; see bench/sources/README.md)
+bench/sources/opp115/
+bench/sources/privaci_bench/
+bench/sources/confaide/
+bench/sources/__pycache__/
+
+# Agent backup files (kept in git history, not in working tree)
+agents/*/*.py.bak
+deploy/contracts/.env
+deploy/contracts/broadcast/
+deploy/contracts/cache/
+deploy/contracts/out/
+deploy/contracts/lib/

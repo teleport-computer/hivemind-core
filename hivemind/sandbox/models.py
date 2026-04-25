@@ -37,7 +37,7 @@ class SandboxSettings(BaseModel):
 
     # Shared limits
     global_max_llm_calls: int = Field(default=50, ge=1)
-    global_max_tokens: int = Field(default=200_000, ge=1)
+    global_max_tokens: int = Field(default=300_000, ge=1)
     global_timeout_seconds: int = Field(default=300, ge=1)
 
 
@@ -134,19 +134,89 @@ class SimulateResponse(BaseModel):
     tape: list[dict] | None = None  # recorded tape from this run
 
 
-# ── S3 upload models (query agents with run tracking) ──
+class SimulateBatchRequest(BaseModel):
+    """Request to POST /sandbox/simulate_batch — run multiple scope_fn candidates concurrently."""
+
+    query_agent_id: str
+    prompt: str
+    candidates: list[str] = Field(..., min_length=1, max_length=3)
+    replay_tape: list[dict] | None = None
 
 
-class BridgeS3UploadRequest(BaseModel):
-    """Request from agent container to bridge POST /sandbox/s3-upload."""
+class SimulateBatchItem(BaseModel):
+    """One candidate's result from a batch simulate."""
+
+    idx: int
+    output: str = ""
+    error: str | None = None
+
+
+class SimulateBatchResponse(BaseModel):
+    """Response from POST /sandbox/simulate_batch."""
+
+    results: list[SimulateBatchItem] = Field(default_factory=list)
+
+
+# ── Verify scope_fn models (scope agents only) ──
+
+
+class ScopeTestCase(BaseModel):
+    """One synthetic test for a candidate scope_fn."""
+
+    sql: str
+    params: list = Field(default_factory=list)
+    rows: list[dict] = Field(default_factory=list)
+    expect_allow: bool | None = None  # None = don't assert, just record outcome
+    label: str = ""  # human-readable name
+
+
+class VerifyScopeRequest(BaseModel):
+    """Request to POST /sandbox/verify_scope_fn — compile and test a scope_fn."""
+
+    source: str
+    tests: list[ScopeTestCase] = Field(default_factory=list)
+
+
+class ScopeTestResult(BaseModel):
+    """Outcome of running a single test case against a compiled scope_fn."""
+
+    label: str = ""
+    sql: str
+    allow: bool | None = None
+    error: str | None = None
+    rows_returned: int = 0
+    expected_allow: bool | None = None
+    passed: bool | None = None  # None if no expectation provided
+
+
+class VerifyScopeResponse(BaseModel):
+    """Response from POST /sandbox/verify_scope_fn."""
+
+    compiles: bool
+    compile_error: str | None = None
+    all_tests_passed: bool = True  # True if every test with an expectation met it
+    results: list[ScopeTestResult] = Field(default_factory=list)
+
+
+# ── Artifact upload models (query agents with run tracking) ──
+
+
+class BridgeArtifactUploadRequest(BaseModel):
+    """Request from agent container to bridge POST /sandbox/artifact-upload."""
 
     filename: str
     content_base64: str  # Base64-encoded file content
     content_type: str = "application/octet-stream"
 
 
-class BridgeS3UploadResponse(BaseModel):
-    """Response from bridge POST /sandbox/s3-upload."""
+class BridgeArtifactUploadResponse(BaseModel):
+    """Response from bridge POST /sandbox/artifact-upload.
 
-    s3_url: str
+    Artifacts are stored in the server's Postgres and fetched via GET path.
+    Retention is the server-wide artifact TTL (default 24h).
+    """
+
+    path: str  # e.g. /v1/query/runs/{run_id}/artifacts/{filename}
+    size_bytes: int
+    retention_seconds: int
     error: str | None = None

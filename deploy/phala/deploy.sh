@@ -1,203 +1,199 @@
 #!/bin/bash
 set -euo pipefail
 
-# deploy.sh — Resolve image digests and deploy to Phala Cloud
+# deploy.sh — safe Phala CVM redeploy cycle for hivemind-core + hivemind-pg.
 #
-# Two CVMs: postgres (DB + SQL proxy) and core (hivemind + Docker agents)
+# Root cause this solves (observed 2026-04-25): `phala deploy --cvm-id`
+# REPLACES sealed environment variables with whatever is in the -e file.
+# If a key referenced by compose is missing from -e, the container boot
+# fails with `ERR_INTERPOLATION services.<svc>.environment.<VAR>:
+# required variable <VAR> is missing a value`. The gateway then serves
+# the empty-body → curl HTTP 000 symptom we've hit 3 times now.
+#
+# Guardrails:
+#  - pre-check: every `${VAR:?...}` in the compose file MUST exist in -e
+#  - post-deploy: always push sealed envs again + restart
+#  - health poll with real timeout + serial-logs dump on failure (no
+#    silent hang, no "seemed to work but actually didn't")
 #
 # Usage:
-#   ./deploy/phala/deploy.sh                    # deploy all CVMs
-#   ./deploy/phala/deploy.sh core               # deploy only core
-#   ./deploy/phala/deploy.sh postgres            # deploy only postgres
+#   deploy/phala/deploy.sh core       # redeploy core only
+#   deploy/phala/deploy.sh postgres   # redeploy postgres only
+#   deploy/phala/deploy.sh all        # both (default)
 #
-# Prerequisites:
-#   - phala CLI authenticated (phala login)
-#   - GHCR_TOKEN env var set (PAT with read:packages scope)
-#     OR already logged into ghcr.io via docker login
+# Env:
+#   IMAGE_TAG        override tag pin baked into compose (optional)
+#   HEALTH_TIMEOUT   seconds to wait for healthy (default 300)
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
-REGISTRY="ghcr.io"
-NAMESPACE="account-link"
-TAG="${IMAGE_TAG:-latest}"
+ENV_FILE="${SCRIPT_DIR}/.env"
+HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-300}"
 
-# CVM app IDs (update these after first deploy)
-CVM_CORE="37d4e4242a99cde0b9066dd81f854cb09e164f38"
-CVM_POSTGRES="2181af2d134123a46613f62a0311dd1f5af984be"
+CORE_NAME="hivemind-core"
+CORE_COMPOSE="${SCRIPT_DIR}/docker-compose.core.yaml"
+CORE_HEALTH_PATH="/v1/attestation"
 
-# ── Digest resolution ──
+PG_NAME="hivemind-pg"
+PG_COMPOSE="${SCRIPT_DIR}/docker-compose.postgres.yaml"
+PG_HEALTH_PATH="/health"
 
-resolve_digest() {
-    local image="$1"
-    local tag="${2:-$TAG}"
-    local full="${REGISTRY}/${NAMESPACE}/${image}"
+# ── Helpers ──
 
-    # Try docker manifest inspect (works if logged in to ghcr.io)
-    local digest
-    digest=$(docker manifest inspect "${full}:${tag}" 2>/dev/null \
-        | python3 -c "
-import json, sys
-m = json.load(sys.stdin)
-# OCI index: find linux/amd64 manifest digest
-if 'manifests' in m:
-    for mf in m['manifests']:
-        p = mf.get('platform', {})
-        if p.get('os') == 'linux' and p.get('architecture') == 'amd64':
-            print(mf['digest']); break
-    else:
-        # fallback: first manifest
-        print(m['manifests'][0]['digest'])
-elif 'config' in m:
-    # single-arch manifest — use the index digest
-    print('${tag}')
-" 2>/dev/null) || true
+log()  { printf "\033[0;36m[deploy]\033[0m %s\n" "$*"; }
+warn() { printf "\033[0;33m[deploy]\033[0m %s\n" "$*" >&2; }
+die()  { printf "\033[0;31m[deploy ERROR]\033[0m %s\n" "$*" >&2; exit 1; }
 
-    if [ -z "$digest" ]; then
-        echo "WARNING: Could not resolve digest for ${full}:${tag}, using tag only" >&2
-        echo "${full}:${tag}"
-    else
-        echo "${full}:${tag}@${digest}"
+# Extract every `${VAR:?...}` reference from a compose file — these
+# are the hard-required envs. Default-fallback forms `${VAR:-...}`
+# are intentionally excluded.
+required_vars() {
+    local compose="$1"
+    grep -Eho '\$\{[A-Z_][A-Z0-9_]*:\?' "${compose}" \
+        | sed -E 's/^\$\{([A-Z_][A-Z0-9_]*):\?.*/\1/' \
+        | sort -u
+}
+
+# Variables present in the env file (supports KEY=value + export KEY=value).
+env_vars() {
+    local env_file="$1"
+    grep -E '^[[:space:]]*(export[[:space:]]+)?[A-Z_][A-Z0-9_]*=' "${env_file}" \
+        | sed -E 's/^[[:space:]]*(export[[:space:]]+)?([A-Z_][A-Z0-9_]*)=.*/\2/' \
+        | sort -u
+}
+
+# Bail out BEFORE touching the CVM if the env file is missing any
+# hard-required compose var. This is what catches the "silently
+# dropped admin key" failure mode.
+precheck_env() {
+    local compose="$1"
+    local env_file="$2"
+
+    [ -f "${compose}" ]  || die "compose file not found: ${compose}"
+    [ -f "${env_file}" ] || die "env file not found: ${env_file}"
+
+    local missing
+    missing=$(comm -23 <(required_vars "${compose}") <(env_vars "${env_file}"))
+    if [ -n "${missing}" ]; then
+        warn "env file is MISSING these hard-required vars:"
+        printf "  %s\n" ${missing} >&2
+        die "fix ${env_file} before redeploying (aborted before any CVM changes)"
     fi
+    log "pre-check OK: ${env_file} satisfies every \${VAR:?...} in ${compose}"
 }
 
-# ── Pin image in compose file ──
-
-pin_compose() {
-    local compose_file="$1"
-    local image_name="$2"
-    local pinned_ref="$3"
-
-    # Create a temp copy with pinned image reference
-    local tmp="${compose_file}.pinned"
-    sed "s|${REGISTRY}/${NAMESPACE}/${image_name}:${TAG}|${pinned_ref}|g" \
-        "${compose_file}" > "${tmp}"
-    echo "${tmp}"
-}
-
-# ── Deploy functions ──
-
-deploy_service() {
+# phala deploy (creates/updates), then explicit envs update, then restart.
+# The envs-update step is what makes this robust: `phala deploy --cvm-id`
+# drops any var not in -e; we re-seal the complete set afterwards to
+# make double-sure nothing was lost in translation.
+deploy_and_seal() {
     local name="$1"
-    local cvm_id="$2"
-    local compose_file="$3"
-    local image_name="$4"
-    local env_flag="${5:-}"
+    local compose="$2"
+    local env_file="$3"
 
-    echo ""
-    echo "--- Deploying ${name} ---"
+    log "deploying ${name} (compose=${compose})"
+    phala deploy --cvm-id "${name}" -c "${compose}" -e "${env_file}" --wait
 
-    # Resolve digest
-    echo "  Resolving digest for ${image_name}:${TAG}..."
-    local pinned
-    pinned=$(resolve_digest "${image_name}" "${TAG}")
-    echo "  Pinned: ${pinned}"
+    log "re-sealing env vars on ${name}"
+    phala envs update --cvm-id "${name}" -e "${env_file}"
 
-    # Pin compose file
-    local pinned_compose
-    pinned_compose=$(pin_compose "${compose_file}" "${image_name}" "${pinned}")
+    log "restarting ${name} to pick up re-sealed envs"
+    phala cvms restart --cvm-id "${name}" >/dev/null
+}
 
-    echo "  Compose diff:"
-    diff "${compose_file}" "${pinned_compose}" || true
+# Resolve service URL (looks up CVM app_id + builds the gateway URL).
+# If `tls_passthrough=1`, use the `-<port>s.` suffix — Phala's gateway
+# convention for TCP-passthrough routes, required when the container
+# terminates TLS itself (HIVEMIND_ENCLAVE_TLS=1).
+service_url() {
+    local name="$1"
+    local port="$2"
+    local tls_passthrough="${3:-0}"
+    local app_id
+    app_id=$(phala cvms list 2>/dev/null \
+        | awk -v n="${name}" '$2==n { print $1; exit }')
+    [ -n "${app_id}" ] || die "could not resolve app_id for ${name}"
+    local suffix=""
+    [ "${tls_passthrough}" = "1" ] && suffix="s"
+    echo "https://${app_id}-${port}${suffix}.dstack-pha-prod5.phala.network"
+}
 
-    # Deploy
-    local cmd=(phala deploy --cvm-id "${cvm_id}" -c "${pinned_compose}")
-    if [ -n "${env_flag}" ]; then
-        cmd+=(-e "${env_flag}")
+# Does this core compose have enclave TLS enabled (default or override)?
+core_tls_enabled() {
+    local compose="$1"
+    # Enabled if compose sets a truthy default for HIVEMIND_ENCLAVE_TLS
+    # (e.g. `${HIVEMIND_ENCLAVE_TLS:-1}`) OR the env file overrides it.
+    grep -qE '^[[:space:]]*HIVEMIND_ENCLAVE_TLS:[[:space:]]*\$\{HIVEMIND_ENCLAVE_TLS:-[^}]+\}' "${compose}" && return 0
+    grep -qE '^[[:space:]]*HIVEMIND_ENCLAVE_TLS=[1-9]' "${ENV_FILE}" 2>/dev/null && return 0
+    return 1
+}
+
+# Poll URL until HTTP 200 or timeout. On timeout, dump serial logs so
+# the operator can read the exact boot failure (usually the compose
+# interpolation error we're guarding against).
+wait_healthy() {
+    local name="$1"
+    local url="$2"
+    local timeout="${3:-${HEALTH_TIMEOUT}}"
+
+    log "waiting for ${name} → ${url} (timeout ${timeout}s)"
+    local started=$(date +%s)
+    local code
+    while : ; do
+        code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 8 "${url}" 2>/dev/null || echo "000")
+        if [ "${code}" = "200" ]; then
+            local elapsed=$(( $(date +%s) - started ))
+            log "${name} healthy after ${elapsed}s"
+            return 0
+        fi
+        if [ $(( $(date +%s) - started )) -ge "${timeout}" ]; then
+            warn "${name} not healthy after ${timeout}s (last code: ${code})"
+            warn "── serial logs (last 40 lines) ──"
+            phala cvms serial-logs --cvm-id "${name}" 2>/dev/null | tail -40 >&2 || true
+            die "${name} failed to become healthy — see serial logs above"
+        fi
+        sleep 5
+    done
+}
+
+# ── Per-service entry points ──
+
+deploy_core() {
+    precheck_env  "${CORE_COMPOSE}" "${ENV_FILE}"
+    deploy_and_seal "${CORE_NAME}"  "${CORE_COMPOSE}" "${ENV_FILE}"
+    local url tls=0
+    if core_tls_enabled "${CORE_COMPOSE}"; then
+        tls=1
+        log "HIVEMIND_ENCLAVE_TLS enabled — health will poll -8100s. (TCP passthrough)"
     fi
-
-    echo "  Running: ${cmd[*]}"
-    "${cmd[@]}"
-
-    # Cleanup temp file
-    rm -f "${pinned_compose}"
-    echo "  ${name} deployed"
+    url=$(service_url "${CORE_NAME}" 8100 "${tls}")
+    wait_healthy "${CORE_NAME}" "${url}${CORE_HEALTH_PATH}"
 }
 
 deploy_postgres() {
-    # Postgres compose has two images: db + sql-proxy
-    local compose="${SCRIPT_DIR}/docker-compose.postgres.yaml"
-
-    echo ""
-    echo "--- Deploying postgres ---"
-
-    local pg_pinned sql_pinned
-    echo "  Resolving digests..."
-    pg_pinned=$(resolve_digest "hivemind-postgres" "${TAG}")
-    sql_pinned=$(resolve_digest "hivemind-sql-proxy" "${TAG}")
-    echo "  postgres: ${pg_pinned}"
-    echo "  sql-proxy: ${sql_pinned}"
-
-    local tmp="${compose}.pinned"
-    sed \
-        -e "s|${REGISTRY}/${NAMESPACE}/hivemind-postgres:${TAG}|${pg_pinned}|g" \
-        -e "s|${REGISTRY}/${NAMESPACE}/hivemind-sql-proxy:${TAG}|${sql_pinned}|g" \
-        "${compose}" > "${tmp}"
-
-    echo "  Compose diff:"
-    diff "${compose}" "${tmp}" || true
-
-    phala deploy --cvm-id "${CVM_POSTGRES}" -c "${tmp}" -e "${SCRIPT_DIR}/.env"
-    rm -f "${tmp}"
-    echo "  postgres deployed"
+    precheck_env  "${PG_COMPOSE}" "${ENV_FILE}"
+    deploy_and_seal "${PG_NAME}"  "${PG_COMPOSE}" "${ENV_FILE}"
+    local url
+    url=$(service_url "${PG_NAME}" 8080)
+    wait_healthy "${PG_NAME}" "${url}${PG_HEALTH_PATH}"
 }
 
-deploy_core() {
-    deploy_service "core" "${CVM_CORE}" \
-        "${SCRIPT_DIR}/docker-compose.core.yaml" \
-        "hivemind-core" \
-        "${SCRIPT_DIR}/.env"
-}
-
-# ── Verify health ──
-
-check_health() {
-    local name="$1"
-    local url="$2"
-
-    local status
-    status=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "${url}" 2>/dev/null) || status="000"
-    if [ "${status}" = "200" ]; then
-        echo "  ${name}: healthy (${url})"
-    else
-        echo "  WARNING ${name}: HTTP ${status} (${url})"
-    fi
-}
-
-verify_all() {
-    echo ""
-    echo "--- Health checks ---"
-    check_health "postgres/sql-proxy" "https://${CVM_POSTGRES}-8080.dstack-pha-prod5.phala.network/health"
-    check_health "core"     "https://${CVM_CORE}-8100.dstack-pha-prod5.phala.network/v1/health"
-}
-
-# ── Entry point ──
+# ── CLI ──
 
 TARGETS=("${@:-all}")
-if [ "${#TARGETS[@]}" -eq 0 ] || [ "${TARGETS[0]}" = "all" ]; then
-    TARGETS=(postgres core)
-fi
+[ "${#TARGETS[@]}" -eq 0 ] && TARGETS=(all)
+[ "${TARGETS[0]}" = "all" ] && TARGETS=(postgres core)
 
-echo "Deploying: ${TARGETS[*]}"
-echo "   Tag: ${TAG}"
+log "targets: ${TARGETS[*]}"
+log "env file: ${ENV_FILE}"
 
-for target in "${TARGETS[@]}"; do
-    case "${target}" in
-        core)      deploy_core ;;
-        postgres)  deploy_postgres ;;
-        *)
-            echo "Unknown target: ${target}"
-            echo "Valid targets: core, postgres, all"
-            exit 1
-            ;;
+for t in "${TARGETS[@]}"; do
+    case "${t}" in
+        core)     deploy_core ;;
+        postgres) deploy_postgres ;;
+        *) die "unknown target '${t}' — expected one of: core postgres all" ;;
     esac
 done
 
-# Wait a bit for CVMs to restart, then verify
-echo ""
-echo "Waiting 30s for CVMs to restart..."
-sleep 30
-verify_all
-
-echo ""
-echo "Deployment complete!"
+log "deployment complete"

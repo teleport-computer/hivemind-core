@@ -13,7 +13,7 @@ from uuid import uuid4
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from pydantic import ValidationError
 
 from .config import Settings
@@ -28,6 +28,7 @@ from .models import (
     StoreResponse,
 )
 from .sandbox.settings import build_sandbox_settings
+from .tenants import TenantRegistry
 from .version import APP_VERSION
 
 logger = logging.getLogger(__name__)
@@ -42,6 +43,18 @@ _IGNORED_TAR_TYPES = {
     tarfile.GNUTYPE_LONGNAME,
     tarfile.GNUTYPE_LONGLINK,
 }
+
+def _tenant_image_tag(tenant_id: str | None, agent_id: str) -> str:
+    """Scope docker image tags by tenant so shared daemons don't collide.
+
+    Tenant IDs are of the form ``t_<hex>`` (see tenants.py). Returns
+    ``hivemind-agent-<tenant_id>-<agent_id>:latest`` when tenant_id is
+    present, else an unscoped tag (tests / CLI-only paths).
+    """
+    if tenant_id:
+        return f"hivemind-agent-{tenant_id}-{agent_id}:latest"
+    return f"hivemind-agent-{agent_id}:latest"
+
 
 MAX_UPLOAD_SIZE = 50 * 1024 * 1024  # 50 MB compressed archive bytes
 MAX_UPLOAD_TAR_MEMBERS = 2_000
@@ -167,10 +180,40 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        hm = Hivemind(settings)
-        app.state.hivemind = hm
+        # Fetch TDX quote + measurements for /v1/attestation. Cheap,
+        # cached for process lifetime; falls back to ready=false outside
+        # a TEE so local dev boots normally.
+        try:
+            from . import attestation
+            await asyncio.to_thread(attestation.bootstrap)
+        except Exception as e:
+            logger.warning("attestation bootstrap raised: %s", e)
+
+        # Kick off agent-base image provisioning in the background — do
+        # NOT block HTTP readiness on it. GHCR pull can fail (private
+        # repo, network blip) and fall back to a multi-minute inline
+        # Dockerfile build that will OOM-kill a 2GB CVM. When that ran
+        # under `await`, lifespan never completed and uvicorn served
+        # "Empty reply from server" until the whole container restart-
+        # looped. Uploading agents before this task completes returns
+        # the usual "agent-base not present" error — acceptable vs. a
+        # hung control plane.
+        async def _bootstrap_agent_base():
+            try:
+                from .agent_base_bootstrap import ensure_agent_base_image
+                await asyncio.to_thread(ensure_agent_base_image)
+            except Exception as e:
+                logger.warning("agent-base bootstrap raised: %s", e)
+
+        agent_base_task = asyncio.create_task(_bootstrap_agent_base())
+
+        registry = TenantRegistry(settings)
+        app.state.registry = registry
+        app.state.agent_base_task = agent_base_task
         yield
-        await hm.close()
+        # Close per-tenant Hivemind instances + control DB.
+        await asyncio.to_thread(registry.close)
+        agent_base_task.cancel()
 
     app = FastAPI(title="Hivemind Core", version=APP_VERSION, lifespan=lifespan)
 
@@ -187,27 +230,206 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             allow_headers=["*"],
         )
 
-    def get_hivemind(request: Request) -> Hivemind:
-        return request.app.state.hivemind
+    def _registry(request: Request) -> TenantRegistry:
+        return request.app.state.registry
 
-    async def check_auth(request: Request):
-        if not settings.api_key:
-            return
+    def _bearer(request: Request) -> str:
         auth = request.headers.get("Authorization", "")
         if not auth.startswith("Bearer "):
             raise HTTPException(status_code=401, detail="Unauthorized")
-        token = auth.removeprefix("Bearer ").strip()
-        if not secrets.compare_digest(token, settings.api_key):
+        return auth.removeprefix("Bearer ").strip()
+
+    async def get_tenant_hive(request: Request) -> Hivemind:
+        """Auth + tenant resolution in one dep.
+
+        Extracts the bearer token, looks it up in the control DB, and
+        returns the caller's per-tenant Hivemind (LRU-cached). Raises
+        401 for any missing/invalid/suspended key.
+        """
+        registry = _registry(request)
+        token = _bearer(request)
+        resolved = await asyncio.to_thread(registry.resolve, token)
+        if resolved is None:
             raise HTTPException(status_code=401, detail="Unauthorized")
+        tenant_id, hm = resolved
+        request.state.tenant_id = tenant_id
+        return hm
+
+    async def check_admin(request: Request):
+        """Gate admin endpoints with the separate HIVEMIND_ADMIN_KEY."""
+        if not settings.admin_key:
+            raise HTTPException(
+                status_code=503,
+                detail="Admin API disabled (HIVEMIND_ADMIN_KEY unset)",
+            )
+        token = _bearer(request)
+        if not secrets.compare_digest(token, settings.admin_key):
+            raise HTTPException(status_code=401, detail="Unauthorized")
+
+    # ── Admin: tenant CRUD (gated by HIVEMIND_ADMIN_KEY) ──
+    #
+    # These let the operator mint per-tenant API keys. The admin NEVER
+    # sees tenant data: isolation is enforced by a separate Postgres DB
+    # per tenant and by SHA-256 key hashing in the control DB. Plaintext
+    # keys are returned ONCE at provisioning and never persisted.
+
+    @app.post("/v1/admin/tenants", dependencies=[Depends(check_admin)])
+    async def admin_create_tenant(payload: dict, request: Request):
+        name = (payload or {}).get("name", "")
+        if not isinstance(name, str) or not name.strip():
+            raise HTTPException(400, "'name' required")
+        registry = _registry(request)
+        try:
+            result = await asyncio.to_thread(registry.provision, name)
+        except RuntimeError as e:
+            raise HTTPException(503, str(e))
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        return result
+
+    @app.post(
+        "/v1/admin/tenants/register",
+        dependencies=[Depends(check_admin)],
+    )
+    async def admin_register_existing(payload: dict, request: Request):
+        """Adopt a pre-populated Postgres database as a tenant.
+
+        Body: {"name": "...", "db_name": "...", "api_key": "<optional>",
+               "tenant_id": "<optional t_hex>"}.
+        Does NOT create or modify the database — stamps the control-plane
+        row only. Pass `tenant_id` when you've already renamed the DB to
+        `tenant_<tenant_id>` and want the control row to match.
+        """
+        name = (payload or {}).get("name", "")
+        db_name = (payload or {}).get("db_name", "")
+        api_key = (payload or {}).get("api_key") or None
+        tenant_id = (payload or {}).get("tenant_id") or None
+        registry = _registry(request)
+        try:
+            result = await asyncio.to_thread(
+                registry.register_existing, name, db_name, api_key, tenant_id
+            )
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        return result
+
+    @app.post(
+        "/v1/admin/rename-database",
+        dependencies=[Depends(check_admin)],
+    )
+    async def admin_rename_database(payload: dict, request: Request):
+        """Rename a Postgres database on the backing cluster.
+
+        Body: ``{"old_name": "...", "new_name": "..."}``. Intended for
+        one-shot migrations (e.g., renaming the legacy ``hivemind`` DB to
+        ``tenant_t_<hex>`` before adopting it with
+        ``/v1/admin/tenants/register``). Does NOT update control-plane
+        rows — call ``/v1/admin/tenants/register`` after renaming.
+        """
+        old_name = (payload or {}).get("old_name", "")
+        new_name = (payload or {}).get("new_name", "")
+        if not old_name or not new_name:
+            raise HTTPException(400, "'old_name' and 'new_name' required")
+        registry = _registry(request)
+        admin = registry._pg_admin
+        if admin is None:
+            raise HTTPException(
+                503,
+                "rename requires HIVEMIND_SQL_PROXY_ADMIN_KEY (HTTP deploys)",
+            )
+        try:
+            await asyncio.to_thread(admin.rename_database, old_name, new_name)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        except RuntimeError as e:
+            # sql_proxy returned an error — surface it verbatim.
+            raise HTTPException(400, str(e))
+        return {"status": "ok", "old_name": old_name, "new_name": new_name}
+
+    @app.get("/v1/admin/tenants", dependencies=[Depends(check_admin)])
+    async def admin_list_tenants(request: Request):
+        registry = _registry(request)
+        tenants = await asyncio.to_thread(registry.list_tenants)
+        return {"tenants": tenants}
+
+    @app.post(
+        "/v1/admin/migrate-to-roles",
+        dependencies=[Depends(check_admin)],
+    )
+    async def admin_migrate_to_roles(request: Request):
+        """Retrofit per-tenant Postgres roles onto pre-existing tenant DBs.
+
+        Idempotent. Required once after upgrading to the Layer-1 build of
+        the SQL proxy; tenants provisioned after the upgrade already have
+        roles. Returns one result dict per tenant DB encountered.
+        """
+        registry = _registry(request)
+        admin = registry._pg_admin
+        if admin is None:
+            raise HTTPException(
+                503,
+                "migrate-to-roles requires HIVEMIND_SQL_PROXY_ADMIN_KEY "
+                "(HTTP deploys)",
+            )
+        try:
+            results = await asyncio.to_thread(admin.migrate_tenants_to_roles)
+        except RuntimeError as e:
+            raise HTTPException(400, str(e))
+        return {"status": "ok", "results": results}
+
+    @app.delete(
+        "/v1/admin/tenants/{tenant_id}",
+        dependencies=[Depends(check_admin)],
+    )
+    async def admin_delete_tenant(tenant_id: str, request: Request):
+        registry = _registry(request)
+        try:
+            await asyncio.to_thread(registry.delete, tenant_id)
+        except KeyError:
+            raise HTTPException(404, f"tenant '{tenant_id}' not found")
+        return {"status": "ok", "tenant_id": tenant_id}
+
+    # ── Tenant: self-service key rotation ──
+    #
+    # Intended as a mandatory first step: the admin who creates a tenant
+    # temporarily sees the plaintext key (API response). The tenant rotates
+    # it immediately on first use to cut the admin out of the trust loop.
+
+    @app.post("/v1/tenant/rotate-key")
+    async def tenant_rotate_key(
+        request: Request, hm: Hivemind = Depends(get_tenant_hive),
+    ):
+        tenant_id = request.state.tenant_id
+        registry = _registry(request)
+        try:
+            result = await asyncio.to_thread(registry.rotate_key, tenant_id)
+        except KeyError:
+            raise HTTPException(404, f"tenant '{tenant_id}' not found")
+        return result
+
+    # ── Liveness (unauthed, no tenant scope) ──
+
+    @app.get("/v1/healthz")
+    async def healthz():
+        return {"status": "ok", "version": APP_VERSION}
+
+    # ── Remote attestation (unauthed; pattern from feedling-mcp-v1) ──
+    # The bundle is public — anyone holding Intel's root CA can verify
+    # the quote. Gating it would create a chicken-and-egg: the CLI needs
+    # to know it trusts this CVM before it can authenticate.
+
+    @app.get("/v1/attestation")
+    async def attestation_endpoint():
+        from . import attestation as _att
+        return _att.get_bundle()
 
     # ── Pipeline endpoints ──
 
     @app.post(
         "/v1/store",
         response_model=StoreResponse,
-        dependencies=[Depends(check_auth)],
     )
-    async def store(req: StoreRequest, hm: Hivemind = Depends(get_hivemind)):
+    async def store(req: StoreRequest, hm: Hivemind = Depends(get_tenant_hive)):
         try:
             return await hm.pipeline.run_store(req)
         except ValueError as e:
@@ -216,9 +438,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.post(
         "/v1/query",
         response_model=QueryResponse,
-        dependencies=[Depends(check_auth)],
     )
-    async def query(req: QueryRequest, hm: Hivemind = Depends(get_hivemind)):
+    async def query(req: QueryRequest, hm: Hivemind = Depends(get_tenant_hive)):
         try:
             return await hm.pipeline.run_query(req)
         except ValueError as e:
@@ -229,11 +450,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     _pending_queries: dict[str, dict] = {}
 
-    @app.post("/v1/query/submit", dependencies=[Depends(check_auth)])
-    async def submit_query(req: QueryRequest, hm: Hivemind = Depends(get_hivemind)):
+    @app.post("/v1/query/submit")
+    async def submit_query(req: QueryRequest, hm: Hivemind = Depends(get_tenant_hive)):
         """Submit a query for async processing. Returns a run_id to poll."""
         run_id = uuid4().hex[:12]
-        _pending_queries[run_id] = {"status": "running", "result": None, "error": None}
+        _pending_queries[run_id] = {
+            "status": "running",
+            "result": None,
+            "error": None,
+            "tenant_id": hm.tenant_id,
+        }
 
         async def _run():
             try:
@@ -242,34 +468,38 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     "status": "completed",
                     "result": result.model_dump(),
                     "error": None,
+                    "tenant_id": hm.tenant_id,
                 }
             except Exception as e:
                 _pending_queries[run_id] = {
                     "status": "failed",
                     "result": None,
                     "error": str(e),
+                    "tenant_id": hm.tenant_id,
                 }
 
         asyncio.create_task(_run())
         return {"run_id": run_id, "status": "running"}
 
-    @app.get("/v1/query/runs/{run_id}", dependencies=[Depends(check_auth)])
-    async def get_query_status(run_id: str):
+    @app.get("/v1/query/runs/{run_id}")
+    async def get_query_status(
+        run_id: str, hm: Hivemind = Depends(get_tenant_hive)
+    ):
         """Poll the status of an async query."""
         entry = _pending_queries.get(run_id)
-        if not entry:
+        if not entry or entry.get("tenant_id") != hm.tenant_id:
             raise HTTPException(404, "Query run not found")
+        payload = {k: v for k, v in entry.items() if k != "tenant_id"}
         return JSONResponse(
-            content={"run_id": run_id, **entry},
+            content={"run_id": run_id, **payload},
             headers={"Cache-Control": "no-cache, no-store"},
         )
 
     @app.post(
         "/v1/index",
         response_model=IndexResponse,
-        dependencies=[Depends(check_auth)],
     )
-    async def index(req: IndexRequest, hm: Hivemind = Depends(get_hivemind)):
+    async def index(req: IndexRequest, hm: Hivemind = Depends(get_tenant_hive)):
         try:
             return await hm.pipeline.run_index(req)
         except ValueError as e:
@@ -279,9 +509,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get(
         "/v1/admin/schema",
-        dependencies=[Depends(check_auth)],
     )
-    async def get_schema(hm: Hivemind = Depends(get_hivemind)):
+    async def get_schema(hm: Hivemind = Depends(get_tenant_hive)):
         schema = await asyncio.to_thread(hm.db.get_schema)
         return {"schema": schema}
 
@@ -289,10 +518,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     from .sandbox.models import AgentConfig, AgentCreateRequest
 
-    @app.post("/v1/agents", dependencies=[Depends(check_auth)])
+    @app.post("/v1/agents")
     async def register_agent(
         req: AgentCreateRequest,
-        hm: Hivemind = Depends(get_hivemind),
+        hm: Hivemind = Depends(get_tenant_hive),
     ):
         from .sandbox.backend import _create_runner
 
@@ -343,26 +572,26 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "files_extracted": file_count,
         }
 
-    @app.get("/v1/agents", dependencies=[Depends(check_auth)])
+    @app.get("/v1/agents")
     async def list_agents(
         type: str | None = None,
-        hm: Hivemind = Depends(get_hivemind),
+        hm: Hivemind = Depends(get_tenant_hive),
     ):
         agents = await asyncio.to_thread(hm.agent_store.list_agents, type)
         return [a.model_dump() for a in agents]
 
-    @app.get("/v1/agents/{agent_id}", dependencies=[Depends(check_auth)])
+    @app.get("/v1/agents/{agent_id}")
     async def get_agent(
-        agent_id: str, hm: Hivemind = Depends(get_hivemind)
+        agent_id: str, hm: Hivemind = Depends(get_tenant_hive)
     ):
         agent = await asyncio.to_thread(hm.agent_store.get, agent_id)
         if not agent:
             raise HTTPException(404, "Agent not found")
         return agent.model_dump()
 
-    @app.delete("/v1/agents/{agent_id}", dependencies=[Depends(check_auth)])
+    @app.delete("/v1/agents/{agent_id}")
     async def delete_agent(
-        agent_id: str, hm: Hivemind = Depends(get_hivemind)
+        agent_id: str, hm: Hivemind = Depends(get_tenant_hive)
     ):
         if not await asyncio.to_thread(hm.agent_store.delete, agent_id):
             raise HTTPException(404, "Agent not found")
@@ -370,7 +599,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     # ── Agent upload ──
 
-    @app.post("/v1/agents/upload", dependencies=[Depends(check_auth)])
+    @app.post("/v1/agents/upload")
     async def upload_agent(
         name: str = Form(...),
         archive: UploadFile = File(...),
@@ -381,7 +610,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         max_llm_calls: Annotated[int, Form(ge=1)] = 20,
         max_tokens: Annotated[int, Form(ge=1)] = 100_000,
         timeout_seconds: Annotated[int, Form(ge=1)] = 120,
-        hm: Hivemind = Depends(get_hivemind),
+        hm: Hivemind = Depends(get_tenant_hive),
     ):
         try:
             content = await _read_upload_bytes_limited(
@@ -474,7 +703,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         hm: Hivemind,
     ) -> str:
         """Build Docker image, register agent, save files. Returns image tag."""
-        image_tag = f"hivemind-agent-{agent_id}:latest"
+        image_tag = _tenant_image_tag(hm.tenant_id, agent_id)
         await runner.build_image_async(tmpdir, image_tag)
 
         config = AgentConfig(
@@ -499,7 +728,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         return image_tag
 
-    @app.post("/v1/agents/submit", dependencies=[Depends(check_auth)])
+    @app.post("/v1/agents/submit")
     async def submit_agents(
         # Query agent (required)
         query_archive: UploadFile = File(...),
@@ -525,7 +754,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # Index data (required when index_archive is provided)
         document_data: str | None = Form(None),
         document_metadata: str | None = Form(None),
-        hm: Hivemind = Depends(get_hivemind),
+        hm: Hivemind = Depends(get_tenant_hive),
     ):
         """Upload query agent (required) + optional scope/index agents,
         build all, then run the full pipeline with tracking."""
@@ -759,7 +988,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 agent_id=query_agent_id,
                 run_id=run_id,
                 run_store=hm.run_store,
-                s3_uploader=hm.s3_uploader,
+                artifact_store=hm.artifact_store,
+                artifact_retention_seconds=hm.settings.artifact_retention_seconds,
                 prompt=prompt,
                 scope_agent_id=scope_agent_id,
                 mediator_agent_id=mediator_agent_id,
@@ -776,9 +1006,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             except Exception:
                 pass
 
-    # ── Query agent submit + run tracking (legacy) ──
+    # ── Query agent submit + run tracking (async-submit flow) ──
 
-    @app.post("/v1/query-agents/submit", dependencies=[Depends(check_auth)])
+    @app.post("/v1/query-agents/submit")
     async def submit_query_agent(
         name: str = Form(...),
         archive: UploadFile = File(...),
@@ -791,7 +1021,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         timeout_seconds: Annotated[int, Form(ge=1)] = 120,
         scope_agent_id: str | None = Form(None),
         mediator_agent_id: str | None = Form(None),
-        hm: Hivemind = Depends(get_hivemind),
+        hm: Hivemind = Depends(get_tenant_hive),
     ):
         """Upload query agent source, create a run record, and kick off execution."""
         try:
@@ -871,7 +1101,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
             sandbox_settings = build_sandbox_settings(settings)
             runner = _create_runner(sandbox_settings)
-            image_tag = f"hivemind-agent-{agent_id}:latest"
+            image_tag = _tenant_image_tag(hm.tenant_id, agent_id)
 
             try:
                 await runner.build_image_async(tmpdir, image_tag)
@@ -915,7 +1145,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 agent_id=agent_id,
                 run_id=run_id,
                 run_store=hm.run_store,
-                s3_uploader=hm.s3_uploader,
+                artifact_store=hm.artifact_store,
+                artifact_retention_seconds=hm.settings.artifact_retention_seconds,
                 prompt=prompt,
                 scope_agent_id=scope_agent_id,
                 mediator_agent_id=mediator_agent_id,
@@ -932,19 +1163,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             except Exception:
                 pass
 
-    @app.get("/v1/query-agents/runs/{run_id}", dependencies=[Depends(check_auth)])
+    @app.get("/v1/query-agents/runs/{run_id}")
     async def get_query_run(
-        run_id: str, hm: Hivemind = Depends(get_hivemind)
+        run_id: str, hm: Hivemind = Depends(get_tenant_hive)
     ):
         """Get the status and result of a query agent run."""
         run = await asyncio.to_thread(hm.run_store.get, run_id)
         if not run:
             raise HTTPException(404, "Run not found")
-        run["download_url"] = None
-        if run.get("s3_url") and hm.s3_uploader:
-            run["download_url"] = await asyncio.to_thread(
-                hm.s3_uploader.presign_url, run["s3_url"]
-            )
+        run["artifacts"] = await asyncio.to_thread(
+            hm.artifact_store.list_for_run, run_id
+        )
+        run["artifact_retention_seconds"] = hm.settings.artifact_retention_seconds
         return JSONResponse(
             content=run,
             headers={"Cache-Control": "no-cache, no-store"},
@@ -952,44 +1182,78 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     # ── List recent runs ──
 
-    @app.get("/v1/query-agents/runs", dependencies=[Depends(check_auth)])
+    @app.get("/v1/query-agents/runs")
     async def list_query_runs(
-        limit: int = 20, hm: Hivemind = Depends(get_hivemind)
+        limit: int = 20, hm: Hivemind = Depends(get_tenant_hive)
     ):
         """List recent query agent runs."""
         return await asyncio.to_thread(hm.run_store.list_recent, min(limit, 100))
 
     # ── Unified run status ──
 
-    @app.get("/v1/agent-runs/{run_id}", dependencies=[Depends(check_auth)])
+    @app.get("/v1/agent-runs/{run_id}")
     async def get_agent_run(
-        run_id: str, hm: Hivemind = Depends(get_hivemind)
+        run_id: str, hm: Hivemind = Depends(get_tenant_hive)
     ):
         """Get the status and result of an agent run."""
         run = await asyncio.to_thread(hm.run_store.get, run_id)
         if not run:
             raise HTTPException(404, "Run not found")
-        run["download_url"] = None
-        if run.get("s3_url") and hm.s3_uploader:
-            run["download_url"] = await asyncio.to_thread(
-                hm.s3_uploader.presign_url, run["s3_url"]
-            )
+        run["artifacts"] = await asyncio.to_thread(
+            hm.artifact_store.list_for_run, run_id
+        )
+        run["artifact_retention_seconds"] = hm.settings.artifact_retention_seconds
         return JSONResponse(
             content=run,
             headers={"Cache-Control": "no-cache, no-store"},
         )
 
-    @app.get("/v1/agent-runs", dependencies=[Depends(check_auth)])
+    @app.get("/v1/agent-runs")
     async def list_agent_runs(
-        limit: int = 20, hm: Hivemind = Depends(get_hivemind)
+        limit: int = 20, hm: Hivemind = Depends(get_tenant_hive)
     ):
         """List recent agent runs."""
         return await asyncio.to_thread(hm.run_store.list_recent, min(limit, 100))
 
+    # ── Artifact fetch (Postgres-backed; no S3) ──
+
+    @app.get(
+        "/v1/query/runs/{run_id}/artifacts/{filename:path}",
+    )
+    async def get_run_artifact(
+        run_id: str, filename: str, hm: Hivemind = Depends(get_tenant_hive)
+    ):
+        """Stream a query-agent artifact.
+
+        Artifacts live in Postgres and expire after
+        `artifact_retention_seconds` (default 24h). Nothing is written to
+        external object storage.
+        """
+        artifact = await asyncio.to_thread(
+            hm.artifact_store.get, run_id, filename
+        )
+        if not artifact:
+            raise HTTPException(404, "Artifact not found or expired")
+        ttl = hm.settings.artifact_retention_seconds
+        import email.utils
+        expires_at = float(artifact["created_at"]) + ttl
+        return Response(
+            content=bytes(artifact["content"]),
+            media_type=artifact["content_type"] or "application/octet-stream",
+            headers={
+                "Cache-Control": "no-cache, no-store",
+                "X-Retention-Seconds": str(ttl),
+                "Expires": email.utils.formatdate(expires_at, usegmt=True),
+                "Content-Disposition": (
+                    f'attachment; filename="{filename}"'
+                ),
+            },
+        )
+
     # ── Health ──
 
     @app.get("/v1/health", response_model=HealthResponse)
-    async def health(hm: Hivemind = Depends(get_hivemind)):
+    async def health(hm: Hivemind = Depends(get_tenant_hive)):
         return await asyncio.to_thread(hm.health)
 
     # ── Web UI ──
@@ -1023,15 +1287,56 @@ app = _LazyApp()
 
 
 def main():
+    import os
+    import tempfile
     import uvicorn
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     settings = Settings()
+
+    # When enclave-terminated TLS is on, bootstrap attestation BEFORE
+    # uvicorn.run() so we have the cert/key in hand before the socket
+    # opens. The lifespan call becomes a no-op thanks to bootstrap's
+    # idempotency guard.
+    ssl_kwargs: dict = {}
+    if os.environ.get("HIVEMIND_ENCLAVE_TLS"):
+        from . import attestation as _att
+
+        logger.info("HIVEMIND_ENCLAVE_TLS=1 — bootstrapping TLS before listen")
+        _att.bootstrap()
+        tls = _att.get_tls_material()
+        if tls is None:
+            logger.error(
+                "Enclave TLS requested but derivation failed; falling back to HTTP. "
+                "Check DSTACK_SIMULATOR_ENDPOINT / /var/run/dstack.sock."
+            )
+        else:
+            cert_pem, key_pem = tls
+            # uvicorn wants filesystem paths. tmpfs mounts are safe inside
+            # the enclave; the cert/key are derived fresh every boot anyway.
+            tdir = tempfile.mkdtemp(prefix="hivemind-tls-")
+            cert_path = os.path.join(tdir, "cert.pem")
+            key_path = os.path.join(tdir, "key.pem")
+            with open(cert_path, "wb") as f:
+                f.write(cert_pem)
+            with open(key_path, "wb") as f:
+                f.write(key_pem)
+            os.chmod(key_path, 0o600)
+            ssl_kwargs = {
+                "ssl_certfile": cert_path,
+                "ssl_keyfile": key_path,
+            }
+            logger.info(
+                "TLS cert derived from dstack-KMS; "
+                "fingerprint bound into REPORT_DATA v2"
+            )
+
     uvicorn.run(
         create_app(settings),
         host=settings.host,
         port=settings.port,
         log_level="info",
+        **ssl_kwargs,
     )
 
 

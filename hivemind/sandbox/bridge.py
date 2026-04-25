@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import os
 import secrets
 import socket
 import time
@@ -8,7 +9,7 @@ from typing import Callable
 from uuid import uuid4
 
 import uvicorn
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
 
 from ..tools import Tool
 from .budget import Budget
@@ -16,13 +17,19 @@ from .models import (
     AnthropicMessagesRequest,
     BridgeLLMRequest,
     BridgeLLMResponse,
-    BridgeS3UploadRequest,
-    BridgeS3UploadResponse,
+    BridgeArtifactUploadRequest,
+    BridgeArtifactUploadResponse,
     BridgeToolRequest,
     BridgeToolResponse,
     OpenAIChatRequest,
+    ScopeTestResult,
+    SimulateBatchItem,
+    SimulateBatchRequest,
+    SimulateBatchResponse,
     SimulateRequest,
     SimulateResponse,
+    VerifyScopeRequest,
+    VerifyScopeResponse,
 )
 from .tape import Tape, hash_request
 
@@ -242,7 +249,8 @@ class BridgeServer:
         run_query_fn: Callable | None = None,
         scope_query_agent_id: str | None = None,
         replay_tape: list[dict] | None = None,
-        s3_uploader=None,
+        artifact_store=None,
+        artifact_retention_seconds: int = 86400,
         run_id: str | None = None,
         run_store=None,
     ):
@@ -256,10 +264,10 @@ class BridgeServer:
         self.agent_store = agent_store
         self.run_query_fn = run_query_fn
         self.scope_query_agent_id = scope_query_agent_id
-        self.s3_uploader = s3_uploader
+        self.artifact_store = artifact_store
+        self.artifact_retention_seconds = artifact_retention_seconds
         self.run_id = run_id
         self.run_store = run_store
-        self.pending_s3_uploads: list[dict] = []
         self._server: uvicorn.Server | None = None
         self._task: asyncio.Task | None = None
         self._sock: socket.socket | None = None
@@ -290,9 +298,21 @@ class BridgeServer:
                 self._recording_tape.record(req_hash, kwargs, cached)
                 return cached
 
-        # Live call — enforce budget
+        # Live call — enforce budget.
+        #
+        # Clamp the caller's requested max_tokens to what's actually left in
+        # the budget. Clients like Claude Code CLI send a large nominal cap
+        # (~40k) that almost never reflects actual completion size (<1k for
+        # most turns); rejecting on the nominal cap wastes otherwise-fine
+        # calls. Real usage is still recorded post-hoc, so the budget
+        # invariant holds.
         planned_prompt_tokens = _estimate_prompt_tokens(kwargs["messages"])
-        planned_completion_tokens = kwargs.get("max_tokens", 4096)
+        remaining_tokens = self.budget.remaining()["tokens"]
+        room_for_completion = max(1, remaining_tokens - planned_prompt_tokens)
+        requested_completion = kwargs.get("max_tokens", 4096)
+        if requested_completion > room_for_completion:
+            kwargs["max_tokens"] = room_for_completion
+        planned_completion_tokens = kwargs["max_tokens"]
         budget_error = self.budget.check(
             planned_prompt_tokens=planned_prompt_tokens,
             planned_completion_tokens=planned_completion_tokens,
@@ -492,6 +512,18 @@ class BridgeServer:
         async def call_tool(
             tool_name: str, req: BridgeToolRequest
         ) -> BridgeToolResponse:
+            # Telemetry: per-tool usage count + approx arg-size for this
+            # scope/query/mediator invocation. Grep logs for TOOL_CALL
+            # after a bench run to see how scope actually exercises its
+            # capabilities.
+            import json as _json
+            args_size = len(_json.dumps(req.arguments, default=str))
+            logger.info(
+                "TOOL_CALL role=%s tool=%s args_size=%d",
+                bridge.role,
+                tool_name,
+                args_size,
+            )
             if tool_name not in bridge.tools:
                 return BridgeToolResponse(
                     result="",
@@ -514,12 +546,23 @@ class BridgeServer:
                 dependencies=[Depends(_check_token)],
                 response_model=SimulateResponse,
             )
-            async def simulate(req: SimulateRequest) -> SimulateResponse:
+            async def simulate(
+                req: SimulateRequest,
+                x_simulate_caller: str = Header(default="unknown"),
+            ) -> SimulateResponse:
                 if not bridge.run_query_fn:
                     raise HTTPException(
                         500, "Simulation not available (no run_query_fn)"
                     )
                 _enforce_scope_query_agent(req.query_agent_id)
+                # Telemetry: log WHICH surface (MCP via bridge_simulate vs
+                # Bash via play.py) scope actually used for this sim call.
+                logger.info(
+                    "SCOPE_SIM caller=%s scope_fn_len=%d prompt_len=%d",
+                    x_simulate_caller,
+                    len(req.scope_fn_source or ""),
+                    len(req.prompt or ""),
+                )
                 # Pass full remaining budget to simulation
                 remaining = bridge.budget.remaining()
                 remaining_calls = remaining["calls"]
@@ -572,6 +615,96 @@ class BridgeServer:
                     sys.stdout.flush()
                     raise HTTPException(500, f"Simulation failed: {e}")
 
+            @app.post(
+                "/sandbox/simulate_batch",
+                dependencies=[Depends(_check_token)],
+                response_model=SimulateBatchResponse,
+            )
+            async def simulate_batch(
+                req: SimulateBatchRequest,
+                x_simulate_caller: str = Header(default="unknown"),
+            ) -> SimulateBatchResponse:
+                if not bridge.run_query_fn:
+                    raise HTTPException(
+                        500, "Simulation not available (no run_query_fn)"
+                    )
+                _enforce_scope_query_agent(req.query_agent_id)
+                n = len(req.candidates)
+                logger.info(
+                    "SCOPE_SIM_BATCH caller=%s n=%d prompt_len=%d",
+                    x_simulate_caller,
+                    n,
+                    len(req.prompt or ""),
+                )
+                remaining = bridge.budget.remaining()
+                remaining_calls = remaining["calls"]
+                remaining_tokens = remaining["tokens"]
+                if remaining_calls < n or remaining_tokens < n:
+                    raise HTTPException(
+                        429, "Insufficient budget for batch simulation"
+                    )
+                per_calls = max(1, remaining_calls // n)
+                per_tokens = max(1, remaining_tokens // n)
+
+                async def _run_one(idx: int, scope_fn_source: str):
+                    try:
+                        sim_result = await bridge.run_query_fn(
+                            query_agent_id=req.query_agent_id,
+                            prompt=req.prompt,
+                            scope_fn_source=scope_fn_source,
+                            max_calls=per_calls,
+                            max_tokens=per_tokens,
+                            replay_tape=req.replay_tape,
+                        )
+                        usage: dict | None = None
+                        if isinstance(sim_result, tuple) and len(sim_result) == 3:
+                            output, usage, _tape = sim_result
+                        elif isinstance(sim_result, tuple) and len(sim_result) == 2:
+                            output, usage = sim_result
+                        else:
+                            output = sim_result
+                        return (idx, output, usage, None)
+                    except Exception as e:
+                        return (idx, "", None, f"{type(e).__name__}: {e}")
+
+                gathered = await asyncio.gather(
+                    *[_run_one(i, c) for i, c in enumerate(req.candidates)]
+                )
+
+                total_calls = 0
+                total_prompt = 0
+                total_completion = 0
+                items: list[SimulateBatchItem] = []
+                for idx, output, usage, error in gathered:
+                    if isinstance(usage, dict):
+                        total_calls += int(usage.get("calls", 0) or 0)
+                        total_prompt += int(usage.get("prompt_tokens", 0) or 0)
+                        total_completion += int(usage.get("completion_tokens", 0) or 0)
+                    items.append(
+                        SimulateBatchItem(
+                            idx=idx,
+                            output=output or "",
+                            error=error,
+                        )
+                    )
+
+                if total_calls == 0 and total_prompt == 0 and total_completion == 0:
+                    # Fallback: no usage metadata, charge worst case per candidate
+                    bridge.budget.record(
+                        calls=min(remaining_calls, per_calls * n),
+                        prompt_tokens=min(remaining_tokens // 2, (per_tokens * n) // 2),
+                        completion_tokens=min(remaining_tokens // 2, (per_tokens * n) // 2),
+                    )
+                else:
+                    bridge.budget.record(
+                        calls=total_calls,
+                        prompt_tokens=total_prompt,
+                        completion_tokens=total_completion,
+                    )
+
+                items.sort(key=lambda it: it.idx)
+                return SimulateBatchResponse(results=items)
+
             @app.get(
                 "/sandbox/agents/{agent_id}/files",
                 dependencies=[Depends(_check_token)],
@@ -600,16 +733,93 @@ class BridgeServer:
                     raise HTTPException(404, "File not found")
                 return {"content": content}
 
-        # ── S3 upload endpoint (query agents with run tracking) ──
+            @app.post(
+                "/sandbox/verify_scope_fn",
+                dependencies=[Depends(_check_token)],
+                response_model=VerifyScopeResponse,
+            )
+            async def verify_scope_fn_endpoint(
+                req: VerifyScopeRequest,
+            ) -> VerifyScopeResponse:
+                """Compile the provided scope_fn source and run it against the
+                given synthetic test cases.
 
-        if bridge.run_id and bridge.s3_uploader:
+                This is the canonical correctness check: uses the SAME
+                compile_scope_fn + apply_scope_fn the real pipeline uses,
+                so if verify says ok, the real pipeline will accept it.
+                """
+                from ..scope import apply_scope_fn, compile_scope_fn
+
+                try:
+                    scope_fn = await asyncio.to_thread(
+                        compile_scope_fn, req.source
+                    )
+                except ValueError as e:
+                    return VerifyScopeResponse(
+                        compiles=False,
+                        compile_error=str(e),
+                        all_tests_passed=False,
+                        results=[],
+                    )
+
+                results: list[ScopeTestResult] = []
+                all_passed = True
+                for tc in req.tests:
+                    try:
+                        outcome = await asyncio.to_thread(
+                            apply_scope_fn,
+                            scope_fn,
+                            tc.sql,
+                            list(tc.params),
+                            list(tc.rows),
+                            _source=req.source,
+                        )
+                    except Exception as e:
+                        outcome = {"allow": False, "error": f"apply_scope_fn raised: {e}"}
+
+                    allow = bool(outcome.get("allow", False))
+                    error = outcome.get("error")
+                    rows_returned = (
+                        len(outcome.get("rows", []))
+                        if allow and isinstance(outcome.get("rows"), list)
+                        else 0
+                    )
+                    passed: bool | None = None
+                    if tc.expect_allow is not None:
+                        passed = allow == tc.expect_allow
+                        if not passed:
+                            all_passed = False
+                    results.append(
+                        ScopeTestResult(
+                            label=tc.label,
+                            sql=tc.sql[:200],
+                            allow=allow,
+                            error=str(error) if error else None,
+                            rows_returned=rows_returned,
+                            expected_allow=tc.expect_allow,
+                            passed=passed,
+                        )
+                    )
+
+                return VerifyScopeResponse(
+                    compiles=True,
+                    compile_error=None,
+                    all_tests_passed=all_passed,
+                    results=results,
+                )
+
+        # ── Artifact upload endpoint (query agents with run tracking) ──
+
+        if bridge.run_id and bridge.artifact_store:
 
             @app.post(
-                "/sandbox/s3-upload",
+                "/sandbox/artifact-upload",
                 dependencies=[Depends(_check_token)],
-                response_model=BridgeS3UploadResponse,
+                response_model=BridgeArtifactUploadResponse,
             )
-            async def s3_upload(req: BridgeS3UploadRequest) -> BridgeS3UploadResponse:
+            async def artifact_upload(
+                req: BridgeArtifactUploadRequest,
+            ) -> BridgeArtifactUploadResponse:
                 import base64
 
                 try:
@@ -617,18 +827,23 @@ class BridgeServer:
                 except Exception:
                     raise HTTPException(400, "Invalid base64 content")
 
-                key = f"{bridge.run_id}/{req.filename}"
-
-                # Buffer the upload — actual S3 upload happens after mediator
-                placeholder_url = f"s3://pending/{key}"
-                bridge.pending_s3_uploads.append({
-                    "key": key,
-                    "data": data,
-                    "content_type": req.content_type,
-                    "placeholder_url": placeholder_url,
-                })
-
-                return BridgeS3UploadResponse(s3_url=placeholder_url)
+                # Write directly to the Postgres-backed ArtifactStore.
+                # No S3, no bucket credentials, no presigned URLs.
+                result = await asyncio.to_thread(
+                    bridge.artifact_store.put,
+                    bridge.run_id,
+                    req.filename,
+                    data,
+                    req.content_type,
+                )
+                path = (
+                    f"/v1/query/runs/{bridge.run_id}/artifacts/{req.filename}"
+                )
+                return BridgeArtifactUploadResponse(
+                    path=path,
+                    size_bytes=result["size_bytes"],
+                    retention_seconds=bridge.artifact_retention_seconds,
+                )
 
         return app
 
@@ -669,6 +884,26 @@ class BridgeServer:
 
     async def stop(self):
         """Shut down the bridge server."""
+        # Persist tape if HIVEMIND_TRACE_DIR is set. Zero-cost when unset.
+        trace_dir = os.environ.get("HIVEMIND_TRACE_DIR")
+        if trace_dir:
+            try:
+                from pathlib import Path
+                import time as _time
+                import json as _json
+                Path(trace_dir).mkdir(parents=True, exist_ok=True)
+                ts = _time.strftime("%Y%m%dT%H%M%S")
+                token8 = (self.session_token or "anon")[:8]
+                role = getattr(self, "role", "unknown") or "unknown"
+                fname = f"{ts}_{role}_{token8}.jsonl"
+                path = Path(trace_dir) / fname
+                tape = self._recording_tape.to_json()
+                with path.open("w") as f:
+                    for entry in tape:
+                        f.write(_json.dumps(entry) + "\n")
+                logger.info("Tape persisted to %s (%d entries)", path, len(tape))
+            except Exception as e:
+                logger.warning("Tape persistence failed: %s", e)
         if self._server:
             self._server.should_exit = True
         if self._task:

@@ -1,7 +1,9 @@
 import asyncio
 import json
 import logging
+import os
 import time
+from pathlib import Path
 from typing import Callable
 
 from openai import AsyncOpenAI
@@ -26,7 +28,33 @@ from .tools import AccessLevel, build_agent_file_tools, build_sql_tools
 logger = logging.getLogger(__name__)
 
 MEDIATOR_MIN_TOKENS = 128
-MEDIATOR_TOKEN_RESERVE = 512
+# A single Claude Code CLI call to the mediator sends ~15-25k tokens
+# (system prompt + raw_output + question). Reserving only 512 tokens
+# starves the mediator and triggers a 429 → SDK crash. 30k gives
+# comfortable headroom for at least one full mediator call.
+MEDIATOR_TOKEN_RESERVE = 30_000
+# Below this fraction of remaining budget the flat reserve gets downsized
+# so we never hand more than this share to the mediator and leave the
+# query agent with too little to make progress.
+MEDIATOR_RESERVE_FRACTION = 0.3
+# Scope is capped to a fraction of the global budget so it cannot starve
+# the downstream query + mediator agents. A single Claude Code CLI call
+# typically sends ~20-25k tokens in its first request (system prompt + tools
+# + context) — if scope consumes the whole budget the bridge returns 429 to
+# query's very first call and the SDK subprocess exits with code 1.
+SCOPE_BUDGET_FRACTION = 0.5
+
+
+def _mediator_reserve(remaining: int) -> int:
+    """Return how many tokens to reserve from the query stage for mediator.
+
+    Proportional to remaining budget (capped by MEDIATOR_TOKEN_RESERVE),
+    floored at MEDIATOR_MIN_TOKENS, and never so large that the query
+    stage would drop below MEDIATOR_MIN_TOKENS itself.
+    """
+    desired = min(MEDIATOR_TOKEN_RESERVE, int(remaining * MEDIATOR_RESERVE_FRACTION))
+    desired = max(MEDIATOR_MIN_TOKENS, desired)
+    return min(desired, max(0, remaining - MEDIATOR_MIN_TOKENS))
 
 
 class Pipeline:
@@ -82,19 +110,31 @@ class Pipeline:
         total_tokens = 0
         mediator_agent_id = req.mediator_agent_id or self.settings.default_mediator_agent
 
+        # Pipeline-stage ablation toggles (experiments). When set, the
+        # corresponding stage is skipped entirely — no LLM spend, no
+        # filtering. Intended for defense-contribution ablations.
+        _disable_scope = os.environ.get("HIVEMIND_DISABLE_SCOPE", "").lower() in ("1", "true", "yes")
+        _disable_mediator = os.environ.get("HIVEMIND_DISABLE_MEDIATOR", "").lower() in ("1", "true", "yes")
+        if _disable_mediator:
+            mediator_agent_id = ""
+
         # Stage 0: Scope resolution → produces a scope_fn
         scope_fn = None
+        scope_fn_source = ""
+        scope_budget = max(1, int(remaining * SCOPE_BUDGET_FRACTION))
 
-        if req.scope_agent_id:
-            scope_fn, scope_usage = await self._run_scope_agent(
-                req, max_tokens=remaining,
+        if _disable_scope:
+            pass
+        elif req.scope_agent_id:
+            scope_fn, scope_fn_source, scope_usage = await self._run_scope_agent(
+                req, max_tokens=scope_budget,
             )
             used = scope_usage.get("total_tokens", 0)
             total_tokens += used
             remaining = max(1, remaining - used)
         elif self.settings.default_scope_agent:
-            scope_fn, scope_usage = await self._run_scope_agent(
-                req, max_tokens=remaining,
+            scope_fn, scope_fn_source, scope_usage = await self._run_scope_agent(
+                req, max_tokens=scope_budget,
             )
             used = scope_usage.get("total_tokens", 0)
             total_tokens += used
@@ -109,16 +149,13 @@ class Pipeline:
 
         query_max_tokens = remaining
         if mediator_agent_id and remaining > MEDIATOR_MIN_TOKENS:
-            reserve = min(
-                MEDIATOR_TOKEN_RESERVE,
-                max(0, remaining - MEDIATOR_MIN_TOKENS),
-            )
-            query_max_tokens = max(1, remaining - reserve)
+            query_max_tokens = max(1, remaining - _mediator_reserve(remaining))
 
         output, query_usage = await self._run_query_agent(
             query_agent_id=query_agent_id,
             prompt=req.query,
             scope_fn=scope_fn,
+            scope_fn_source=scope_fn_source,
             max_tokens=query_max_tokens,
             return_usage=True,
         )
@@ -143,6 +180,7 @@ class Pipeline:
                         raw_output=output,
                         prompt=req.query,
                         max_tokens=remaining,
+                        policy=req.policy,
                     )
                 except ValueError as e:
                     if "not found" in str(e).lower():
@@ -180,12 +218,9 @@ class Pipeline:
         return_budget_summary: bool = False,
         replay_tape: list[dict] | None = None,
         return_tape: bool = False,
+        extra_volumes: dict[str, dict[str, str]] | None = None,
     ):
-        """Run a Docker agent with tools and return its stdout.
-
-        backend.run() always appends pending_s3_uploads as the last element.
-        This helper strips it so existing callers see the same shape as before.
-        """
+        """Run a Docker agent with tools and return its stdout."""
         backend = SandboxBackend(
             self.llm_client,
             self.llm_model,
@@ -194,7 +229,7 @@ class Pipeline:
             agent_store=self.agent_store,
         )
 
-        raw = await backend.run(
+        return await backend.run(
             role=role,
             env=env,
             tools=tools,
@@ -207,19 +242,21 @@ class Pipeline:
             return_budget_summary=return_budget_summary,
             replay_tape=replay_tape,
             return_tape=return_tape,
+            extra_volumes=extra_volumes,
         )
-
-        # Strip trailing pending_s3_uploads from the result
-        if isinstance(raw, tuple):
-            return raw[:-1] if len(raw) > 2 else raw[0] if len(raw) == 2 else raw
-        return raw
 
     async def _run_scope_agent(
         self,
         req: QueryRequest,
         max_tokens: int | None = None,
-    ) -> tuple[Callable, dict]:
-        """Run scope agent to produce a scope function. Returns (scope_fn, usage)."""
+    ) -> tuple[Callable, str, dict]:
+        """Run scope agent to produce a scope function.
+
+        Returns (scope_fn, scope_fn_source, usage). The source text is
+        forwarded to the query agent so it knows what the privacy filter
+        expects and can write SQL that matches — without this, query
+        keeps guessing patterns and hitting allow=False.
+        """
         scope_agent_id = req.scope_agent_id or self.settings.default_scope_agent
         agent_config = await asyncio.to_thread(
             self.agent_store.get, scope_agent_id
@@ -251,6 +288,7 @@ class Pipeline:
                 query_agent_id=query_agent_id,
                 prompt=prompt,
                 scope_fn=sim_scope_fn,
+                scope_fn_source=scope_fn_source,
                 max_calls=max_calls,
                 max_tokens=max_tokens,
                 return_usage=True,
@@ -261,7 +299,19 @@ class Pipeline:
         env = {
             "QUERY_PROMPT": req.query,
             "QUERY_AGENT_ID": query_agent_id or "",
+            # Pass the privacy/utility policy through so scope can design
+            # its scope_fn around the caller's intent. Empty string when
+            # no policy is specified.
+            "POLICY_CONTEXT": (req.policy or "") if hasattr(req, "policy") else "",
         }
+        # Forward ablation/feature toggles into the scope container so that
+        # env-var-based experiments set on the server process actually take effect.
+        for _toggle in ("HIVEMIND_DISABLE_SIMULATE", "HIVEMIND_DISABLE_SEMLIFT",
+                        "HIVEMIND_SCOPE_MAX_ATTEMPTS", "HIVEMIND_SCOPE_MULTI",
+                        "HIVEMIND_SCOPE_CI"):
+            _val = os.environ.get(_toggle)
+            if _val is not None:
+                env[_toggle] = _val
 
         # Scope agents get FULL_READ access
         scope_tools = build_sql_tools(self.db, AccessLevel.FULL_READ)
@@ -279,6 +329,23 @@ class Pipeline:
                 return f"Error: unknown tool '{name}'. Available: {', '.join(tool_handlers)}"
             return await asyncio.to_thread(tool_handlers[name], **args)
 
+        # iter 19 experiment: filesystem mount RE-ENABLED.
+        # Scope can read query agent source via /workspace/query-agent/ (RO).
+        # Enables the save/load-NPC workflow: read the query agent's prompt,
+        # draft a scope_fn, simulate the query agent via play.py, revise.
+        scope_volumes: dict[str, dict[str, str]] | None = None
+        if query_agent_id and query_agent_id.startswith("default-"):
+            repo_root = Path(__file__).resolve().parent.parent
+            src_dir = repo_root / "agents" / query_agent_id
+            if src_dir.is_dir():
+                scope_volumes = {
+                    str(src_dir): {"bind": "/workspace/query-agent", "mode": "ro"}
+                }
+                logger.info(
+                    "Mounting query agent source %s -> /workspace/query-agent (ro) for scope",
+                    src_dir,
+                )
+
         raw, usage = await self._run_agent(
             agent_config=agent_config,
             role="scope",
@@ -290,6 +357,7 @@ class Pipeline:
             scope_query_agent_id=allowed_query_agent_id,
             max_tokens=max_tokens,
             return_budget_summary=True,
+            extra_volumes=scope_volumes,
         )
 
         try:
@@ -300,16 +368,29 @@ class Pipeline:
                 if not isinstance(source, str):
                     raise ValueError("scope_fn must be a string")
                 fn = compile_scope_fn(source)
-                return fn, usage
+                return fn, source, usage
 
             raise ValueError(
                 "Scope agent must return 'scope_fn'"
             )
         except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
+            # Hard-fail on invalid scope_fn. Do NOT fall back to a default
+            # policy — the whole point of this agent is to produce a valid
+            # scope function, and below-100% validity means the privacy
+            # model is broken. Surface the first 600 chars of the offending
+            # output for diagnosis.
+            _src = ""
+            try:
+                _parsed = json.loads(raw.strip())
+                if isinstance(_parsed, dict):
+                    _src = str(_parsed.get("scope_fn", ""))[:600]
+            except Exception:
+                _src = raw.strip()[:600]
             logger.error(
-                "Scope agent output not valid (%s, %d chars)",
+                "Scope agent output invalid (%s, %d chars). scope_fn preview:\n%s",
                 e,
                 len(raw),
+                _src,
             )
             raise ValueError(f"Scope agent failed: {e}")
 
@@ -318,6 +399,7 @@ class Pipeline:
         query_agent_id: str,
         prompt: str,
         scope_fn: Callable | None = None,
+        scope_fn_source: str = "",
         max_calls: int | None = None,
         max_tokens: int | None = None,
         return_usage: bool = False,
@@ -342,6 +424,7 @@ class Pipeline:
 
         env = {
             "QUERY_PROMPT": prompt,
+            "SCOPE_FN_SOURCE": scope_fn_source or "",
         }
 
         backend = SandboxBackend(
@@ -364,19 +447,16 @@ class Pipeline:
             return_tape=return_tape,
         )
 
-        # backend.run() appends pending_s3_uploads as last tuple element;
-        # strip it here since _run_query_agent callers don't need it.
         if return_usage and return_tape:
-            output, usage, tape, _uploads = run_result
+            output, usage, tape = run_result
             return output, usage, tape
         elif return_usage:
-            output, usage, _uploads = run_result
+            output, usage = run_result
             return output, usage
         elif return_tape:
-            output, tape, _uploads = run_result
+            output, tape = run_result
             return output, {}, tape
-        output, _uploads = run_result
-        return output
+        return run_result
 
     async def _run_mediator_agent(
         self,
@@ -384,6 +464,7 @@ class Pipeline:
         raw_output: str,
         prompt: str,
         max_tokens: int | None = None,
+        policy: str | None = None,
     ) -> tuple[str, dict]:
         """Run mediator agent to filter/audit output. Returns (output, usage)."""
         agent_config = await asyncio.to_thread(
@@ -395,6 +476,7 @@ class Pipeline:
         env = {
             "RAW_OUTPUT": raw_output,
             "QUERY_PROMPT": prompt,
+            "MEDIATION_POLICY": policy or "",
         }
 
         # Mediator has NO data access tools
@@ -409,7 +491,7 @@ class Pipeline:
         async def noop_tool_call(name: str, args: dict) -> str:
             return "Error: mediator agents have no tool access"
 
-        output, usage, _uploads = await backend.run(
+        output, usage = await backend.run(
             role="mediator",
             env=env,
             tools=[],
@@ -499,16 +581,19 @@ class Pipeline:
         agent_id: str,
         run_id: str,
         run_store,
-        s3_uploader=None,
+        artifact_store=None,
+        artifact_retention_seconds: int = 86400,
         prompt: str = "",
         scope_agent_id: str | None = None,
         mediator_agent_id: str | None = None,
         max_tokens: int | None = None,
     ) -> None:
-        """Run the full 3-stage pipeline with run tracking and S3 upload.
+        """Run the full 3-stage pipeline with run tracking and artifact upload.
 
-        Stage 0: Scope agent   → produces scope_fn to filter SQL results
-        Stage 1: Query agent   → executes with scoped DB access + S3 upload
+        Stage 0: Scope agent    → produces scope_fn to filter SQL results
+        Stage 1: Query agent    → executes with scoped DB access; may POST
+                                  /sandbox/artifact-upload → writes straight to
+                                  _hivemind_query_artifacts (no S3)
         Stage 2: Mediator agent → audits/redacts query output
 
         Updates run_store status through the lifecycle:
@@ -525,6 +610,7 @@ class Pipeline:
 
             # -- Stage 0: Scope resolution --
             scope_fn = None
+            scope_fn_source = ""
             resolved_scope_id = scope_agent_id or self.settings.default_scope_agent
             if resolved_scope_id:
                 scope_t0 = time.time()
@@ -537,8 +623,9 @@ class Pipeline:
                     scope_agent_id=resolved_scope_id,
                 )
                 try:
-                    scope_fn, scope_usage = await self._run_scope_agent(
-                        req_for_scope, max_tokens=remaining,
+                    scope_budget = max(1, int(remaining * SCOPE_BUDGET_FRACTION))
+                    scope_fn, scope_fn_source, scope_usage = await self._run_scope_agent(
+                        req_for_scope, max_tokens=scope_budget,
                     )
                     used = scope_usage.get("total_tokens", 0)
                     remaining = max(1, remaining - used)
@@ -570,11 +657,7 @@ class Pipeline:
             )
             query_max_tokens = remaining
             if resolved_mediator_id and remaining > MEDIATOR_MIN_TOKENS:
-                reserve = min(
-                    MEDIATOR_TOKEN_RESERVE,
-                    max(0, remaining - MEDIATOR_MIN_TOKENS),
-                )
-                query_max_tokens = max(1, remaining - reserve)
+                query_max_tokens = max(1, remaining - _mediator_reserve(remaining))
 
             tools = build_sql_tools(
                 self.db, AccessLevel.SCOPED, scope_fn=scope_fn,
@@ -592,6 +675,7 @@ class Pipeline:
             env: dict[str, str] = {}
             if prompt:
                 env["QUERY_PROMPT"] = prompt
+            env["SCOPE_FN_SOURCE"] = scope_fn_source or ""
 
             backend = SandboxBackend(
                 self.llm_client,
@@ -600,18 +684,18 @@ class Pipeline:
                 agent_config,
             )
 
-            result = await backend.run(
+            query_output, query_usage = await backend.run(
                 role="query",
                 env=env,
                 tools=tools,
                 on_tool_call=on_tool_call,
                 max_tokens=query_max_tokens,
-                s3_uploader=s3_uploader,
+                artifact_store=artifact_store,
+                artifact_retention_seconds=artifact_retention_seconds,
                 run_id=run_id,
                 run_store=run_store,
                 return_budget_summary=True,
             )
-            query_output, query_usage, pending_uploads = result
             used = query_usage.get("total_tokens", 0)
             remaining = max(1, remaining - used)
             await asyncio.to_thread(
@@ -657,35 +741,13 @@ class Pipeline:
                             ended_at=time.time(),
                         )
 
-            # -- Post-mediator: execute buffered S3 uploads --
-            s3_url = None
-            if pending_uploads and s3_uploader:
-                for upload in pending_uploads:
-                    placeholder = upload["placeholder_url"]
-                    try:
-                        real_url = await asyncio.to_thread(
-                            s3_uploader.upload_bytes,
-                            upload["key"],
-                            upload["data"],
-                            upload["content_type"],
-                        )
-                        s3_url = real_url
-                        # Replace placeholder in output so user gets real URL
-                        if query_output:
-                            query_output = query_output.replace(
-                                placeholder, real_url
-                            )
-                    except Exception as e:
-                        logger.warning(
-                            "Deferred S3 upload failed for run %s: %s",
-                            run_id, e,
-                        )
-
-            # Mark completed + save output
+            # Artifacts (if any) were written straight to Postgres during
+            # the query-agent turn via /sandbox/artifact-upload. No post-
+            # mediator commit needed — failed runs are swept by the TTL
+            # job in hivemind.core.
             await asyncio.to_thread(
                 run_store.update_status, run_id, "completed",
                 output=(query_output or "")[:10000],
-                **({"s3_url": s3_url} if s3_url else {}),
             )
 
         except Exception as e:

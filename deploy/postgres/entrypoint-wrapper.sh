@@ -9,8 +9,7 @@ set -euo pipefail
 #   3. Start backup cron if WAL-G is fully configured
 #   4. Hand off to the official postgres Docker entrypoint
 #
-# KMS integration temporarily disabled — all secrets come from environment.
-# To re-enable KMS, see git history for the dstack-sdk derivation block.
+# All secrets come from environment variables.
 
 # --- Validate DB password ---
 if [ -z "${POSTGRES_PASSWORD:-}" ]; then
@@ -41,6 +40,11 @@ if [ -n "${WALG_S3_PREFIX:-}" ]; then
     sed -i '1i BASH_ENV=/etc/environment.walg' /etc/cron.d/walg-backup
     cron
 fi
+
+# --- Background: align hivemind-role password to POSTGRES_PASSWORD on every boot ---
+# See reset-password.sh. Cheap no-op when values already match; fixes the
+# case where the deploy-time env drifts from the initdb-time password.
+/usr/local/bin/reset-password.sh &
 
 # --- Hand off to official postgres entrypoint ---
 exec docker-entrypoint.sh "$@"

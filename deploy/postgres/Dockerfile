@@ -32,10 +32,12 @@ RUN echo "0 3 * * * root /usr/local/bin/backup-push.sh >> /var/log/walg-backup.l
 COPY postgres/backup-push.sh /usr/local/bin/backup-push.sh
 COPY postgres/init-archive.sh /docker-entrypoint-initdb.d/init-archive.sh
 COPY postgres/entrypoint-wrapper.sh /usr/local/bin/entrypoint-wrapper.sh
+COPY postgres/reset-password.sh /usr/local/bin/reset-password.sh
 
 RUN chmod +x /usr/local/bin/backup-push.sh \
     /docker-entrypoint-initdb.d/init-archive.sh \
-    /usr/local/bin/entrypoint-wrapper.sh
+    /usr/local/bin/entrypoint-wrapper.sh \
+    /usr/local/bin/reset-password.sh
 
 ENTRYPOINT ["/usr/local/bin/entrypoint-wrapper.sh"]
 CMD ["postgres"]

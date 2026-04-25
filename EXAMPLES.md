@@ -7,7 +7,7 @@ Copy-paste workflows for local development.
 Start local Postgres and build default agent images:
 
 ```bash
-docker compose -f deploy/docker-compose.dev.yml up -d
+docker compose -f scripts/docker-compose.dev.yml up -d
 
 docker build -t hivemind-default-index:local agents/default-index
 docker build -t hivemind-default-query:local agents/default-query
@@ -23,25 +23,21 @@ uv run python -m hivemind.server
 
 ## 1) Shell Setup
 
-These helpers support both auth-enabled and auth-disabled servers.
+Every public endpoint requires a tenant API key (`hmk_...`). Mint one with
+`hivemind admin create-tenant` (see README's Multi-tenancy section).
 
 ```bash
 export BASE="http://localhost:8100"
-# Set this only if HIVEMIND_API_KEY is configured on the server
-export API_KEY="${API_KEY:-}"
-
-AUTH_ARGS=()
-if [ -n "$API_KEY" ]; then
-  AUTH_ARGS=(-H "Authorization: Bearer $API_KEY")
-fi
+export API_KEY="hmk_..."          # tenant bearer
 
 api() {
-  curl -sS "${AUTH_ARGS[@]}" "$@"
+  curl -sS -H "Authorization: Bearer $API_KEY" "$@"
 }
 ```
 
 `jq` is used below for parsing JSON responses.
-If commands return `401 Unauthorized`, set `API_KEY` to match server `HIVEMIND_API_KEY`.
+If commands return `401 Unauthorized`, your tenant key is wrong or the
+tenant has been deleted/suspended.
 
 ## 2) Health Check
 

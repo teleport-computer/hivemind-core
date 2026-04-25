@@ -9,8 +9,17 @@
 
 services:
   hivemind:
-    image: ghcr.io/account-link/hivemind-core:latest
-    network_mode: host
+    # Pin to the build that attaches hivemind-core to the
+    # hivemind-sandbox Docker network at startup and uses self-IP as the
+    # bridge URL (v0.4.7-sandbox-net). Without this, spawned agent
+    # containers cannot reach the in-process LLM bridge — the sandbox
+    # network's gateway routes to the host, not into the hivemind
+    # container. Symptom before the fix: claude-code crashes with
+    # "Command failed with exit code 1", zero LLM calls, empty stderr.
+    # The `:latest` tag in GHCR is from pre-multi-tenant main — don't use.
+    image: ghcr.io/account-link/hivemind-core:fd87c82
+    ports:
+      - "8100:8100"
     environment:
       # Database — set to the SQL proxy URL on the postgres CVM
       # Format: https://<pg_cvm_id>-8080.app.phala.network
@@ -20,13 +29,45 @@ services:
       # Server
       HIVEMIND_HOST: "0.0.0.0"
       HIVEMIND_PORT: "8100"
-      HIVEMIND_API_KEY: ${HIVEMIND_API_KEY:?Set API key}
       HIVEMIND_CORS_ALLOW_ORIGINS: ${HIVEMIND_CORS_ALLOW_ORIGINS:-}
+
+      # Multi-tenant control plane
+      # HIVEMIND_ADMIN_KEY enables /v1/admin/tenants so you (the operator)
+      # can mint per-tenant API keys. Required. Generate with:
+      #   python3 -c "import secrets; print(secrets.token_urlsafe(32))"
+      HIVEMIND_ADMIN_KEY: ${HIVEMIND_ADMIN_KEY:?Set admin key for tenant provisioning}
+      # Must match SQL_PROXY_ADMIN_KEY on the postgres CVM — used for
+      # CREATE/DROP DATABASE when provisioning/deleting tenants.
+      HIVEMIND_SQL_PROXY_ADMIN_KEY: ${SQL_PROXY_ADMIN_KEY:?Set SQL proxy admin key}
+      HIVEMIND_CONTROL_DATABASE: ${HIVEMIND_CONTROL_DATABASE:-hivemind_control}
+      HIVEMIND_TENANT_CACHE_SIZE: ${HIVEMIND_TENANT_CACHE_SIZE:-32}
 
       # LLM proxy
       HIVEMIND_LLM_API_KEY: ${HIVEMIND_LLM_API_KEY:?Set LLM API key}
       HIVEMIND_LLM_BASE_URL: ${HIVEMIND_LLM_BASE_URL:-https://openrouter.ai/api/v1}
       HIVEMIND_LLM_MODEL: ${HIVEMIND_LLM_MODEL:-anthropic/claude-sonnet-4.5}
+
+      # On-chain app-auth registry (Tier 1 attestation binding).
+      # When set, the CLI auto-accepts an approved compose_hash and
+      # hard-aborts on a revoked one without any user prompt. Empty →
+      # CLI falls back to the local TOFU / change-prompt flow.
+      # Contract deployed on Sepolia 2026-04-25; owner holds the key in
+      # /Users/sxysun/Desktop/suapp/feedling-mcp-v1/contracts/.env.
+      HIVEMIND_APP_AUTH_CONTRACT: ${HIVEMIND_APP_AUTH_CONTRACT:-0x29b475E6D2e10bd3266569D4c5cf27BFd4f8c36E}
+      HIVEMIND_APP_AUTH_CHAIN_ID: ${HIVEMIND_APP_AUTH_CHAIN_ID:-11155111}
+      HIVEMIND_APP_AUTH_RPC_URL: ${HIVEMIND_APP_AUTH_RPC_URL:-https://ethereum-sepolia-rpc.publicnode.com}
+      HIVEMIND_APP_AUTH_EXPLORER_BASE_URL: ${HIVEMIND_APP_AUTH_EXPLORER_BASE_URL:-https://sepolia.etherscan.io}
+
+      # TLS-in-enclave (Tier 3 attestation binding — feedling's first binding).
+      # Turn on to have the enclave terminate TLS with a deterministic
+      # dstack-KMS-derived cert whose sha256(DER) is bound into the TDX
+      # quote's REPORT_DATA (v2). The CLI reconstructs the binding from
+      # (APP_VERSION, observed_fingerprint) and aborts on mismatch.
+      # Requires: (a) the service URL uses ``-8100s.app.phala.network``
+      # (the ``s`` suffix is Phala's TCP-passthrough convention), so the
+      # CLI sees the enclave's self-signed cert directly. (b) the CLI
+      # must be >=0.3.1 to consume the v2 report_data layout.
+      HIVEMIND_ENCLAVE_TLS: ${HIVEMIND_ENCLAVE_TLS:-1}
 
       # Docker sandbox — agents run as containers via host Docker daemon
       HIVEMIND_BRIDGE_HOST: "0.0.0.0"
@@ -34,17 +75,17 @@ services:
       HIVEMIND_ENFORCE_BRIDGE_ONLY_EGRESS: "false"
       HIVEMIND_CONTAINER_MEMORY_MB: "1024"
 
-      # Default agents
-      HIVEMIND_AUTOLOAD_DEFAULT_AGENTS: "true"
+      # Default agents — CI only builds base/core/postgres/sql-proxy.
+      # The 4 default agents (scope/query/index/mediator) are NOT in GHCR;
+      # set AUTOLOAD=false and upload them via `hivemind run` / the
+      # /v1/agents/upload API, or pre-build and push them to GHCR first.
+      HIVEMIND_AUTOLOAD_DEFAULT_AGENTS: "false"
       HIVEMIND_DEFAULT_SCOPE_IMAGE: ${HIVEMIND_DEFAULT_SCOPE_IMAGE:-}
       HIVEMIND_DEFAULT_QUERY_IMAGE: ${HIVEMIND_DEFAULT_QUERY_IMAGE:-}
       HIVEMIND_DEFAULT_INDEX_IMAGE: ${HIVEMIND_DEFAULT_INDEX_IMAGE:-}
       HIVEMIND_DEFAULT_MEDIATOR_IMAGE: ${HIVEMIND_DEFAULT_MEDIATOR_IMAGE:-}
-
-      # S3/R2 (for run artifacts)
-      HIVEMIND_S3_BUCKET: ${R2_BUCKET:-}
-      HIVEMIND_S3_ENDPOINT_URL: ${R2_ENDPOINT:-}
-      HIVEMIND_S3_ACCESS_KEY_ID: ${R2_ACCESS_KEY_ID:-}
-      HIVEMIND_S3_SECRET_ACCESS_KEY: ${R2_SECRET_ACCESS_KEY:-}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
+      # dstack socket — lets hivemind fetch its TDX quote + measurements
+      # for the /v1/attestation endpoint (compose-hash binding).
+      - /var/run/dstack.sock:/var/run/dstack.sock

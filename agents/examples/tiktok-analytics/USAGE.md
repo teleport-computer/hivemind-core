@@ -4,7 +4,7 @@
 
 - hivemind-core 正在运行 (本地 `localhost:8100` 或线上实例)
 - 数据库中已存在 `data_xordi_tiktok_oauth_watch_history` 表 (50 条记录)
-- S3/R2 配置已就绪 (`.env` 中的 `HIVEMIND_S3_*` 变量)
+- 报告存储由内置的 Postgres artifact store 提供，保留 24 小时 (由 `HIVEMIND_ARTIFACT_RETENTION_SECONDS` 配置)
 
 ```bash
 # 设置变量 (根据实际环境修改)
@@ -34,7 +34,7 @@ curl -s -X POST "$CORE_URL/v1/query-agents/submit" \
   -F "name=tiktok-analytics" \
   -F "archive=@/tmp/tiktok-analytics.tar.gz" \
   -F "prompt=Analyse TikTok watch history" \
-  -F "description=Summarise hashtag themes and per-user stats, upload report to R2" \
+  -F "description=Summarise hashtag themes and per-user stats, upload report to artifact store" \
   -F "max_llm_calls=5" \
   -F "max_tokens=50000" \
   -F "timeout_seconds=120" \
@@ -72,25 +72,40 @@ curl -s "$CORE_URL/v1/query-agents/runs/$RUN_ID" | python3 -m json.tool
     "run_id": "a1b2c3d4e5f6",
     "agent_id": "f6e5d4c3b2a1",
     "status": "running",
-    "s3_url": null,
     "error": null,
     "created_at": 1711612345.123,
-    "updated_at": 1711612350.456
+    "updated_at": 1711612350.456,
+    "artifacts": [],
+    "artifact_retention_seconds": 86400
 }
 ```
 
-完成后的返回（包含 R2 访问地址）：
+完成后的返回（包含已写入的 artifact 列表，通过服务端接口下载）：
 
 ```json
 {
     "run_id": "a1b2c3d4e5f6",
     "agent_id": "f6e5d4c3b2a1",
     "status": "completed",
-    "s3_url": "s3://hivemind-core-demo/query-agent-runs/a1b2c3d4e5f6/report.json",
     "error": null,
     "created_at": 1711612345.123,
-    "updated_at": 1711612380.789
+    "updated_at": 1711612380.789,
+    "artifacts": [
+        {
+            "filename": "report.json",
+            "content_type": "application/json",
+            "size_bytes": 2431,
+            "created_at": 1711612379.123
+        }
+    ],
+    "artifact_retention_seconds": 86400
 }
+```
+
+下载 artifact：
+
+```bash
+curl -s "$CORE_URL/v1/query/runs/$RUN_ID/artifacts/report.json" -o report.json
 ```
 
 ### Step 4: 简单轮询脚本
@@ -128,9 +143,10 @@ done
 │     → LLM 分析 hashtag 主题、内容分类、观看模式        │
 │     → 返回结构化 JSON                                │
 │                                                     │
-│  4. POST /sandbox/s3-upload                         │
-│     → 上传 report.json 到 R2                         │
-│     → 自动更新 run record 的 s3_url                   │
+│  4. POST /sandbox/artifact-upload                   │
+│     → 写入 report.json 到 Postgres artifact store    │
+│     → 通过 /v1/query/runs/{run_id}/artifacts 下载    │
+│     → 24 小时 TTL 自动清理                           │
 │                                                     │
 │  5. stdout → JSON summary                           │
 └─────────────────────────────────────────────────────┘
@@ -140,7 +156,7 @@ done
 
 ## 报告示例
 
-上传到 R2 的 `report.json` 结构：
+artifact store 中的 `report.json` 结构：
 
 ```json
 {

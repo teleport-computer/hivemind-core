@@ -11,7 +11,7 @@ import time
 from ..db import Database
 
 _COLUMNS = (
-    "run_id, agent_id, status, s3_url, error, "
+    "run_id, agent_id, status, error, "
     "created_at, updated_at, "
     "build_started_at, build_ended_at, "
     "scope_started_at, scope_ended_at, "
@@ -52,7 +52,6 @@ class RunStore:
             "scope_agent_id": scope_agent_id,
             "index_agent_id": index_agent_id,
             "status": "pending",
-            "s3_url": None,
             "error": None,
             "created_at": now,
             "updated_at": now,
@@ -63,7 +62,6 @@ class RunStore:
         run_id: str,
         status: str,
         *,
-        s3_url: str | None = None,
         error: str | None = None,
         output: str | None = None,
     ) -> bool:
@@ -71,14 +69,30 @@ class RunStore:
         now = time.time()
         rowcount = self.db.execute_commit(
             "UPDATE _hivemind_query_runs "
-            "SET status = %s, s3_url = COALESCE(%s, s3_url), "
+            "SET status = %s, "
             "error = COALESCE(%s, error), "
             "output = COALESCE(%s, output), "
             "updated_at = %s "
             "WHERE run_id = %s",
-            [status, s3_url, error, output, now, run_id],
+            [status, error, output, now, run_id],
         )
         return rowcount > 0
+
+    def scrub_expired(self, ttl_seconds: int) -> int:
+        """Null out output/error text on runs older than ttl_seconds.
+
+        Run metadata (timings, status, agent IDs) stays so the API still
+        reports that a run happened — we just stop holding the payload.
+        """
+        cutoff = time.time() - ttl_seconds
+        return self.db.execute_commit(
+            "UPDATE _hivemind_query_runs "
+            "SET output = NULL, error = NULL, index_output = NULL "
+            "WHERE updated_at < %s "
+            "AND (output IS NOT NULL OR error IS NOT NULL "
+            "OR index_output IS NOT NULL)",
+            [cutoff],
+        )
 
     def update_stage(
         self,

@@ -22,10 +22,26 @@ logger = logging.getLogger(__name__)
 _INTERNAL_PREFIX = "_hivemind_"
 
 
-def connect(dsn: str, proxy_key: str = "") -> Database | HttpDatabase:
-    """Create the right Database depending on DSN scheme."""
+def connect(
+    dsn: str,
+    proxy_key: str = "",
+    tenant_db: str | None = None,
+) -> Database | HttpDatabase:
+    """Create the right Database depending on DSN scheme.
+
+    If `tenant_db` is set and `dsn` is HTTP, the resulting ``HttpDatabase``
+    sends ``X-Tenant-DB`` on every request so the sql_proxy routes traffic
+    to the named Postgres database. For direct psycopg (non-HTTP) DSNs,
+    ``tenant_db`` rewrites the DSN's dbname component.
+    """
     if dsn.startswith("http://") or dsn.startswith("https://"):
-        return HttpDatabase(dsn, proxy_key=proxy_key)
+        return HttpDatabase(dsn, proxy_key=proxy_key, tenant_db=tenant_db)
+    if tenant_db:
+        # Direct psycopg: rewrite DSN's dbname to the tenant database.
+        from psycopg import conninfo as _conninfo
+        parsed = _conninfo.conninfo_to_dict(dsn)
+        parsed["dbname"] = tenant_db
+        dsn = _conninfo.make_conninfo(**parsed)
     return Database(dsn)
 
 
@@ -34,7 +50,12 @@ class Database:
 
     def __init__(self, dsn: str):
         self._dsn = dsn
-        self._conn = psycopg.connect(dsn, row_factory=dict_row, autocommit=False)
+        # autocommit=True: each statement is its own transaction. psycopg
+        # auto-rolls-back on failure, so a single SQL error can't poison the
+        # shared connection with InFailedSqlTransaction (which would 500 every
+        # subsequent request). All writes in this codebase are single-statement
+        # so we lose nothing by dropping implicit transactions.
+        self._conn = psycopg.connect(dsn, row_factory=dict_row, autocommit=True)
         self._lock = threading.RLock()
         self._bootstrap()
 
@@ -86,6 +107,21 @@ class Database:
                         output TEXT
                     )
                 """)
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS _hivemind_query_artifacts (
+                        run_id TEXT NOT NULL,
+                        filename TEXT NOT NULL,
+                        content BYTEA NOT NULL,
+                        content_type TEXT NOT NULL DEFAULT 'application/octet-stream',
+                        size_bytes BIGINT NOT NULL,
+                        created_at DOUBLE PRECISION NOT NULL,
+                        PRIMARY KEY (run_id, filename)
+                    )
+                """)
+                cur.execute(
+                    "CREATE INDEX IF NOT EXISTS _hivemind_query_artifacts_created_idx "
+                    "ON _hivemind_query_artifacts (created_at)"
+                )
                 # Migrate existing tables: add columns if missing
                 for col, coltype in [
                     ("build_started_at", "DOUBLE PRECISION"),
@@ -167,13 +203,21 @@ class HttpDatabase:
     connected via the sql_proxy sidecar.
     """
 
-    def __init__(self, base_url: str, proxy_key: str = ""):
+    def __init__(
+        self,
+        base_url: str,
+        proxy_key: str = "",
+        tenant_db: str | None = None,
+    ):
         import httpx
 
         self._base_url = base_url.rstrip("/")
-        self._headers = {}
+        self._headers: dict[str, str] = {}
         if proxy_key:
             self._headers["X-Proxy-Key"] = proxy_key
+        if tenant_db:
+            self._headers["X-Tenant-DB"] = tenant_db
+        self.tenant_db = tenant_db
         self._client = httpx.Client(
             base_url=self._base_url,
             headers=self._headers,
@@ -225,6 +269,21 @@ class HttpDatabase:
                 mediator_ended_at DOUBLE PRECISION,
                 output TEXT
             )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS _hivemind_query_artifacts (
+                run_id TEXT NOT NULL,
+                filename TEXT NOT NULL,
+                content BYTEA NOT NULL,
+                content_type TEXT NOT NULL DEFAULT 'application/octet-stream',
+                size_bytes BIGINT NOT NULL,
+                created_at DOUBLE PRECISION NOT NULL,
+                PRIMARY KEY (run_id, filename)
+            )
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS _hivemind_query_artifacts_created_idx
+            ON _hivemind_query_artifacts (created_at)
             """,
         ]:
             self.execute_commit(ddl)

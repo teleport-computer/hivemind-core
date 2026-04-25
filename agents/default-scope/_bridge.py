@@ -53,11 +53,88 @@ async def bridge_simulate(
         async with session.post(
             f"{BRIDGE_URL}/sandbox/simulate",
             json=payload,
-            headers={"Authorization": f"Bearer {SESSION_TOKEN}"},
+            headers={
+                "Authorization": f"Bearer {SESSION_TOKEN}",
+                # Telemetry tag: lets the bridge attribute sim calls to
+                # the MCP surface (this function) vs the Bash surface
+                # (play.py), so we can see which one scope actually prefers.
+                "X-Simulate-Caller": "mcp",
+            },
         ) as resp:
             if resp.status != 200:
                 return None
             return await resp.json()
+
+
+async def bridge_simulate_batch(
+    query_agent_id: str,
+    prompt: str,
+    candidates: list[str],
+    replay_tape: list[dict] | None = None,
+) -> dict | None:
+    """Call the sandbox simulate_batch endpoint. Runs up to 3 candidates concurrently."""
+    payload: dict[str, Any] = {
+        "query_agent_id": query_agent_id,
+        "prompt": prompt,
+        "candidates": candidates,
+    }
+    if replay_tape is not None:
+        payload["replay_tape"] = replay_tape
+    try:
+        async with aiohttp.ClientSession(timeout=_BRIDGE_TIMEOUT) as session:
+            async with session.post(
+                f"{BRIDGE_URL}/sandbox/simulate_batch",
+                json=payload,
+                headers={
+                    "Authorization": f"Bearer {SESSION_TOKEN}",
+                    "X-Simulate-Caller": "mcp_batch",
+                },
+            ) as resp:
+                if resp.status != 200:
+                    return None
+                return await resp.json()
+    except Exception:
+        return None
+
+
+async def bridge_verify_scope_fn(
+    source: str,
+    tests: list[dict] | None = None,
+) -> dict:
+    """Call the sandbox verify_scope_fn endpoint.
+
+    Returns dict like:
+      {"compiles": bool, "compile_error": str|None,
+       "all_tests_passed": bool, "results": [...]}
+    On transport error returns a compiles=False shaped dict so callers don't crash.
+    """
+    payload: dict[str, Any] = {
+        "source": source,
+        "tests": tests or [],
+    }
+    try:
+        async with aiohttp.ClientSession(timeout=_BRIDGE_TIMEOUT) as session:
+            async with session.post(
+                f"{BRIDGE_URL}/sandbox/verify_scope_fn",
+                json=payload,
+                headers={"Authorization": f"Bearer {SESSION_TOKEN}"},
+            ) as resp:
+                if resp.status != 200:
+                    text = await resp.text()
+                    return {
+                        "compiles": False,
+                        "compile_error": f"HTTP {resp.status}: {text[:300]}",
+                        "all_tests_passed": False,
+                        "results": [],
+                    }
+                return await resp.json()
+    except Exception as e:
+        return {
+            "compiles": False,
+            "compile_error": f"Bridge error: {e}",
+            "all_tests_passed": False,
+            "results": [],
+        }
 
 
 # ── Standard MCP tool definitions ──

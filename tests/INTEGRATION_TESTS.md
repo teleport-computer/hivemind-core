@@ -25,7 +25,7 @@ Use this file as the source of truth for live end-to-end checks.
    - `psql` (optional, for direct DB inspection)
    - `tar` (agent upload tests)
 2. Start local Postgres:
-   - `docker compose -f deploy/docker-compose.dev.yml up -d`
+   - `docker compose -f scripts/docker-compose.dev.yml up -d`
 3. Configure `.env` with a valid `HIVEMIND_LLM_API_KEY`.
    - For full completion runs with defaults, ensure these are set:
      - `HIVEMIND_AUTOLOAD_DEFAULT_AGENTS=true`
@@ -33,7 +33,7 @@ Use this file as the source of truth for live end-to-end checks.
      - `HIVEMIND_DEFAULT_QUERY_IMAGE=hivemind-default-query:local`
      - `HIVEMIND_DEFAULT_SCOPE_IMAGE=hivemind-default-scope:local`
      - `HIVEMIND_DEFAULT_MEDIATOR_IMAGE=hivemind-default-mediator:local`
-4. If `HIVEMIND_API_KEY` is set, include `Authorization: Bearer <key>` for all endpoints except health.
+4. Provision a tenant (`hivemind admin create-tenant`) and include `Authorization: Bearer <tenant-api-key>` for all endpoints except `/v1/health` and `/v1/healthz`.
 5. Export environment for command-line helpers:
    - `set -a; source .env; set +a`
 6. Build default local agent images:
@@ -47,8 +47,7 @@ Use this file as the source of truth for live end-to-end checks.
 8. Wait for health:
    - `curl -sS http://localhost:8100/v1/health`
 9. Verify default agents are registered (when autoload is enabled):
-   - No API key: `curl -sS http://localhost:8100/v1/agents`
-   - With API key: `curl -sS -H "Authorization: Bearer ${HIVEMIND_API_KEY}" http://localhost:8100/v1/agents`
+   - `curl -sS -H "Authorization: Bearer ${TENANT_API_KEY}" http://localhost:8100/v1/agents`
 
 ---
 
@@ -72,14 +71,9 @@ Use these shell variables in commands:
 
 ```bash
 export BASE="http://localhost:8100"
-export API_KEY="${HIVEMIND_API_KEY:-}"
+export API_KEY="${TENANT_API_KEY:?mint via 'hivemind admin create-tenant'}"
 
-# Optional auth argument helper
-if [ -n "$API_KEY" ]; then
-  AUTH=(-H "Authorization: Bearer $API_KEY")
-else
-  AUTH=()
-fi
+AUTH=(-H "Authorization: Bearer $API_KEY")
 ```
 
 ### Required Artifact Harness
@@ -272,6 +266,20 @@ Upload a query agent that:
 | 4.10 | Agent loops LLM calls beyond `max_llm_calls` | Bridge returns budget exhaustion (429) |
 | 4.11 | Agent sleeps beyond timeout | Sandbox terminates; output indicates timeout/no output sentinel |
 
+### 4c. Artifact upload round-trip (`/sandbox/artifact-upload` → Postgres → `/v1/query/runs/{run_id}/artifacts/{filename}`)
+
+Upload a query agent whose `agent.py` POSTs base64 bytes to the bridge's `/sandbox/artifact-upload`, then verify the server-side fetch path returns the same bytes.
+
+| Test | Action | Pass Criteria |
+|------|--------|---------------|
+| 4.12 | Agent posts `{"filename","content_base64","content_type"}` and receives `{path, size_bytes, retention_seconds}` | Response path is `/v1/query/runs/{run_id}/artifacts/{filename}`; `size_bytes` matches decoded length |
+| 4.13 | `GET /v1/agent-runs/{run_id}` after completion | `.artifacts[]` lists each uploaded filename with correct `content_type` and `size_bytes` |
+| 4.14 | `GET /v1/query/runs/{run_id}/artifacts/{filename}` | 200; body bytes equal to uploaded bytes; response headers include `content-type`, `content-disposition`, `x-retention-seconds`, `expires` |
+| 4.15 | `GET` for a non-existent filename under the same run | 404 with `{"detail":"Artifact not found or expired"}` |
+| 4.16 | Upload two artifacts with different content types (e.g. `application/json`, `text/plain`) in one run | Both fetchable; server returns each with its original `content_type` |
+
+Canonical live smoke (2026-04-23, EC2): 64-byte JSON + 30-byte text uploaded and fetched round-trip; pipeline duration dominated by scope phase (~224s) — upload path itself adds negligible latency.
+
 ---
 
 ## Phase 5: Scope Agent Simulation + Inspection Limits
@@ -335,11 +343,11 @@ Phase 0: API Surface                X/4
 Phase 1: Schema + Store             X/5
 Phase 2: Scope Function Isolation   X/5
 Phase 3: Scope Agent + Validation   X/8
-Phase 4: Sandbox Platform           X/11
+Phase 4: Sandbox Platform           X/16
 Phase 5: Scope Sim/Inspect Limits   X/5
 Phase 6: Tape Recorder + Replay     X/6
 Phase 7: Robustness                 X/4
-TOTAL: X/48
+TOTAL: X/53
 ```
 
 Security blockers:
@@ -369,7 +377,7 @@ At the end of a full completion run, output both:
     "phase_1": "X/5",
     "phase_2": "X/5",
     "phase_3": "X/8",
-    "phase_4": "X/11",
+    "phase_4": "X/16",
     "phase_5": "X/5",
     "phase_6": "X/6",
     "phase_7": "X/4",
@@ -398,5 +406,5 @@ At the end of a full completion run, output both:
 
 ```bash
 if [ -f /tmp/hivemind-server.pid ]; then kill "$(cat /tmp/hivemind-server.pid)" 2>/dev/null || true; fi
-docker compose -f deploy/docker-compose.dev.yml down
+docker compose -f scripts/docker-compose.dev.yml down
 ```
