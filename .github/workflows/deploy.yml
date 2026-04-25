@@ -69,9 +69,17 @@ on:
         description: "Optional Phala node-id for FIRST-TIME create on a new cluster (e.g. 18 = prod9). Leave empty for normal in-place updates of an existing CVM."
         required: false
         default: ""
+      core_name:
+        description: "Override CVM name for hivemind-core (e.g. hivemind-core-prod9 for first-time create alongside legacy). Leave empty for canonical 'hivemind-core'."
+        required: false
+        default: ""
+      pg_name:
+        description: "Override CVM name for hivemind-pg (e.g. hivemind-pg-prod9 for first-time create alongside legacy). Leave empty for canonical 'hivemind-pg'."
+        required: false
+        default: ""
 
 concurrency:
-  group: phala-deploy-${{ github.event.inputs.target }}
+  group: phala-deploy-${{ github.event.inputs.target }}-${{ github.event.inputs.core_name }}${{ github.event.inputs.pg_name }}
   cancel-in-progress: false
 
 jobs:
@@ -84,6 +92,8 @@ jobs:
       DEPLOY_REF: ${{ github.event.inputs.ref }}
       IMAGE_SHA: ${{ github.event.inputs.image_sha }}
       NODE_ID: ${{ github.event.inputs.node_id }}
+      CORE_NAME: ${{ github.event.inputs.core_name }}
+      PG_NAME: ${{ github.event.inputs.pg_name }}
 
     steps:
       - name: Configure SSH
@@ -133,7 +143,7 @@ jobs:
             -o ServerAliveInterval=30 -o ServerAliveCountMax=20 \
             -o TCPKeepAlive=yes \
             "${EC2_USER}@${EC2_HOST}" \
-            "TARGET='${TARGET}' DEPLOY_REF='${DEPLOY_REF}' IMAGE_SHA='${IMAGE_SHA}' NODE_ID='${NODE_ID}' PHALA_CLOUD_API_KEY='${PHALA_CLOUD_API_KEY}' CLOUDFLARE_API_TOKEN_OVERRIDE='${CLOUDFLARE_API_TOKEN}' bash -s" <<'REMOTE'
+            "TARGET='${TARGET}' DEPLOY_REF='${DEPLOY_REF}' IMAGE_SHA='${IMAGE_SHA}' NODE_ID='${NODE_ID}' CORE_NAME='${CORE_NAME}' PG_NAME='${PG_NAME}' PHALA_CLOUD_API_KEY='${PHALA_CLOUD_API_KEY}' CLOUDFLARE_API_TOKEN_OVERRIDE='${CLOUDFLARE_API_TOKEN}' bash -s" <<'REMOTE'
           set -euo pipefail
           cd ~/hivemind-core
 
@@ -166,7 +176,13 @@ jobs:
           # NODE_ID is forwarded here too — deploy.sh uses it to switch
           # between create-mode (`-n <name> --node-id <id>`) and the
           # default in-place update (`--cvm-id <name>`). Empty → update.
-          NODE_ID="${NODE_ID:-}" ./deploy/phala/deploy.sh "${TARGET}"
+          # CORE_NAME / PG_NAME let a first-time create on a new cluster
+          # use a fresh name to coexist with the legacy CVM during a
+          # cutover (e.g. PG_NAME=hivemind-pg-prod9).
+          NODE_ID="${NODE_ID:-}" \
+          CORE_NAME="${CORE_NAME:-hivemind-core}" \
+          PG_NAME="${PG_NAME:-hivemind-pg}" \
+            ./deploy/phala/deploy.sh "${TARGET}"
           REMOTE
 
       # On-chain compose-hash registration. After a successful core
