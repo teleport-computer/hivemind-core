@@ -1,8 +1,31 @@
 # docker-compose.core.yaml — Phala CVM deployment for hivemind-core (App CVM)
 #
-# All agents run as Docker containers inside this CVM.
-# The CVM's host Docker daemon is shared via socket mount.
-# PostgreSQL runs in a separate CVM (see docker-compose.postgres.yaml).
+# Two-surface deployment, prod9 (matches hermes / feedling Phase E):
+#
+#   1. Friendly URL  https://hivemind.teleport.computer
+#      Served by dstack-ingress (LE cert, ACME DNS-01 inside the enclave
+#      via Cloudflare). This is the default URL clients should use.
+#
+#   2. Raw URL       https://<app_id>-8100s.dstack-pha-prod9.phala.network
+#      TCP-passthrough straight to the hivemind container's enclave TLS
+#      cert (deterministic, dstack-KMS-derived, sha256(cert.DER) bound
+#      into the TDX quote's REPORT_DATA). This is the Tier-3 attestation
+#      pinning surface — what the CLI uses internally for /v1/attestation
+#      verification, and what audit verifiers can pin out-of-band.
+#
+# REQUIRED CVM NODE: prod9. dstack-ingress 20250929 + the multi-domain
+# `_dstack-app-address.<domain>` TXT routing only works on the prod9
+# gateway. New CVM = new app_id = re-approve compose_hash on-chain.
+#
+# All agents run as Docker containers inside this CVM. The CVM's host
+# Docker daemon is shared via socket mount. PostgreSQL runs in a separate
+# CVM (see docker-compose.postgres.yaml).
+#
+# DNS records dstack-ingress manages automatically (CF token must have
+# Zone.DNS:Edit on teleport.computer):
+#   CNAME hivemind.teleport.computer  → <app-id>.dstack-pha-prod9.phala.network
+#   TXT   _dstack-app-address.hivemind.teleport.computer → <app-id>:443
+#   CAA   hivemind.teleport.computer  pinned to Let's Encrypt
 #
 # Deploy:
 #   phala deploy -n hivemind-core -c deploy/phala/docker-compose.core.yaml -e deploy/phala/.env --wait
@@ -89,3 +112,46 @@ services:
       # dstack socket — lets hivemind fetch its TDX quote + measurements
       # for the /v1/attestation endpoint (compose-hash binding).
       - /var/run/dstack.sock:/var/run/dstack.sock
+
+  # --- dstack-ingress: LE-cert TLS termination for the friendly domain. ---
+  # ACME DNS-01 challenge happens inside the enclave; the CF API token
+  # never leaves this container, scope is Zone.DNS:Edit on the
+  # teleport.computer zone. The LE-issued cert + private key live on the
+  # `letsencrypt` volume (TEE-encrypted disk).
+  #
+  # Upstream is hivemind:8100 over TLS (the enclave-derived cert).
+  # Internal hop, internal Docker bridge — cert verification skipped at
+  # the ingress. The transport secrecy that matters is wire→ingress (LE)
+  # and the per-app envelope crypto on response payloads. The Tier-3
+  # cert pin is still verifiable out-of-band on the `-8100s.` raw route.
+  dstack-ingress:
+    image: dstacktee/dstack-ingress:20250929@sha256:2b47b3e538df0b3e7724255b89369194c8c83a7cfba64d2faf0115ad0a586458
+    restart: unless-stopped
+    ports:
+      - "443:443"
+    environment:
+      DOMAIN: ${HIVEMIND_FRIENDLY_DOMAIN:-hivemind.teleport.computer}
+      DNS_PROVIDER: "cloudflare"
+      # Required: scope = Zone.DNS:Edit on the friendly-domain zone.
+      # Injected via `phala deploy -e` (encrypted env channel, not in
+      # compose_hash). Failing fast if missing — silently dropping it
+      # would leave the CVM with no TLS termination.
+      CLOUDFLARE_API_TOKEN: ${CLOUDFLARE_API_TOKEN:?Set CF token (Zone.DNS:Edit on teleport.computer) — see deploy/phala/DEPLOY.md}
+      GATEWAY_DOMAIN: "_.dstack-pha-prod9.phala.network"
+      CERTBOT_EMAIL: ${CERTBOT_EMAIL:-sxysun9@gmail.com}
+      SET_CAA: "true"
+      # Upstream — hivemind speaks enclave-TLS on 8100. ingress
+      # re-encrypts toward LE cert on the public side.
+      TARGET_ENDPOINT: "https://hivemind:8100"
+    volumes:
+      - /var/run/dstack.sock:/var/run/dstack.sock
+      - hivemind_ingress_letsencrypt:/etc/letsencrypt
+      - hivemind_ingress_evidences:/evidences
+    depends_on:
+      - hivemind
+
+volumes:
+  hivemind_ingress_letsencrypt:
+    name: hivemind_ingress_letsencrypt
+  hivemind_ingress_evidences:
+    name: hivemind_ingress_evidences

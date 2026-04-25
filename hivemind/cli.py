@@ -384,6 +384,39 @@ def _fetch_attestation_https(parsed) -> tuple[dict, bytes | None]:
         return ({"ready": False, "reason": "invalid_json"}, fp)
 
 
+def _fetch_cert_fingerprint(url: str) -> bytes | None:
+    """Open a TLS connection to ``url`` and return ``sha256(cert.DER)``.
+
+    No HTTP request is sent — we only need the peer cert from the
+    handshake. Used for Tier-3 cross-pinning when the user's service
+    URL is fronted by dstack-ingress (LE cert, fingerprint ≠ REPORT_DATA)
+    but the raw `-<port>s.<gateway>` URL still exposes the enclave cert.
+
+    Returns None on any error — caller decides whether that's fatal.
+    """
+    parsed = _urlparse(url)
+    if parsed.scheme != "https":
+        return None
+    host = parsed.hostname or ""
+    port = parsed.port or 443
+    if not host:
+        return None
+    ctx = _ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = _ssl.CERT_NONE
+    try:
+        import socket as _sock
+
+        with _sock.create_connection((host, port), timeout=8) as raw:
+            with ctx.wrap_socket(raw, server_hostname=host) as tls:
+                der = tls.getpeercert(binary_form=True)
+    except (OSError, _ssl.SSLError):
+        return None
+    if not der:
+        return None
+    return _hashlib.sha256(der).digest()
+
+
 def _dcap_augment(bundle: dict) -> dict:
     """Cryptographically verify the quote and pin the compose_hash.
 
@@ -595,12 +628,57 @@ def _verify_tls_pin(
             _pin_service_cert(observed_fp, cert_pem, service=service)
         return
 
-    # The cert on the wire is NOT the one bound into the quote.
+    # User's URL fingerprint doesn't match REPORT_DATA. This is normally
+    # MITM, BUT it's also expected when the service is fronted by
+    # dstack-ingress (friendly URL → LE cert at the wire, enclave cert
+    # one hop deeper at the raw passthrough URL). Try the fallback:
+    # fetch the cert from the bundle-declared `pinning_url` and check
+    # THAT one against REPORT_DATA. If that matches, Tier 3 is verified
+    # via the alternate surface; the friendly URL relies on standard LE
+    # cert validation (which httpx already enforces). Mismatch on both
+    # → genuine MITM, abort.
+    pinning_url = (att.get("tls") or {}).get("pinning_url", "") or ""
+    if pinning_url and service and pinning_url.rstrip("/") != service.rstrip("/"):
+        alt_fp = _fetch_cert_fingerprint(pinning_url)
+        if alt_fp is not None and _dcap.verify_report_data_v2(
+            rd_hex,
+            observed_fingerprint=alt_fp,
+            hivemind_version=hv,
+        ):
+            declared = (att.get("tls") or {}).get(
+                "cert_fingerprint_sha256_hex", ""
+            ).lower()
+            if declared and declared != alt_fp.hex():
+                click.echo(
+                    f"\nError: bundle's declared cert fingerprint "
+                    f"({declared[:16]}…) disagrees with the cert observed "
+                    f"on the pinning surface {pinning_url} "
+                    f"({alt_fp.hex()[:16]}…).",
+                    err=True,
+                )
+                raise SystemExit(4)
+            click.echo(
+                f"  Tier-3 TLS pin: verified via {pinning_url}",
+                err=True,
+            )
+            cert_pem = (att.get("tls") or {}).get("cert_pem", "")
+            if cert_pem:
+                # Pin only against the raw URL (where the enclave cert
+                # lives). Friendly URL keeps normal LE validation.
+                _pin_service_cert(alt_fp, cert_pem, service=pinning_url)
+            return
+
+    # Neither the user's URL nor the pinning_url presented a cert
+    # bound into the quote — that's genuine MITM territory.
     click.echo(
         "\nError: TLS cert fingerprint does not match the value bound "
         "into the TDX quote's REPORT_DATA.\n"
         f"  Observed sha256(cert.DER): {observed_fp.hex()}\n"
-        "  This is either a man-in-the-middle between your CLI and the "
+        + (
+            f"  Also tried pinning surface {pinning_url} — no match either.\n"
+            if pinning_url else ""
+        )
+        + "  This is either a man-in-the-middle between your CLI and the "
         "enclave, or the server is running an old image whose quote was "
         "generated for a different cert.",
         err=True,

@@ -86,6 +86,7 @@ def derive_tls_cert_and_key(dstack: Any) -> dict[str, Any]:
             x509.SubjectAlternativeName(
                 [
                     x509.DNSName("hivemind-enclave"),
+                    x509.DNSName("*.dstack-pha-prod9.phala.network"),
                     x509.DNSName("*.dstack-pha-prod5.phala.network"),
                     x509.DNSName("*.app.phala.network"),
                 ]

@@ -30,6 +30,12 @@ name: Deploy to Phala CVM (via EC2 relay)
 #   EC2_SSH_PRIVATE_KEY   — OpenSSH private key authorized on the relay
 #   PHALA_CLOUD_API_KEY   — optional; injected per-run so the relay
 #                           doesn't depend on stale stored creds
+#   CLOUDFLARE_API_TOKEN  — optional override; if set, replaces the
+#                           token in the relay's .env for this deploy
+#                           only. Must be a Zone.DNS:Edit token on the
+#                           teleport.computer zone. Leave empty in GH
+#                           secrets to use the value baked into the
+#                           relay's deploy/phala/.env.
 #
 # Inputs:
 #   target     — core | postgres | all (which CVM(s) to redeploy)
@@ -102,6 +108,7 @@ jobs:
           EC2_HOST: ${{ secrets.EC2_HOST }}
           EC2_USER: ${{ secrets.EC2_USER }}
           PHALA_CLOUD_API_KEY: ${{ secrets.PHALA_CLOUD_API_KEY }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: |
           set -euo pipefail
 
@@ -111,12 +118,17 @@ jobs:
           # vars are forwarded explicitly via `ssh -o SendEnv` which
           # requires AcceptEnv on the server. Simpler: pass them as
           # leading `KEY=VALUE` pairs on the command line instead.
+          #
+          # CLOUDFLARE_API_TOKEN: pass as override only when set in GH
+          # secrets — empty string is treated as "use the relay's .env
+          # value". The deploy script's pre-check enforces the var is
+          # present, so dropping it would never silently break.
 
           ssh -i ~/.ssh/id_ed25519 -o BatchMode=yes \
             -o ServerAliveInterval=30 -o ServerAliveCountMax=20 \
             -o TCPKeepAlive=yes \
             "${EC2_USER}@${EC2_HOST}" \
-            "TARGET='${TARGET}' DEPLOY_REF='${DEPLOY_REF}' IMAGE_SHA='${IMAGE_SHA}' PHALA_CLOUD_API_KEY='${PHALA_CLOUD_API_KEY}' bash -s" <<'REMOTE'
+            "TARGET='${TARGET}' DEPLOY_REF='${DEPLOY_REF}' IMAGE_SHA='${IMAGE_SHA}' PHALA_CLOUD_API_KEY='${PHALA_CLOUD_API_KEY}' CLOUDFLARE_API_TOKEN_OVERRIDE='${CLOUDFLARE_API_TOKEN}' bash -s" <<'REMOTE'
           set -euo pipefail
           cd ~/hivemind-core
 
@@ -132,6 +144,17 @@ jobs:
             sed -i -E "s|(ghcr\.io/account-link/hivemind-core:)[A-Za-z0-9._-]+|\1${IMAGE_SHA}|" \
               deploy/phala/docker-compose.core.yaml
             grep "image:" deploy/phala/docker-compose.core.yaml
+          fi
+
+          if [ -n "${CLOUDFLARE_API_TOKEN_OVERRIDE:-}" ]; then
+            echo "── CF token override: patching deploy/phala/.env (per-run) ──"
+            # Replace the existing line if present, else append.
+            if grep -q '^CLOUDFLARE_API_TOKEN=' deploy/phala/.env; then
+              sed -i -E "s|^CLOUDFLARE_API_TOKEN=.*|CLOUDFLARE_API_TOKEN=${CLOUDFLARE_API_TOKEN_OVERRIDE}|" \
+                deploy/phala/.env
+            else
+              echo "CLOUDFLARE_API_TOKEN=${CLOUDFLARE_API_TOKEN_OVERRIDE}" >> deploy/phala/.env
+            fi
           fi
 
           echo "── deploy ($TARGET) ─────────────────────────────"

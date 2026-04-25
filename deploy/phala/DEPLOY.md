@@ -63,7 +63,47 @@ SQL_PROXY_KEY=<same data-plane key as above>
 SQL_PROXY_ADMIN_KEY=<same admin key as above>
 HIVEMIND_ADMIN_KEY=<hivemind admin key>
 HIVEMIND_LLM_API_KEY=<OpenRouter / Anthropic key>
+
+# Cloudflare DNS for the friendly URL (prod9 dstack-ingress).
+# Token scope: Zone.DNS:Edit on the teleport.computer zone.
+# Mint at https://dash.cloudflare.com/profile/api-tokens
+CLOUDFLARE_API_TOKEN=cfat_...
+HIVEMIND_FRIENDLY_DOMAIN=hivemind.teleport.computer
+CERTBOT_EMAIL=ops@yourdomain.example
 ```
+
+## Step 0.5: Cloudflare DNS / dstack-ingress prerequisites
+
+The shipped compose runs the Phase E pattern: a `dstack-ingress` sidecar
+inside the enclave issues a Let's Encrypt cert via DNS-01 on every fresh
+deploy. That requires a Cloudflare API token with `Zone.DNS:Edit` scope
+on the zone owning your friendly domain (default
+`hivemind.teleport.computer`).
+
+1. Create the zone in Cloudflare (or use an existing one).
+2. Mint a custom token at
+   <https://dash.cloudflare.com/profile/api-tokens> with permission
+   `Zone › DNS › Edit` scoped to that single zone.
+3. Put it in `deploy/phala/.env` as `CLOUDFLARE_API_TOKEN=cfat_...`
+   (alongside the other secrets above). The token is sealed via
+   `phala deploy -e` into the encrypted env channel; it never lives
+   in the compose-hash-bound parts of the compose file.
+4. Optional: also store it as a GitHub secret named
+   `CLOUDFLARE_API_TOKEN` so the CICD relay deploy can override the
+   EC2-side value for a single run (see `.github/workflows/deploy.yml`).
+
+`dstack-ingress` itself manages the DNS records — you do **not** create
+A/CNAME/TXT/CAA entries by hand. On first boot it writes:
+
+```
+CNAME hivemind.teleport.computer  → <app-id>.dstack-pha-prod9.phala.network
+TXT   _dstack-app-address.hivemind.teleport.computer → <app-id>:443
+CAA   hivemind.teleport.computer  pinned to Let's Encrypt
+```
+
+If the token is missing, `deploy/phala/deploy.sh` aborts in the
+pre-check before any CVM changes — see the `${VAR:?...}` guard on
+`CLOUDFLARE_API_TOKEN` in the compose file.
 
 ## Step 1: Deploy Postgres CVM
 
@@ -101,18 +141,25 @@ phala deploy -n hivemind-core \
 Verify liveness (no auth required):
 
 ```bash
-curl https://<core_cvm_id>-8100.app.phala.network/v1/healthz
+curl https://hivemind.teleport.computer/v1/healthz
 # {"ok": true}
 ```
 
-> **Enclave-TLS URLs.** The shipped compose sets `HIVEMIND_ENCLAVE_TLS=1`,
-> which means the CVM terminates TLS itself with a dstack-KMS-derived cert
-> bound into the TDX quote. Use the `-8100s.` (TCP-passthrough) suffix —
-> e.g. `https://<core_cvm_id>-8100s.dstack-pha-prod5.phala.network`. The
-> `hivemind` CLI auto-pins this cert; for raw `curl` you can pass
-> `--cacert ~/.hivemind/enclave-tls-<fp16>.pem` (written by the CLI on
-> first connection) or `-k` if you've already verified the fingerprint
-> out of band.
+> **Two-surface URLs (prod9, dstack-ingress).** The shipped compose ships
+> the Phase E pattern: a `dstack-ingress` sidecar terminates LE-issued
+> TLS for `hivemind.teleport.computer` (ACME DNS-01 via Cloudflare,
+> issued *inside* the enclave), and the hivemind container itself keeps
+> `HIVEMIND_ENCLAVE_TLS=1` for the raw passthrough route.
+>
+> - **Daily use** → `https://hivemind.teleport.computer` (LE cert,
+>   normal `curl` / browser validation). This is what `hivemind init
+>   --service ...` should point at by default.
+> - **Tier-3 pinning** → `https://<core_cvm_id>-8100s.dstack-pha-prod9.phala.network`
+>   (gateway TCP-passthrough, enclave-derived cert). The CLI auto-
+>   discovers this URL from `/v1/attestation`'s `tls.pinning_url`
+>   field and pins it transparently. Raw `curl` on this URL needs
+>   `--cacert ~/.hivemind/enclave-tls-<fp16>.pem` (written by the CLI
+>   on first connection) or `-k`.
 
 ## Step 2.5: Approve the compose_hash
 
@@ -138,7 +185,7 @@ contract owner has to approve the hash *before* clients connect:
 
 ```bash
 # Find the hash the CVM is actually running (no auth required)
-curl https://<core_cvm_id>-8100s.dstack-pha-prod5.phala.network/v1/attestation \
+curl https://hivemind.teleport.computer/v1/attestation \
   | jq -r .attestation.compose_hash
 # → 77c7624144c415e55b5fc6d70d36a27f26a02a12a14b9612d00fa4547ae9bccd
 
@@ -162,7 +209,7 @@ stays on your laptop — it never gives you access to tenant data, only to
 create/delete tenants.
 
 ```bash
-export CORE_URL=https://<core_cvm_id>-8100.app.phala.network
+export CORE_URL=https://hivemind.teleport.computer
 export HIVEMIND_ADMIN_KEY=<admin key from Step 0>
 
 # Via CLI
@@ -222,7 +269,7 @@ If you have a pre-multi-tenant deploy where all data lives in a database
 literally named `hivemind`, the one-shot migration script adopts it:
 
 ```bash
-export CORE_URL=https://<core_cvm_id>-8100.app.phala.network
+export CORE_URL=https://hivemind.teleport.computer
 export HIVEMIND_ADMIN_KEY=<admin key>
 export LEGACY_DB=hivemind            # default; override if your DB has a different name
 export TENANT_NAME="migrated-legacy" # optional cosmetic label

@@ -249,8 +249,11 @@ uv run pytest tests/test_integration_docker.py -v
 ## Production deploy (Phala dstack)
 
 Live instances:
-- hivemind-pg:   https://2181af2d134123a46613f62a0311dd1f5af984be-8080.dstack-pha-prod5.phala.network
-- hivemind-core: https://37d4e4242a99cde0b9066dd81f854cb09e164f38-8100.dstack-pha-prod5.phala.network
+- **hivemind-core** (friendly URL):  https://hivemind.teleport.computer
+  - Raw / Tier-3 pin URL: `https://<core_app_id>-8100s.dstack-pha-prod9.phala.network`
+- **hivemind-pg** (sql proxy): `https://<pg_app_id>-8080.dstack-pha-prod9.phala.network`
+
+The friendly URL is fronted by `dstack-ingress` (the Phase E pattern feedling and hermes both ship). It terminates LE-issued TLS inside the enclave (ACME DNS-01 via Cloudflare). Tier-3 cert pinning still works — the CLI auto-discovers the raw passthrough URL from `/v1/attestation` and verifies the enclave cert there.
 
 ```bash
 phala deploy -n hivemind-pg   -c deploy/phala/docker-compose.postgres.yaml -e deploy/phala/.env.postgres --wait

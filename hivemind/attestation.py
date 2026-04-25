@@ -102,6 +102,32 @@ def _parse_mr_config_id(quote_hex: str) -> str:
         return ""
 
 
+def _pinning_url(app_id: str) -> str:
+    """Construct the raw `-<port>s.<gateway>` URL for Tier-3 cert pinning.
+
+    When the deploy lives behind dstack-ingress (friendly domain), the
+    user's HTTPS connection terminates on an LE cert — pinning the
+    enclave-derived cert against REPORT_DATA can't work on that hop.
+    This URL gives the CLI (and any out-of-band auditor) a separate
+    surface that DOES expose the enclave cert via gateway TCP-passthrough.
+
+    Empty if HIVEMIND_ENCLAVE_TLS is off (no Tier 3 to pin) or app_id
+    is missing — clients should treat empty as "Tier 3 not available".
+    Override the gateway via HIVEMIND_PINNING_GATEWAY (e.g. for prod5
+    legacy deploys), and the listen port via HIVEMIND_PORT.
+    """
+    if not os.environ.get("HIVEMIND_ENCLAVE_TLS"):
+        return ""
+    if not app_id:
+        return ""
+    gateway = os.environ.get(
+        "HIVEMIND_PINNING_GATEWAY",
+        "dstack-pha-prod9.phala.network",
+    )
+    port = os.environ.get("HIVEMIND_PORT", "8100")
+    return f"https://{app_id}-{port}s.{gateway}"
+
+
 def _app_auth_metadata() -> dict[str, Any]:
     """Assemble the `app_auth` block exposed in the bundle.
 
@@ -212,6 +238,13 @@ def bootstrap() -> None:
                     if tls_bundle
                     else ""
                 ),
+                # Tier-3 pinning surface — the gateway TCP-passthrough
+                # URL where the enclave cert is reachable. When the user
+                # talks to a friendly URL via dstack-ingress, the LE
+                # cert at that hop won't match REPORT_DATA; this is the
+                # alternate URL whose cert WILL match. Empty string
+                # means Tier 3 isn't available.
+                "pinning_url": _pinning_url(info.app_id),
             },
         }
         # Stash cert/key for the server to consume — server.py reads

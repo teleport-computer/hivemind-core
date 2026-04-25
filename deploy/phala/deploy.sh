@@ -29,10 +29,10 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
 ENV_FILE="${SCRIPT_DIR}/.env"
-# 300s isn't enough for a Tier 3 (HIVEMIND_ENCLAVE_TLS=1) restart: the
-# enclave has to derive a fresh KMS-bound cert and the gateway's
-# TCP-passthrough route only starts answering after the new cert is
-# served. Observed ~5–7 minutes end-to-end on dstack-pha-prod5.
+# 600s isn't tight: a fresh prod9 deploy has to (a) derive the
+# enclave-TLS cert via dstack-KMS, (b) run ACME DNS-01 through Cloudflare
+# (CAA + TXT propagation), (c) wait for gateway routes to become live.
+# Observed ~5–8 minutes end-to-end on dstack-pha-prod9.
 HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-600}"
 
 CORE_NAME="hivemind-core"
@@ -120,7 +120,7 @@ service_url() {
     [ -n "${app_id}" ] || die "could not resolve app_id for ${name}"
     local suffix=""
     [ "${tls_passthrough}" = "1" ] && suffix="s"
-    echo "https://${app_id}-${port}${suffix}.dstack-pha-prod5.phala.network"
+    echo "https://${app_id}-${port}${suffix}.dstack-pha-prod9.phala.network"
 }
 
 # Does this core compose have enclave TLS enabled (default or override)?
