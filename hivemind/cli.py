@@ -790,8 +790,15 @@ def _verify_tls_pin(
                     err=True,
                 )
                 raise SystemExit(4)
+            # Show the cert fingerprint (the actual thing being pinned)
+            # instead of the raw `-8100s.` Phala-gateway URL. The URL is
+            # an implementation detail of where the enclave cert lives;
+            # the fingerprint is what's bound into the TDX quote and
+            # what an auditor compares. Full URL still available via
+            # `hivemind attestation --raw` for anyone who wants it.
             click.echo(
-                f"  Tier-3 TLS pin: verified via {pinning_url}",
+                f"  Enclave cert verified against TDX quote "
+                f"(sha256: {alt_fp.hex()[:16]}…)",
                 err=True,
             )
             cert_pem = (att.get("tls") or {}).get("cert_pem", "")
