@@ -124,10 +124,19 @@ deploy_and_seal() {
         log "creating ${name} on node-id=${NODE_ID} (compose=${compose})"
         phala deploy -n "${name}" --node-id "${NODE_ID}" \
             -c "${compose}" -e "${env_file}" --wait
-    else
-        log "updating ${name} in place (compose=${compose})"
-        phala deploy --cvm-id "${name}" -c "${compose}" -e "${env_file}" --wait
+        # In create-mode `phala deploy` already seals every variable from
+        # the -e file into the new CVM's encrypted env channel — running
+        # `phala envs update` immediately afterward fails with "Another
+        # operation is already in progress" because the CVM is still
+        # provisioning. Skip the re-seal + restart entirely; they only
+        # exist to compensate for a known bug in the in-place update path
+        # where `--cvm-id` drops vars not listed in -e.
+        log "create-mode: env vars already sealed by phala deploy (skipping re-seal)"
+        return 0
     fi
+
+    log "updating ${name} in place (compose=${compose})"
+    phala deploy --cvm-id "${name}" -c "${compose}" -e "${env_file}" --wait
 
     log "re-sealing env vars on ${name}"
     phala envs update --cvm-id "${name}" -e "${env_file}"
