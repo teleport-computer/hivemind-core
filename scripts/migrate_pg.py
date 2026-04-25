@@ -93,7 +93,14 @@ class Proxy:
             headers=self._proxy_headers(db),
             json={"sql": sql, "params": params or []},
         )
-        r.raise_for_status()
+        if r.status_code != 200:
+            try:
+                err = (r.json() or {}).get("error") or r.text
+            except Exception:
+                err = r.text
+            raise RuntimeError(
+                f"/execute {r.status_code}: {err} (sql={sql[:200]!r})"
+            )
         body = r.json()
         if "error" in body:
             raise RuntimeError(f"/execute error: {body['error']} (sql={sql!r})")
