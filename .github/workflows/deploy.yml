@@ -15,8 +15,15 @@ name: Deploy to Phala CVM (via EC2 relay)
 #   - the `phala` CLI is stateful (~/.phala-cloud/credentials.json); the
 #     relay holds that state so each deploy doesn't re-auth
 #
-# Manual-only (workflow_dispatch). We intentionally do NOT auto-deploy
-# on build-images success — redeploys should be an explicit decision.
+# Triggers:
+#  - `workflow_run` after `Build & Push Images` succeeds on `main`:
+#    auto-deploys core (only) using the freshly-built `latest` image.
+#    This keeps the live CVM in lock-step with main without operator
+#    intervention. Postgres is intentionally excluded from auto-deploys
+#    — pg restarts disrupt active queries and the schema rarely changes
+#    in lock-step with code, so they remain manual.
+#  - `workflow_dispatch` for manual override: research branches, image
+#    SHA pins, postgres-only redeploys, first-time prod-cluster creates.
 #
 # Prereqs on the EC2 relay (see deploy/ec2/README.md for bootstrap):
 #   - node + phala CLI installed, `phala status` shows correct workspace
@@ -46,6 +53,10 @@ name: Deploy to Phala CVM (via EC2 relay)
 #                use whatever pin is on the checked-out ref.
 
 on:
+  workflow_run:
+    workflows: ["Build & Push Images"]
+    types: [completed]
+    branches: [main]
   workflow_dispatch:
     inputs:
       target:
@@ -83,17 +94,29 @@ on:
         default: ""
 
 concurrency:
-  group: phala-deploy-${{ github.event.inputs.target }}-${{ github.event.inputs.core_name }}${{ github.event.inputs.pg_name }}
+  group: phala-deploy-${{ github.event.inputs.target || 'core' }}-${{ github.event.inputs.core_name }}${{ github.event.inputs.pg_name }}
   cancel-in-progress: false
 
 jobs:
   deploy:
-    name: "Deploy ${{ github.event.inputs.target }} @ ${{ github.event.inputs.ref }}"
+    # workflow_run fires on every completion (success + failure). Gate
+    # auto-deploys to successful build-images runs on main only.
+    # workflow_dispatch always proceeds.
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'workflow_run' &&
+       github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.head_branch == 'main')
+    name: "Deploy ${{ github.event.inputs.target || 'core' }} @ ${{ github.event.inputs.ref || github.event.workflow_run.head_sha || 'main' }}"
     runs-on: ubuntu-latest
     timeout-minutes: 25
     env:
-      TARGET: ${{ github.event.inputs.target }}
-      DEPLOY_REF: ${{ github.event.inputs.ref }}
+      # workflow_run inputs are absent — fall back to "core on main".
+      # The image pin in the compose file is `:latest` which by then
+      # points at the just-built image (build-images tags both `latest`
+      # and the short SHA, and we ran *because* it succeeded).
+      TARGET: ${{ github.event.inputs.target || 'core' }}
+      DEPLOY_REF: ${{ github.event.inputs.ref || 'main' }}
       IMAGE_SHA: ${{ github.event.inputs.image_sha }}
       NODE_ID: ${{ github.event.inputs.node_id }}
       CORE_NAME: ${{ github.event.inputs.core_name }}

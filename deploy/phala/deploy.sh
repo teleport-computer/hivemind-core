@@ -120,10 +120,21 @@ deploy_and_seal() {
     local compose="$2"
     local env_file="$3"
 
+    # `phala deploy --wait` polls for status=running and exits non-zero
+    # at its hardcoded 300s timeout. On prod9 a fresh deploy routinely
+    # takes 6–9 min (enclave-TLS cert derivation + ACME DNS-01 + gateway
+    # route propagation), so the CLI times out even when the deploy is
+    # progressing fine. We treat the CLI exit non-zero as advisory and
+    # rely on `wait_healthy` (HEALTH_TIMEOUT=600) as the real
+    # correctness check — same pattern we already apply to `phala cvms
+    # restart` below. Without this, GH Actions exits before the
+    # on-chain approval step can run, even on a successful deploy.
     if [ -n "${NODE_ID}" ]; then
         log "creating ${name} on node-id=${NODE_ID} (compose=${compose})"
-        phala deploy -n "${name}" --node-id "${NODE_ID}" \
-            -c "${compose}" -e "${env_file}" --wait
+        if ! phala deploy -n "${name}" --node-id "${NODE_ID}" \
+                -c "${compose}" -e "${env_file}" --wait; then
+            warn "phala deploy --wait returned non-zero (likely the CLI's 300s readiness timeout); continuing — wait_healthy is the real correctness check"
+        fi
         # In create-mode `phala deploy` already seals every variable from
         # the -e file into the new CVM's encrypted env channel — running
         # `phala envs update` immediately afterward fails with "Another
@@ -136,7 +147,18 @@ deploy_and_seal() {
     fi
 
     log "updating ${name} in place (compose=${compose})"
-    phala deploy --cvm-id "${name}" -c "${compose}" -e "${env_file}" --wait
+    if ! phala deploy --cvm-id "${name}" -c "${compose}" -e "${env_file}" --wait; then
+        warn "phala deploy --wait returned non-zero (likely the CLI's 300s readiness timeout); continuing — wait_healthy is the real correctness check"
+        local s
+        s=$(phala cvms get --cvm-id "${name}" --json 2>/dev/null \
+            | python3 -c 'import sys,json; print(json.load(sys.stdin).get("status",""))') || s=""
+        log "post-deploy status: ${s}"
+        if [ "${s}" = "stopped" ]; then
+            warn "CVM left in stopped state — issuing explicit start"
+            phala cvms start --cvm-id "${name}" >/dev/null 2>&1 \
+                || warn "phala cvms start also returned non-zero; wait_healthy will verify"
+        fi
+    fi
 
     log "re-sealing env vars on ${name}"
     phala envs update --cvm-id "${name}" -e "${env_file}"
