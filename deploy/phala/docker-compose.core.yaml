@@ -92,6 +92,14 @@ services:
       # must be >=0.3.1 to consume the v2 report_data layout.
       HIVEMIND_ENCLAVE_TLS: ${HIVEMIND_ENCLAVE_TLS:-1}
 
+      # Cluster-aware pinning surface. The CVM doesn't know its own
+      # gateway base_domain from inside (dstack.info() doesn't expose
+      # it), so we pass it in. Defaults to prod9 in the code; override
+      # to prod5 here while hivemind-core lives on the legacy cluster.
+      # Without this, the bundle's `tls.pinning_url` points at the
+      # wrong cluster and the CLI's friendly→raw fallback can't run.
+      HIVEMIND_PINNING_GATEWAY: ${HIVEMIND_PINNING_GATEWAY:-dstack-pha-prod9.phala.network}
+
       # Docker sandbox — agents run as containers via host Docker daemon
       HIVEMIND_BRIDGE_HOST: "0.0.0.0"
       HIVEMIND_DOCKER_NETWORK_INTERNAL: "false"

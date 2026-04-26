@@ -112,12 +112,17 @@ jobs:
     timeout-minutes: 25
     env:
       # workflow_run inputs are absent — fall back to "core on main".
-      # The image pin in the compose file is `:latest` which by then
-      # points at the just-built image (build-images tags both `latest`
-      # and the short SHA, and we ran *because* it succeeded).
+      # IMAGE_SHA: explicit dispatch input wins; otherwise we leave it
+      # empty here and a later step computes the short SHA from
+      # github.event.workflow_run.head_sha. The relay rewrites the
+      # compose pin from this value, so each auto-deploy actually
+      # advances to the freshly-built image (without it, every
+      # auto-deploy would redeploy whatever SHA is committed in
+      # compose.core.yaml — i.e. nothing changes).
       TARGET: ${{ github.event.inputs.target || 'core' }}
       DEPLOY_REF: ${{ github.event.inputs.ref || 'main' }}
       IMAGE_SHA: ${{ github.event.inputs.image_sha }}
+      WORKFLOW_RUN_SHA: ${{ github.event.workflow_run.head_sha }}
       NODE_ID: ${{ github.event.inputs.node_id }}
       CORE_NAME: ${{ github.event.inputs.core_name }}
       PG_NAME: ${{ github.event.inputs.pg_name }}
@@ -134,6 +139,22 @@ jobs:
           printf '%s\n' "$SSH_KEY" > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
           ssh-keyscan -H "$EC2_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Resolve image SHA
+        # On workflow_run, default IMAGE_SHA to the short SHA of the
+        # build that just succeeded. The compose pin gets rewritten on
+        # the relay (see "Deploy via relay" below). On workflow_dispatch
+        # this is a no-op when image_sha was passed; otherwise the
+        # operator wanted whatever pin is on the checked-out ref.
+        run: |
+          set -euo pipefail
+          if [ -z "${IMAGE_SHA:-}" ] && [ -n "${WORKFLOW_RUN_SHA:-}" ]; then
+            SHORT="${WORKFLOW_RUN_SHA:0:7}"
+            echo "auto-deploy: pinning compose image to :${SHORT}"
+            echo "IMAGE_SHA=${SHORT}" >> "$GITHUB_ENV"
+          else
+            echo "manual deploy: IMAGE_SHA='${IMAGE_SHA}' (empty = use compose pin)"
+          fi
 
       - name: Sanity — show target host
         env:
