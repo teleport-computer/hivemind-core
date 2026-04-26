@@ -23,12 +23,16 @@ uv run python -m hivemind.server
 
 ## 1) Shell Setup
 
-Every public endpoint requires a tenant API key (`hmk_...`). Mint one with
-`hivemind admin create-tenant` (see README's Multi-tenancy section).
+Every public endpoint requires a tenant credential. Three prefixes — pick
+whichever matches your use case:
+
+- `hmk_…` — owner key from `hivemind admin create-tenant` (full access)
+- `hmq_…` — query capability from `hivemind tokens issue --kind query …`
+- `hmw_…` — write capability from `hivemind tokens issue --kind write …`
 
 ```bash
 export BASE="http://localhost:8100"
-export API_KEY="hmk_..."          # tenant bearer
+export API_KEY="hmk_..."          # tenant bearer (owner)
 
 api() {
   curl -sS -H "Authorization: Bearer $API_KEY" "$@"
@@ -36,8 +40,10 @@ api() {
 ```
 
 `jq` is used below for parsing JSON responses.
-If commands return `401 Unauthorized`, your tenant key is wrong or the
-tenant has been deleted/suspended.
+If commands return `401 Unauthorized`, your token is wrong, revoked, or
+the tenant has been deleted/suspended. `403` means the token authenticated
+but isn't allowed for that endpoint/operation (e.g. write token on
+`/v1/query`, write token inserting into a non-allowed table).
 
 ## 2) Health Check
 
@@ -316,3 +322,140 @@ Pipeline order:
 1. Scope agent writes a scope function (query firewall)
 2. Query agent runs SQL queries, results filtered through scope function
 3. Mediator optionally filters/audits output
+
+## 10) Delegate Write Access (Capability Tokens)
+
+Use case: an upstream service streams events into one of your tables. You
+don't want to hand it your `hmk_…` (it could read everything, mint more
+tokens, or rotate the key). Mint a **write token** instead — it can only
+INSERT into the tables you pin.
+
+### 10.1 Owner mints the token
+
+```bash
+hivemind tokens issue \
+  --kind write \
+  --label "stream-ingest" \
+  --table watch_history
+# token: hmw_…  (shown ONCE — copy now or revoke + reissue)
+# token_id: 1f4a9b2c8e0d
+```
+
+Or directly via HTTP:
+
+```bash
+curl -X POST $BASE/v1/tokens \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "kind": "write",
+    "label": "stream-ingest",
+    "constraints": {"allowed_tables": ["watch_history"]}
+  }' | jq
+```
+
+### 10.2 Recipient uses the token
+
+```bash
+export WRITE_TOKEN="hmw_..."          # shipped to the upstream service
+
+# INSERT into the allowed table — works
+curl -X POST $BASE/v1/store \
+  -H "Authorization: Bearer $WRITE_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "sql": "INSERT INTO watch_history (user_id, title, watched_at) VALUES (%s, %s, %s)",
+    "params": ["u123", "ep1", "2026-04-25T01:00:00Z"]
+  }' | jq
+
+# INSERT into a different table — 403
+curl -X POST $BASE/v1/store \
+  -H "Authorization: Bearer $WRITE_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "sql": "INSERT INTO other_table (id) VALUES (1)"
+  }'
+# {"detail": "table 'other_table' not in write-token allowed_tables …"}
+
+# SELECT — also 403 (write tokens are INSERT-only)
+curl -X POST $BASE/v1/store \
+  -H "Authorization: Bearer $WRITE_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"sql": "SELECT 1"}'
+# {"detail": "write-token allows only INSERT statements"}
+```
+
+### 10.3 Revoke
+
+```bash
+hivemind tokens list                            # find the token_id
+hivemind tokens revoke 1f4a9b2c8e0d
+# the upstream service's WRITE_TOKEN starts returning 401 immediately
+```
+
+## 11) Delegate Query Access (Capability Tokens)
+
+Use case: a research collaborator wants to ask questions of your data,
+but you only trust a specific scope agent to gate what they can see.
+
+### 11.1 Owner pins a scope agent and mints the query token
+
+```bash
+# (Assume scope agent already uploaded with id $SCOPE_ID — see section 9.)
+hivemind tokens issue \
+  --kind query \
+  --label "research-collab" \
+  --scope-agent "$SCOPE_ID"
+# token: hmq_…
+```
+
+The token now **forces** every prompt through `$SCOPE_ID`. Any
+`scope_agent_id` the recipient passes in their request body is silently
+overwritten by the server.
+
+### 11.2 Recipient verifies the binding before using it
+
+```bash
+export QUERY_TOKEN="hmq_..."
+
+# What scope agent guards my queries? What's its source?
+hivemind --profile collab scope-inspect --list-files
+# scope_agent_id:      abc123def456
+# files_count:         7
+# files_digest_sha256: fa9c…
+# attestation:
+#   compose_hash: 0c86…
+#   app_id:       …
+# files:
+#       451  Dockerfile
+#      2087  agent.py
+#       …
+
+# Read one file directly
+hivemind --profile collab scope-inspect --show-file agent.py
+```
+
+The recipient pins `files_digest_sha256` out-of-band (e.g. in a project
+README). Re-running `scope-inspect` later and seeing the same digest +
+the same `compose_hash` proves the gatekeeper hasn't changed.
+
+### 11.3 Recipient submits queries (and optionally their own query agent)
+
+```bash
+# Use an existing query agent
+curl -X POST $BASE/v1/query \
+  -H "Authorization: Bearer $QUERY_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"query\": \"What were the top 10 most-watched titles last week?\",
+    \"query_agent_id\": \"$QUERY_AGENT\"
+  }" | jq
+
+# Or upload your own query agent (single-shot, runs through the bound scope)
+curl -X POST $BASE/v1/query-agents/submit \
+  -H "Authorization: Bearer $QUERY_TOKEN" \
+  -F "name=my-research-agent" \
+  -F "archive=@my-agent.tar.gz" \
+  -F "query=Top genres by watch time?" | jq
+# → {"run_id": "...", "agent_id": "...", "status": "pending"}
+```

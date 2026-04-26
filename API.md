@@ -8,26 +8,30 @@ Base URL (default): `http://localhost:8100`
 
 ## Authentication
 
-Hivemind-core is multi-tenant. Two kinds of credentials:
+Hivemind-core is multi-tenant. Auth is always on. There are four kinds of
+credentials, distinguishable by prefix so a single `Authorization` header
+works for all of them:
 
-**Tenant API key** (`hmk_...`) — required for every public endpoint except
-`GET /v1/health` and `GET /v1/healthz`. Routes to the tenant's isolated
-Postgres database.
+| Prefix | Kind | Scope |
+|---|---|---|
+| `hmk_…` | **tenant owner** | full access to the tenant's DB and pipeline; can mint capability tokens, rotate the key, and run every public endpoint |
+| `hmq_…` | **query capability** | only `/v1/query{,/submit}`, `/v1/query-agents/submit`, `/v1/scope-attest`, and read-access to the bound scope agent's source files. Every query is forced through one pinned `scope_agent_id` (the owner picked it at mint time — the holder cannot override) |
+| `hmw_…` | **write capability** | only `/v1/store`, restricted to single `INSERT` statements into a fixed table allowlist. Reads, schema changes, and `_hivemind_*` are 403 |
+| `<admin-key>` | **operator** | only `/v1/admin/tenants/*` (provision/list/delete/register tenants). Cannot read tenant data through this API |
 
 ```http
 Authorization: Bearer hmk_<tenant-api-key>
-```
-
-**Admin key** (operator-only, set via `HIVEMIND_ADMIN_KEY`) — required for
-`/v1/admin/tenants/*`. Can provision/list/delete tenants but cannot read
-tenant data through this API.
-
-```http
+Authorization: Bearer hmq_<query-capability-token>
+Authorization: Bearer hmw_<write-capability-token>
 Authorization: Bearer <admin-key>
 ```
 
+`GET /v1/health`, `GET /v1/healthz`, and `GET /v1/attestation` never
+require auth.
+
 To mint a tenant key: `POST /v1/admin/tenants` (see below) or `hivemind
-admin create-tenant`.
+admin create-tenant`. To mint capability tokens: `POST /v1/tokens` or
+`hivemind tokens issue` — see **[Capability Tokens](#capability-tokens)**.
 
 ## Conventions And Gotchas
 
@@ -56,11 +60,17 @@ Health check (never requires auth).
 
 Execute a SQL statement against the database. For write operations (INSERT, UPDATE, DELETE, CREATE TABLE, etc.).
 
+Accepts owner (`hmk_`) and write (`hmw_`) tokens. Write tokens are
+restricted to a single `INSERT` into one of the table names baked into
+the token (no `_hivemind_*`, no nested DML, no compound statements,
+no SELECT/UPDATE/DELETE). Validated via sqlglot AST — failures return
+`403`.
+
 **Request body**
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
-| `sql` | string | yes | SQL statement (min length 1) |
+| `sql` | string | yes | SQL statement (min length 1). Write tokens: must be a single INSERT into an allowed table |
 | `params` | array | no | Query parameters (defaults to `[]`). Use `%s` placeholders |
 
 **Example**
@@ -93,12 +103,18 @@ curl -X POST http://localhost:8100/v1/store \
 
 **Common errors**
 - `400` SQL execution error
-- `401` unauthorized (when API key enabled)
+- `401` unauthorized (missing / unknown / revoked token)
+- `403` forbidden (capability token used outside its allowed scope)
 - `422` invalid request body
 
 ### `POST /v1/query`
 
 Run query pipeline: optional scope agent -> query agent -> optional mediator.
+
+Accepts owner (`hmk_`) and query (`hmq_`) tokens. For query tokens the
+server **forces** `scope_agent_id` to the value bound at issue — any
+client-supplied `scope_agent_id` is silently overwritten so the token
+cannot bypass its gatekeeper.
 
 **Request body**
 
@@ -107,7 +123,7 @@ Run query pipeline: optional scope agent -> query agent -> optional mediator.
 | `query` | string | yes | Canonical field, min length 1 |
 | `prompt` | string | no | Deprecated alias; used only if `query` missing/blank |
 | `query_agent_id` | string | no | Required unless default query agent configured |
-| `scope_agent_id` | string | no | Scope agent writes a scope function for result filtering |
+| `scope_agent_id` | string | no | Scope agent writes a scope function for result filtering. **Ignored for `hmq_` tokens** (server overrides with the bound id) |
 | `mediator_agent_id` | string | no | Optional output auditing/filtering |
 | `max_tokens` | integer | no | Per-request cap (min 1), clamped to server global max |
 
@@ -143,8 +159,64 @@ curl -X POST http://localhost:8100/v1/query \
 
 **Common errors**
 - `400` no query agent configured, agent not found, invalid scope-agent output, scope function compilation error
-- `401` unauthorized (when API key enabled)
+- `401` unauthorized (missing / unknown / revoked token)
+- `403` forbidden (capability token used outside its allowed scope)
 - `422` validation errors (for example `max_tokens <= 0`)
+
+### `POST /v1/query/submit`
+
+Async variant of `/v1/query`. Returns immediately with a `run_id`; the
+pipeline runs in the background. Designed for the Phala gateway timeout
+(60s upstream) — long pipelines must use the async path.
+
+**Request body**: same as `POST /v1/query`. Auth: same (owner + query).
+
+**Response 200**
+
+```json
+{"run_id": "r_abc123def456", "status": "pending"}
+```
+
+### `GET /v1/query/runs/{run_id}`
+
+Poll an async run.
+
+**Response 200**
+
+```json
+{
+  "run_id": "r_abc123def456",
+  "status": "completed",
+  "output": "...",
+  "mediated": false,
+  "usage": {"total_tokens": 12345, "max_tokens": 50000},
+  "artifacts": [{"filename": "...", "url": "..."}]
+}
+```
+
+`status` is one of `pending`, `running`, `completed`, `failed`. While
+`pending`/`running` the body lacks `output`. On `failed` the `error`
+field carries the failure reason.
+
+### `POST /v1/query-agents/submit`
+
+Capability-token-friendly variant of `/v1/agents/upload` + `/v1/query/submit`.
+A query-token holder uploads their own query agent tarball and immediately
+runs it through their token's bound scope agent. Tarball survives only
+for the run.
+
+**Request**: `multipart/form-data` with `archive`, `name`, `query`, optional
+`description`, `max_tokens`. Auth: owner or query token.
+
+**Response 200**
+
+```json
+{"run_id": "r_xxxx", "agent_id": "abc123def456", "status": "pending"}
+```
+
+### `GET /v1/query-agents/runs/{run_id}` / `GET /v1/query-agents/runs`
+
+Same lifecycle as `/v1/query/runs/...` for agent-submission runs.
 
 ### `POST /v1/index`
 
@@ -188,7 +260,8 @@ curl -X POST http://localhost:8100/v1/index \
 
 **Common errors**
 - `400` no index agent configured, agent not found, invalid agent output
-- `401` unauthorized (when API key enabled)
+- `401` unauthorized (missing / unknown / revoked token)
+- `403` forbidden (capability token used outside its allowed scope)
 - `422` validation errors (for example empty `data`, `max_tokens <= 0`)
 
 ### `POST /v1/admin/tenants` (admin-only)
@@ -236,6 +309,152 @@ Never returns plaintext API keys.
 
 Drop the tenant's database, evict from cache, and remove the control-plane
 row. Irreversible.
+
+## Capability Tokens
+
+Owner-only endpoints to issue / list / revoke delegated tokens. Plaintext
+is shown exactly once at issue — only the SHA-256 hash is persisted, so
+losing the plaintext means revoke + reissue. Auth: tenant owner (`hmk_`).
+
+### `POST /v1/tokens` (owner-only)
+
+Mint a capability token.
+
+**Request body**
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `kind` | string | yes | `"query"` or `"write"` |
+| `label` | string | no | Free-form bookkeeping label |
+| `constraints` | object | yes | For `query`: `{"scope_agent_id": "..."}`. For `write`: `{"allowed_tables": ["t1", "t2"]}` (≥1 entry, no `_hivemind_*`). |
+
+**Example**
+
+```bash
+# Query token bound to a scope agent
+curl -X POST $BASE/v1/tokens \
+  -H "Authorization: Bearer $OWNER_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "kind": "query",
+    "label": "research-team",
+    "constraints": {"scope_agent_id": "abc123def456"}
+  }'
+
+# Write token bound to a table allowlist
+curl -X POST $BASE/v1/tokens \
+  -H "Authorization: Bearer $OWNER_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "kind": "write",
+    "label": "stream-ingest",
+    "constraints": {"allowed_tables": ["watch_history"]}
+  }'
+```
+
+**Response 200**
+
+```json
+{
+  "token_id": "1f4a9b2c8e0d",
+  "kind": "query",
+  "label": "research-team",
+  "constraints": {"scope_agent_id": "abc123def456"},
+  "token": "hmq_..."
+}
+```
+
+`token` (plaintext) is shown **exactly once** here. Persist it now or
+revoke + reissue.
+
+**Common errors**
+- `400` invalid kind / missing required constraint / `_hivemind_*` table
+- `404` unknown tenant id (should not happen via owner key — defensive)
+
+### `GET /v1/tokens` (owner-only)
+
+List tokens for this tenant. Plaintext is never returned — only metadata.
+
+**Response 200**
+
+```json
+{
+  "tokens": [
+    {
+      "token_id": "1f4a9b2c8e0d",
+      "kind": "query",
+      "label": "research-team",
+      "constraints": {"scope_agent_id": "abc123def456"},
+      "created_at": "2026-04-25T17:00:00Z",
+      "revoked_at": null
+    }
+  ]
+}
+```
+
+### `DELETE /v1/tokens/{token_id}` (owner-only)
+
+Soft-revoke a token by its short id. The row stays for audit (`revoked_at`
+set); future requests with the plaintext are rejected at the dispatcher
+with `401`. Idempotent.
+
+`token_id` must be at least 12 hex chars (the prefix shown in `list`).
+
+**Responses**
+- `200` `{"status": "ok", "token_id": "..."}`
+- `400` prefix shorter than 12 chars
+- `404` no matching token
+
+### `GET /v1/scope-attest`
+
+Recipient-friendly endpoint that returns "the scope agent your token is
+bound to, plus the attestation bundle, plus a stable digest over its
+extracted source files". Used by `hivemind scope-inspect` to verify
+binding before submitting work.
+
+Auth: owner (`hmk_` — must pass `?scope_agent_id=...`) or query (`hmq_`,
+`scope_agent_id` is taken from the token binding).
+
+**Response 200**
+
+```json
+{
+  "scope_agent_id": "abc123def456",
+  "agent": { "agent_id": "...", "name": "...", "image": "...", "...": "..." },
+  "files_count": 7,
+  "files_digest_sha256": "fa9c…",
+  "attestation": { "attestation": { "compose_hash": "...", "app_id": "...", "...": "..." } }
+}
+```
+
+`files_digest_sha256` is `sha256("<path>\0<content>\0…" sorted by path)`.
+A recipient who fetched the files via the endpoints below can re-derive
+this hash byte-for-byte and pin it out-of-band.
+
+### `GET /v1/agents/{agent_id}/files`
+
+List the source files extracted at agent-build time. Auth: owner (any
+agent in the tenant) or query (only the scope agent the token is bound
+to — other ids return `404`). Used to audit "what code is the gatekeeper
+actually running".
+
+**Response 200**
+
+```json
+{
+  "agent_id": "abc123def456",
+  "files": [
+    {"path": "Dockerfile", "size_bytes": 451},
+    {"path": "agent.py", "size_bytes": 2087}
+  ]
+}
+```
+
+### `GET /v1/agents/{agent_id}/files/{file_path}`
+
+Read one file's content. `file_path` is path-encoded (slashes preserved).
+Same visibility rules as the file-list endpoint. Returns
+`text/plain; charset=utf-8`.
 
 ### `GET /v1/healthz`
 

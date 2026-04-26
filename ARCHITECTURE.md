@@ -24,14 +24,30 @@ The app defines the schema. Hivemind-core protects the data.
 
 ---
 
-## Four APIs
+## Public APIs
 
 ```
-POST /v1/store     Raw SQL writes. App-defined schema.
-POST /v1/query     Query agent + scope agent → sandboxed pipeline → answer.
-POST /v1/index     Index agent processes document data → structured index.
-GET  /v1/health    Status, table count, version.
+POST /v1/store         Raw SQL writes. App-defined schema.
+POST /v1/query         Query agent + scope agent → sandboxed pipeline → answer.
+                       Async variant: POST /v1/query/submit + GET /v1/query/runs/{id}.
+POST /v1/index         Index agent processes document data → structured index.
+GET  /v1/health        Status, table count, version.
+
+POST /v1/tokens        Mint delegated capability tokens (hmq_/hmw_).
+GET  /v1/tokens        List the tenant's tokens (hashes, never plaintext).
+DEL  /v1/tokens/{id}   Soft-revoke a token.
+GET  /v1/scope-attest  Recipient-side: which scope agent + attestation am I bound to?
+GET  /v1/agents/{id}/files{,/{path}}
+                       Inspect a scope agent's source files (audit before use).
+
+POST /v1/agents/upload Upload + build an agent image inside the CVM.
+POST /v1/query-agents/submit
+                       Upload + run a one-shot query agent (capability-token-friendly).
+GET  /v1/attestation   Public dstack attestation bundle (compose_hash, quote, …).
 ```
+
+`/v1/admin/tenants/*` provisions tenants but cannot read tenant data —
+multi-tenancy is enforced inside the CVM.
 
 ### Store
 
@@ -362,6 +378,40 @@ Postgres tables (`_hivemind_agent_files`).
 ```
 
 ---
+
+## Delegation: Capability Tokens
+
+The tenant owner's `hmk_…` key is a keys-to-the-kingdom credential. To
+share narrow slices of the tenant with third parties without sharing it,
+the owner mints **capability tokens** (sibling credentials, not refresh
+tokens — they don't derive from the owner key, they sit alongside it):
+
+```
+  ┌──────────────┬──────────┬──────────────────────────────────────────────┐
+  │  Prefix      │ Kind     │ What the holder can do                       │
+  ├──────────────┼──────────┼──────────────────────────────────────────────┤
+  │  hmk_…       │ owner    │ Everything (mint tokens, rotate, etc.)       │
+  │  hmq_…       │ query    │ /v1/query{,/submit} + upload-and-run a query │
+  │              │          │ agent. Always forced through one pinned      │
+  │              │          │ scope agent — token holder cannot bypass.    │
+  │  hmw_…       │ write    │ /v1/store INSERT into a fixed table          │
+  │              │          │ allowlist (no _hivemind_*, no other DML).    │
+  └──────────────┴──────────┴──────────────────────────────────────────────┘
+```
+
+Plaintext is shown exactly once at issue. The CVM persists only a
+SHA-256 hash, so there is no way to recover a lost token — revoke and
+reissue. The dispatcher (`tenants.py::resolve_any`) recognizes prefix +
+hash on every request, joins to the tenant, and rejects revoked /
+suspended-tenant lookups with `401`.
+
+`hmw_` SQL is validated by `tools.py::is_insert_only_into` (sqlglot AST
+walk): single INSERT, allowed table only, no nested DML or compound
+statements. `hmq_` requests have their `scope_agent_id` overwritten by
+the binding before reaching the pipeline. Recipients audit their binding
+via `/v1/scope-attest` (returns the bound scope agent, the attestation
+bundle, and a stable `sha256("<path>\0<content>\0…")` over its files —
+pin the digest out-of-band, re-derive after re-fetching).
 
 ## Privacy Layers
 

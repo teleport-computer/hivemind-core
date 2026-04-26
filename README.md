@@ -43,16 +43,28 @@ curl http://localhost:8100/v1/health
 
 ## Using the CLI
 
-The `hivemind` CLI owns the full lifecycle for an agent: build → upload → poll → fetch artifacts.
+The `hivemind` CLI is your remote client for everything: connection setup,
+data loading, agent lifecycle (build → upload → poll → fetch artifacts),
+delegated tokens, attestation, and operator workflows. Run
+`hivemind --help` (or `hivemind <subcommand> --help`) for full flags.
+
+### Connect
 
 ```bash
-# One-time: point at a service and paste your tenant key.
 # Local server (after quickstart):
 hivemind init --api-key hmk_...
 # Live Phala CVM:
 hivemind init --service https://hivemind.teleport.computer --api-key hmk_...
 # (mint a key via `hivemind admin create-tenant` if you're the operator)
 
+hivemind rotate-key                # bootstrap → tenant-only key, rewrites profile
+hivemind attestation               # show + verify the live CVM attestation bundle
+hivemind schema                    # dump the user-table schema
+```
+
+### Load and inspect data
+
+```bash
 # Load a dataset (SQL dump / CSV / JSONL) into Postgres via /v1/store
 hivemind load dump.sql
 hivemind load users.csv --table users
@@ -60,23 +72,86 @@ hivemind load events.jsonl --table events
 
 # Browse what the service already has
 hivemind agents                 # list registered agents
+hivemind agent-rm <agent_id>    # delete one
 hivemind runs                   # list recent runs
 hivemind runs <run_id>          # stage timings + artifact list
+```
 
+### Register a scope policy and run agents
+
+```bash
 # Register a scope policy (gates what queries may return)
 hivemind scope --from-file policy.md
-# or inline:
 hivemind scope "Allow aggregate counts. Never expose individual rows."
 
 # Run your agent — directory containing Dockerfile + agent.py, or a .tar.gz
 hivemind run ./my-agent --prompt "How many documents?"
 hivemind run ./my-agent --json --fetch       # scriptable + downloads artifacts
 
-# Or use the thin natural-language query path (default query agent)
+# Thin natural-language path (default query agent + registered scope)
 hivemind query "What tables are available?"
+hivemind query "..." --async                  # use async submit+poll path
+
+# Index a document
+hivemind index "Q3 retro: …" --metadata '{"team":"payments"}'
+
+# Print the bound endpoint + credentials so you can hand off to a teammate
+hivemind share
 ```
 
 Every `--json` output is a stable, pipe-friendly record: `{status, run_id, output, mediated, artifacts:[{filename,url,...}], fetched:[...]}`. Artifact URLs remain fetchable for the server's retention window (default 24h).
+
+### Delegate access (capability tokens)
+
+```bash
+# Owner mints a query token bound to a scope agent (recipient cannot bypass it)
+hivemind tokens issue --kind query --label "research-team" \
+  --scope-agent abc123def456
+
+# Owner mints a write token restricted to one or more tables
+hivemind tokens issue --kind write --label "stream-ingest" \
+  --table watch_history --table events
+
+hivemind tokens list                # token_id + kind + status + constraints
+hivemind tokens revoke <token_id>   # soft-revoke; future calls 401
+
+# Recipient (holding hmq_…) audits what the gatekeeper actually does
+hivemind scope-inspect --list-files
+hivemind scope-inspect --show-file Dockerfile
+```
+
+See **[Capability Tokens](#capability-tokens-delegated-query--write)** for
+the full delegation model (`hmq_` / `hmw_` prefixes, what each can do, how
+the recipient pins binding via `scope-inspect`).
+
+### Operator commands (`hivemind admin …`)
+
+Admin-key holders manage tenants and on-chain hash approval:
+
+```bash
+hivemind admin create-tenant --name alice-corp
+hivemind admin list-tenants
+hivemind admin delete-tenant t_abc...
+hivemind admin register-existing --name adopted --db-name my_existing_db
+hivemind admin migrate-to-roles                  # one-shot: per-tenant Postgres roles
+hivemind admin sweep-broken-agents               # GC orphan agent images
+
+# On-chain governance (when HIVEMIND_APP_AUTH_CONTRACT is set)
+hivemind admin approve-hash <compose_hash>
+hivemind admin revoke-hash <compose_hash>
+hivemind admin list-hashes
+```
+
+### Trust pins (`hivemind trust …`)
+
+For remote/TEE deploys the CLI TOFU-pins the CVM's compose hash on first
+connection. Manage it explicitly:
+
+```bash
+hivemind trust show                              # all services or one
+hivemind trust approve [<service>]               # accept the current remote hash
+hivemind trust reset --all                       # forget all pins (re-prompt next call)
+```
 
 ### Named profiles (multi-identity on one laptop)
 
@@ -113,11 +188,12 @@ auto-migrated to `~/.hivemind/profiles/default.yaml` on first use.
 
 ## How it works
 
-Three HTTP endpoints, one enforcement primitive:
+Four HTTP endpoint groups, one enforcement primitive:
 
 - `POST /v1/store` — raw SQL writes against Postgres. The app owns the schema.
-- `POST /v1/query` — runs the **scope → query → mediator** agent pipeline and returns the answer.
+- `POST /v1/query` (and `/v1/query/submit` for async runs) — runs the **scope → query → mediator** agent pipeline and returns the answer.
 - `POST /v1/index` — runs an index agent over documents and stores structured output.
+- `POST /v1/tokens` (and `GET /v1/scope-attest`) — mint / list / revoke delegated capability tokens; recipients verify their binding via scope-attest. See **[Capability tokens](#capability-tokens-delegated-query--write)** below.
 
 ```
 client ──► server ──► pipeline ──► { scope agent } ──► scope_fn
@@ -171,6 +247,50 @@ hivemind --profile alice rotate-key
 ```
 
 Treat any tenant key that has not been rotated as bootstrap-only.
+
+### Capability tokens (delegated query / write)
+
+A tenant key (`hmk_…`) is the keys-to-the-kingdom credential — it can read,
+write, mint scope agents, and rotate. To let a third party use a narrow
+slice of your tenant *without* sharing it, mint a **capability token**
+that pins a specific capability:
+
+| Prefix | Kind | What the holder can do | What's pinned at issue |
+|---|---|---|---|
+| `hmq_…` | query | submit prompts via `/v1/query`, upload their own query agent, read scope-agent files for audit | exactly one **scope agent id** — every query is forced through it |
+| `hmw_…` | write | INSERT into a fixed allowlist of tables via `/v1/store` | one or more **table names** — internal `_hivemind_*` tables always rejected |
+
+```bash
+# Owner mints a write token for an upstream service streaming events.
+hivemind tokens issue --kind write --label "stream-ingest" --table watch_history
+# → token: hmw_…  (shown ONCE; copy now or revoke + reissue)
+
+# Owner mints a query token bound to a scope agent (the recipient
+# cannot bypass that agent — every prompt is gated through it).
+hivemind tokens issue --kind query --label "research-team" \
+  --scope-agent abc123def456
+# → token: hmq_…
+
+hivemind tokens list                  # token_id + kind + status + constraints
+hivemind tokens revoke <token_id>     # soft-revoke, future calls 401
+```
+
+Hand the recipient just the `hmq_…` / `hmw_…` and they use it as
+their `Authorization: Bearer …` (or `hivemind --profile … init --api-key …`).
+The plaintext is shown exactly once at issue and only the SHA-256 hash is
+persisted on the CVM — losing the plaintext means revoke + reissue.
+
+The recipient can audit their binding before submitting work:
+
+```bash
+# Confirm "the scope agent guarding my queries is what I expected".
+hivemind scope-inspect --list-files
+# → prints scope_agent_id, files_count, files_digest_sha256, attestation
+#   (compose_hash + app_id), and every extracted source file path.
+```
+
+The digest is a stable `sha256("<path>\0<content>\0…" sorted)` — pin it
+out-of-band and re-derive it later by re-fetching files.
 
 ### Remote / TEE deployment
 
