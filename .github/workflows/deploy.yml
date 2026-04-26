@@ -198,6 +198,12 @@ jobs:
 
           echo "── fetch + checkout ─────────────────────────────"
           git fetch --prune origin
+          # Discard any in-tree mutations from a prior deploy's sed -i
+          # (e.g. the IMAGE_SHA rewrite below). Without this, the next
+          # deploy's checkout aborts with "Your local changes would be
+          # overwritten" because we never restored the pin after the
+          # previous run.
+          git restore --source=HEAD --staged --worktree -- . 2>/dev/null || true
           git checkout --detach "origin/${DEPLOY_REF}" 2>/dev/null \
             || git checkout --detach "${DEPLOY_REF}"
           echo "HEAD: $(git rev-parse --short HEAD)"
