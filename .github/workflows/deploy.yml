@@ -266,7 +266,13 @@ jobs:
           PRIVATE_KEY: ${{ secrets.PRIVATE_KEY }}
           CONTRACT: "0x29b475E6D2e10bd3266569D4c5cf27BFd4f8c36E"
           RPC_URL: "https://ethereum-sepolia-rpc.publicnode.com"
-          DEPLOY_REF: ${{ github.event.inputs.ref }}
+          # GIT_SHA is sourced from the event context so we don't need
+          # actions/checkout in this workflow (all git work happens on
+          # the EC2 relay). For workflow_dispatch this is the SHA of
+          # the workflow file; for workflow_run we use the upstream
+          # build-images run's head_sha so the URI points at the exact
+          # commit whose image we just shipped.
+          GIT_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
         run: |
           set -euo pipefail
 
@@ -306,7 +312,7 @@ jobs:
             exit 0
           fi
 
-          GIT_SHA=$(git rev-parse HEAD)
+          # GIT_SHA comes from the env (event context) — see top of step.
           COMPOSE_URI="https://github.com/Account-Link/hivemind-core/blob/${GIT_SHA}/deploy/phala/docker-compose.core.yaml"
 
           echo "approving on ${CONTRACT} (Sepolia)"
