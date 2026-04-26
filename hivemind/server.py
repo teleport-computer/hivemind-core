@@ -621,6 +621,46 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def healthz():
         return {"status": "ok", "version": APP_VERSION}
 
+    @app.get("/v1/admin/llm-probe", dependencies=[Depends(check_admin)])
+    async def llm_probe():
+        """Admin-only: probe LLM provider connectivity from inside the CVM.
+
+        Returns timing + status for a minimal chat completion. Helps
+        diagnose CVM↔provider network issues without SSH.
+        """
+        import time as _t
+        import httpx as _httpx
+        out: dict = {
+            "base_url": settings.llm_base_url,
+            "model": settings.llm_model,
+            "timeout_seconds": settings.llm_timeout_seconds,
+        }
+        t0 = _t.perf_counter()
+        try:
+            async with _httpx.AsyncClient(
+                timeout=_httpx.Timeout(connect=5.0, read=15.0, write=5.0, pool=5.0),
+            ) as client:
+                r = await client.post(
+                    f"{settings.llm_base_url.rstrip('/')}/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {settings.llm_api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "model": settings.llm_model,
+                        "messages": [{"role": "user", "content": "reply OK"}],
+                        "max_tokens": 5,
+                    },
+                )
+            out["status_code"] = r.status_code
+            out["elapsed_ms"] = int((_t.perf_counter() - t0) * 1000)
+            out["body_head"] = r.text[:200]
+        except Exception as e:
+            out["error_class"] = type(e).__name__
+            out["error"] = str(e)[:300]
+            out["elapsed_ms"] = int((_t.perf_counter() - t0) * 1000)
+        return out
+
     # ── Remote attestation (unauthed; pattern from feedling-mcp-v1) ──
     # The bundle is public — anyone holding Intel's root CA can verify
     # the quote. Gating it would create a chicken-and-egg: the CLI needs

@@ -6,6 +6,7 @@ import time
 from pathlib import Path
 from typing import Callable
 
+import httpx
 from openai import AsyncOpenAI
 
 from .config import Settings
@@ -67,7 +68,13 @@ class Pipeline:
         self.llm_client = AsyncOpenAI(
             base_url=settings.llm_base_url,
             api_key=settings.llm_api_key,
-            timeout=settings.llm_timeout_seconds,
+            timeout=httpx.Timeout(
+                connect=5.0,
+                read=float(settings.llm_timeout_seconds),
+                write=float(settings.llm_timeout_seconds),
+                pool=float(settings.llm_timeout_seconds),
+            ),
+            max_retries=0,
         )
         self.llm_model = settings.llm_model
         self._role_models = {
