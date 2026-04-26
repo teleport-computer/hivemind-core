@@ -2677,6 +2677,131 @@ def scope_inspect_cmd(
         click.echo(file_body)
 
 
+# ── Agent attestation ──
+#
+# Owner-side helper for publishing a verifiable pin of an uploaded agent.
+# Returns the agent's saved config + a stable sha256 over its extracted
+# source files + the resolved Docker image digest + the live CVM
+# attestation bundle. Anyone outside the owner can re-derive the file
+# digest themselves (re-fetch files via /v1/agents/{id}/files), and
+# verify compose_hash against the on-chain governance contract.
+
+
+@cli.command("agent-attest")
+@click.argument("agent_id")
+@click.option(
+    "--show-file",
+    "show_file",
+    default=None,
+    help="Print the contents of one extracted file in addition to the digest.",
+)
+@click.option(
+    "--list-files", is_flag=True, help="List every extracted file path + size."
+)
+@click.option("--json", "as_json", is_flag=True, help="Emit JSON on stdout")
+def agent_attest_cmd(
+    agent_id: str,
+    show_file: str | None,
+    list_files: bool,
+    as_json: bool,
+):
+    """Pin and publish an attestation for any registered agent.
+
+    Resolves /v1/agents/<id>/attest, which returns the agent config, a
+    stable digest over its source files, the resolved Docker image
+    digest, and the live attestation bundle (compose_hash, app_id,
+    quote, TLS pubkey). Hand the printed output to anyone who needs to
+    verify "this exact agent ran inside this exact CVM" — they can
+    cross-check compose_hash against the NotarizedAppAuth contract and
+    re-derive the source-files digest by re-fetching the files.
+    """
+    config = _load_config()
+    service = config["service"]
+    headers = _headers(config)
+    if "Authorization" not in headers:
+        click.echo("Error: no api_key in config. Run 'hivemind init'.", err=True)
+        raise SystemExit(1)
+
+    url = f"{service}/v1/agents/{agent_id}/attest"
+    try:
+        r = _hget(url, headers=headers, timeout=30)
+    except httpx.RequestError as e:
+        click.echo(f"Error: {e}", err=True)
+        raise SystemExit(2)
+    if r.status_code >= 400:
+        click.echo(f"Error {r.status_code}: {_api_error(r)}", err=True)
+        raise SystemExit(3)
+    data = r.json()
+
+    files_listing: list[dict] | None = None
+    if list_files:
+        try:
+            rl = _hget(
+                f"{service}/v1/agents/{agent_id}/files",
+                headers=headers,
+                timeout=30,
+            )
+        except httpx.RequestError as e:
+            click.echo(f"Error: {e}", err=True)
+            raise SystemExit(2)
+        if rl.status_code >= 400:
+            click.echo(f"Error {rl.status_code}: {_api_error(rl)}", err=True)
+            raise SystemExit(3)
+        files_listing = rl.json().get("files", [])
+
+    file_body: str | None = None
+    if show_file:
+        try:
+            rf = _hget(
+                f"{service}/v1/agents/{agent_id}/files/{show_file}",
+                headers=headers,
+                timeout=30,
+            )
+        except httpx.RequestError as e:
+            click.echo(f"Error: {e}", err=True)
+            raise SystemExit(2)
+        if rf.status_code >= 400:
+            click.echo(f"Error {rf.status_code}: {_api_error(rf)}", err=True)
+            raise SystemExit(3)
+        file_body = rf.text
+
+    if as_json:
+        out = dict(data)
+        if files_listing is not None:
+            out["files"] = files_listing
+        if file_body is not None:
+            out["file"] = {"path": show_file, "content": file_body}
+        click.echo(_json.dumps(out, indent=2))
+        return
+
+    agent = data.get("agent") or {}
+    img = data.get("image_digest") or {}
+    click.echo(f"agent_id:            {data['agent_id']}")
+    click.echo(f"name:                {agent.get('name', '')}")
+    click.echo(f"image:               {agent.get('image', '')}")
+    if img.get("id"):
+        click.echo(f"image.id:            {img['id']}")
+    for d in img.get("repo_digests") or []:
+        click.echo(f"image.repo_digest:   {d}")
+    click.echo(f"files_count:         {data['files_count']}")
+    click.echo(f"files_digest_sha256: {data['files_digest_sha256']}")
+    att = data.get("attestation") or {}
+    inner = att.get("attestation") or {}
+    if inner:
+        click.echo("attestation:")
+        click.echo(f"  compose_hash: {inner.get('compose_hash', '')}")
+        click.echo(f"  app_id:       {inner.get('app_id', '')}")
+    if files_listing is not None:
+        click.echo("")
+        click.echo("files:")
+        for f in files_listing:
+            click.echo(f"  {f['size_bytes']:>10}  {f['path']}")
+    if file_body is not None:
+        click.echo("")
+        click.echo(f"── {show_file} ──")
+        click.echo(file_body)
+
+
 # ── Capability tokens ──
 #
 # Owner-side commands to issue / list / revoke delegated tokens. Two

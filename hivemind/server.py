@@ -44,6 +44,34 @@ _IGNORED_TAR_TYPES = {
     tarfile.GNUTYPE_LONGLINK,
 }
 
+def _image_digest(image: str) -> dict:
+    """Return ``{id, repo_digests}`` for a tagged Docker image.
+
+    ``id`` is the local content-addressable sha256 of the image's config
+    manifest (always present, equivalent to ``docker images --digests``).
+    ``repo_digests`` is the registry-side digest list (only present when
+    the image was pulled or pushed). Together they let an external
+    verifier pin "the bytes that ran" by either local id or registry
+    digest.
+
+    Fail-soft: returns ``{"id": "", "repo_digests": []}`` if Docker isn't
+    available or the image isn't loaded — attestation still succeeds, the
+    consumer just can't pin the image layer (the source-files digest +
+    compose_hash still cover most of what they care about).
+    """
+    try:
+        import docker
+        client = docker.from_env()
+        attrs = client.images.get(image).attrs
+        return {
+            "id": attrs.get("Id", "") or "",
+            "repo_digests": list(attrs.get("RepoDigests") or []),
+        }
+    except Exception as e:
+        logger.debug("image digest lookup failed for %r: %s", image, e)
+        return {"id": "", "repo_digests": []}
+
+
 def _tenant_image_tag(tenant_id: str | None, agent_id: str) -> str:
     """Scope docker image tags by tenant so shared daemons don't collide.
 
@@ -868,38 +896,36 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(404, "File not found")
         return Response(content=content, media_type="text/plain; charset=utf-8")
 
-    # ── Scope attestation digest ──
+    # ── Agent attestation ──
     #
-    # One-call helper for a recipient to confirm "the scope agent I see
-    # right now is the one the token authorized". Returns the bound
-    # scope_agent_id, its config, the live attestation bundle (so the
-    # CLI can pin compose_hash / quote / TLS pubkey), and a sha256 over
-    # the full set of saved source files. The recipient can re-fetch the
-    # files via /v1/agents/{id}/files and recompute the digest by hand.
+    # The per-agent attestation surface. One call returns:
+    #   - the agent's saved config (image, role, budgets…)
+    #   - a stable sha256 over the full set of saved source files
+    #     (sha256("<path>\0<content>\0…" sorted) — re-derivable by hand
+    #     after re-fetching files via /v1/agents/{id}/files{,/{path}})
+    #   - the resolved Docker image digest (``Id`` + ``RepoDigests``)
+    #   - the live /v1/attestation bundle (compose_hash, app_id, quote,
+    #     TLS pubkey)
+    #
+    # Together these let an external verifier — not just the owner —
+    # pin "this exact agent ran inside this exact CVM". compose_hash
+    # chains to the on-chain ``NotarizedAppAuth`` contract for governance;
+    # the source + image digests pin the workload.
+    #
+    # Owner can attest any agent they own. Query-token holders are
+    # restricted to their bound scope agent (other ids → 404), since the
+    # endpoint reveals image + file digests.
 
-    @app.get("/v1/scope-attest")
-    async def scope_attest(
-        caller: Caller = Depends(requires_role("owner", "query")),
-    ):
+    async def _build_agent_attestation(caller: Caller, agent_id: str) -> dict:
         from . import attestation as _att
 
-        scope_id = caller.constraints.get("scope_agent_id") or ""
-        if not scope_id:
-            if caller.role != "query":
-                raise HTTPException(
-                    400,
-                    "owner must pass ?scope_agent_id=… (no token binding)",
-                )
-            raise HTTPException(
-                500, "query token missing scope_agent_id constraint"
-            )
         agent = await asyncio.to_thread(
-            caller.hive.agent_store.get, scope_id
+            caller.hive.agent_store.get, agent_id
         )
         if not agent:
-            raise HTTPException(404, "Scope agent not found")
+            raise HTTPException(404, "Agent not found")
         files = await asyncio.to_thread(
-            caller.hive.agent_store.get_files, scope_id
+            caller.hive.agent_store.get_files, agent_id
         )
         # sha256 of `path\0content\0` for each file in path-sorted order.
         # Stable, lets the CLI re-derive without ambiguity. Files-empty
@@ -914,12 +940,50 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             h.update(b"\0")
         files_digest = h.hexdigest()
         return {
-            "scope_agent_id": scope_id,
+            "agent_id": agent_id,
             "agent": agent.model_dump(),
             "files_count": len(files),
             "files_digest_sha256": files_digest,
+            "image_digest": _image_digest(agent.image),
             "attestation": _att.get_bundle(),
         }
+
+    @app.get("/v1/agents/{agent_id}/attest")
+    async def attest_agent(
+        agent_id: str,
+        caller: Caller = Depends(requires_role("owner", "query")),
+    ):
+        if not _query_token_visible_agent(caller, agent_id):
+            raise HTTPException(404, "Agent not found")
+        return await _build_agent_attestation(caller, agent_id)
+
+    # /v1/scope-attest — backwards-compatible alias designed for the
+    # query-token recipient flow. Resolves the agent_id from the token
+    # binding (query) or the ?scope_agent_id= query param (owner) and
+    # delegates to the canonical helper. Adds ``scope_agent_id`` at the
+    # top of the response for clients that key off that field.
+    @app.get("/v1/scope-attest")
+    async def scope_attest(
+        scope_agent_id: str | None = None,
+        caller: Caller = Depends(requires_role("owner", "query")),
+    ):
+        if caller.role == "query":
+            scope_id = caller.constraints.get("scope_agent_id") or ""
+            if not scope_id:
+                raise HTTPException(
+                    500, "query token missing scope_agent_id constraint"
+                )
+        else:
+            scope_id = (scope_agent_id or "").strip()
+            if not scope_id:
+                raise HTTPException(
+                    400,
+                    "owner must pass ?scope_agent_id=… (no token binding)",
+                )
+        if not _query_token_visible_agent(caller, scope_id):
+            raise HTTPException(404, "Agent not found")
+        body = await _build_agent_attestation(caller, scope_id)
+        return {"scope_agent_id": scope_id, **body}
 
     # ── Agent upload ──
 

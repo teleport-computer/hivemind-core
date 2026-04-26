@@ -15,7 +15,7 @@ works for all of them:
 | Prefix | Kind | Scope |
 |---|---|---|
 | `hmk_…` | **tenant owner** | full access to the tenant's DB and pipeline; can mint capability tokens, rotate the key, and run every public endpoint |
-| `hmq_…` | **query capability** | only `/v1/query{,/submit}`, `/v1/query-agents/submit`, `/v1/scope-attest`, and read-access to the bound scope agent's source files. Every query is forced through one pinned `scope_agent_id` (the owner picked it at mint time — the holder cannot override) |
+| `hmq_…` | **query capability** | only `/v1/query{,/submit}`, `/v1/query-agents/submit`, `/v1/agents/{id}/attest` (and the `/v1/scope-attest` alias), and read-access to the bound scope agent's source files. Every query is forced through one pinned `scope_agent_id` (the owner picked it at mint time — the holder cannot override) |
 | `hmw_…` | **write capability** | only `/v1/store`, restricted to single `INSERT` statements into a fixed table allowlist. Reads, schema changes, and `_hivemind_*` are 403 |
 | `<admin-key>` | **operator** | only `/v1/admin/tenants/*` (provision/list/delete/register tenants). Cannot read tenant data through this API |
 
@@ -405,31 +405,53 @@ with `401`. Idempotent.
 - `400` prefix shorter than 12 chars
 - `404` no matching token
 
-### `GET /v1/scope-attest`
+### `GET /v1/agents/{agent_id}/attest`
 
-Recipient-friendly endpoint that returns "the scope agent your token is
-bound to, plus the attestation bundle, plus a stable digest over its
-extracted source files". Used by `hivemind scope-inspect` to verify
-binding before submitting work.
+Canonical agent-attestation endpoint. Returns "this agent, plus the
+host's TDX attestation bundle, plus a stable digest over the agent's
+extracted source files, plus the resolved Docker image digest". Used by
+`hivemind agent-attest` and by recipients who want to pin "what code is
+running" before sending work.
 
-Auth: owner (`hmk_` — must pass `?scope_agent_id=...`) or query (`hmq_`,
-`scope_agent_id` is taken from the token binding).
+Auth: owner (`hmk_` — any agent in the tenant) or query (`hmq_` — only
+the scope agent the token is bound to; other ids return `404`).
 
 **Response 200**
 
 ```json
 {
-  "scope_agent_id": "abc123def456",
-  "agent": { "agent_id": "...", "name": "...", "image": "...", "...": "..." },
+  "agent_id": "abc123def456",
+  "agent": { "agent_id": "...", "name": "...", "image": "hivemind-scope:latest", "...": "..." },
   "files_count": 7,
   "files_digest_sha256": "fa9c…",
+  "image_digest": {
+    "id": "sha256:9b4f…",
+    "repo_digests": ["registry.example.com/hivemind-scope@sha256:1a2b…"]
+  },
   "attestation": { "attestation": { "compose_hash": "...", "app_id": "...", "...": "..." } }
 }
 ```
 
-`files_digest_sha256` is `sha256("<path>\0<content>\0…" sorted by path)`.
-A recipient who fetched the files via the endpoints below can re-derive
-this hash byte-for-byte and pin it out-of-band.
+- `files_digest_sha256` is `sha256("<path>\0<content>\0…" sorted by
+  path)`. A recipient who fetched the files via the endpoints below can
+  re-derive this hash byte-for-byte and pin it out-of-band.
+- `image_digest.id` is the local content-addressable Docker `Id`
+  (always present when the image is loaded). `image_digest.repo_digests`
+  is the registry digest list — only populated for images that were
+  pulled from / pushed to a registry. Both fields are empty when the
+  Docker daemon isn't reachable from the server (fail-soft).
+
+### `GET /v1/scope-attest`
+
+**Alias** for `GET /v1/agents/{agent_id}/attest`, kept for backwards
+compatibility with the older `hivemind scope-inspect` flow. The response
+preserves the legacy top-level `scope_agent_id` key in addition to the
+canonical `agent_id`.
+
+- For `hmq_` query tokens: `agent_id` is taken from the token binding
+  (`scope_agent_id` claim).
+- For `hmk_` owner keys: `?scope_agent_id=...` is **required** as a
+  query parameter.
 
 ### `GET /v1/agents/{agent_id}/files`
 
