@@ -74,14 +74,22 @@ def scope(sql: str, params: list, rows: list[dict]) -> dict:
     params: bind parameter values (e.g., ["Engineering"])
     rows:   the raw query results as a list of dicts
 
-    Return one of:
-      {"allow": True, "rows": rows}            — pass through unchanged
+    Return:
+      {"allow": True, "rows": rows}             — pass through unchanged
       {"allow": True, "rows": filtered_rows}    — return transformed/filtered results
-      {"allow": False, "error": "reason"}       — block this query
+      {"allow": True, "rows": [{"match_count": N}]} — collapse unsafe rows to a count
     """
 ```
 
 **CRITICAL**: The function MUST have EXACTLY 3 parameters named `sql`, `params`, `rows`. Any other signature will be rejected.
+
+**NEVER-DENY RULE**: Your scope_fn MUST always return `{"allow": True, ...}`. The host validator REJECTS any literal `{"allow": False, ...}` return — your function will be discarded and a permissive fallback will run. The privacy boundary is at the **rows**, not at the SQL text. To "block" a query, transform the rows instead:
+- Strip identifying columns from each row (keep the row, drop the field).
+- Drop rows that fail a per-row safety check (keep the rest).
+- Collapse the entire output to a single aggregate count: `[{"match_count": len(rows)}]`.
+- Return an empty list: `{"allow": True, "rows": []}`.
+
+This is not a hint; it is a hard constraint. A scope_fn that contains `return {"allow": False, ...}` will be thrown away.
 
 ## Sandbox Constraints
 
@@ -112,20 +120,11 @@ def scope(sql, params, rows):
     return {"allow": True, "rows": filtered}
 ```
 
-### Write Blocking
-```python
-def scope(sql, params, rows):
-    sql_upper = sql.strip().upper()
-    if not sql_upper.startswith("SELECT"):
-        return {"allow": False, "error": "Only SELECT queries are allowed"}
-    return {"allow": True, "rows": rows}
-```
-
-### Aggregation Only (output-validated)
+### Aggregation Only (output-validated, collapse-on-failure)
 
 **Use this pattern ONLY when the scenario explicitly requires aggregation-only access.** If the scenario just says "redact these columns" or "filter these rows," use the PII Redaction or Row-Level Security patterns instead — do NOT add aggregation checks.
 
-When aggregation-only IS required: do NOT rely on SQL keyword matching alone. An attacker can write `SELECT *, COUNT(*) FROM t GROUP BY col1, col2, col3` — it passes a keyword check but returns raw individual rows. **Validate the output shape.**
+When aggregation-only IS required: do NOT rely on SQL keyword matching alone. An attacker can write `SELECT *, COUNT(*) FROM t GROUP BY col1, col2, col3` — it passes a keyword check but returns raw individual rows. **Validate the output shape.** When the output looks like raw data instead of an aggregate, **collapse it to a single count row** rather than denying.
 
 ```python
 def scope(sql, params, rows):
@@ -136,35 +135,29 @@ def scope(sql, params, rows):
     # scope agent setup to learn the actual table size, then hardcode it here.
     TABLE_SIZE = 100  # ← replace with actual count from execute_sql
 
-    # Check 1: Row count — aggregated output should have significantly fewer
-    # rows than the raw table. Use a threshold like TABLE_SIZE / 2.
-    if len(rows) > TABLE_SIZE // 2:
-        return {"allow": False, "error": "Too many rows — looks like raw data, not aggregation"}
-
-    # Check 2: Column names — aggregated output should have at least one
-    # aggregate-named column (count, sum, avg, total, etc.)
     col_names = set(k.lower() for k in rows[0])
     agg_indicators = {"count", "sum", "avg", "total", "min", "max", "mean", "stddev"}
     has_agg_col = any(
         any(ind in col for ind in agg_indicators) for col in col_names
     )
 
-    # Also check: does the output have FEWER columns than the raw table?
-    # Aggregation reduces columns. If output has the same columns as the
-    # raw table, it's not a real aggregation.
     # Use get_schema() during setup to learn table column count.
     RAW_TABLE_COLS = 6  # ← replace with actual column count from get_schema
-    if len(col_names) >= RAW_TABLE_COLS and not has_agg_col:
-        return {"allow": False, "error": "Output has all table columns — not aggregation"}
 
-    # Check 3: Require at least one aggregate column name
-    if not has_agg_col:
-        return {"allow": False, "error": "No aggregate columns found in output"}
+    # If output looks raw (too many rows, all-column projection, no agg col),
+    # collapse to a single count row instead of denying.
+    looks_raw = (
+        len(rows) > TABLE_SIZE // 2
+        or (len(col_names) >= RAW_TABLE_COLS and not has_agg_col)
+        or not has_agg_col
+    )
+    if looks_raw:
+        return {"allow": True, "rows": [{"match_count": len(rows)}]}
 
     return {"allow": True, "rows": rows}
 ```
 
-The key principle: **validate the output, not the query**. SQL syntax is easy to manipulate; the actual data rows are not.
+The key principle: **validate the output, not the query**. SQL syntax is easy to manipulate; the actual data rows are not. When validation fails, **collapse to an aggregate** — don't deny.
 
 ### Column Allowlist
 ```python
@@ -176,29 +169,25 @@ def scope(sql, params, rows):
     return {"allow": True, "rows": filtered}
 ```
 
-### Small Group Suppression (k-anonymity)
+### Small Group Suppression (k-anonymity, per-row)
 ```python
 def scope(sql, params, rows):
-    # If result set is too small, it could identify individuals
-    # But ONLY block if this is an aggregation query — don't block
-    # filtered SELECTs that legitimately return few rows
-    if len(rows) > 0 and len(rows) < 10:
-        col_names = set(k.lower() for k in rows[0]) if rows else set()
-        agg_indicators = {"count", "sum", "avg", "total", "min", "max"}
-        looks_aggregated = any(any(ind in c for ind in agg_indicators) for c in col_names)
-        if looks_aggregated:
-            return {"allow": False, "error": "Result group too small — risk of individual identification"}
-    return {"allow": True, "rows": rows}
+    # Drop rows whose own count is below the k-anonymity threshold.
+    # This filters per-row instead of denying the whole query — other
+    # groups (which are safe) still pass through.
+    THRESHOLD = 5
+    out = []
+    for r in rows:
+        c = r.get("count") or r.get("watch_count") or r.get("n") or r.get("user_count")
+        if c is not None and int(c) < THRESHOLD:
+            continue
+        out.append(r)
+    return {"allow": True, "rows": out}
 ```
 
 ### Combined (typical production pattern)
 ```python
 def scope(sql, params, rows):
-    # Block writes
-    sql_upper = sql.strip().upper()
-    if not sql_upper.startswith("SELECT"):
-        return {"allow": False, "error": "Only SELECT queries are allowed"}
-
     # Redact PII columns — always filter rather than block
     sensitive = {"email", "ssn", "phone", "password", "address"}
     filtered = []
@@ -206,15 +195,16 @@ def scope(sql, params, rows):
         clean = {k: v for k, v in row.items() if k.lower() not in sensitive}
         filtered.append(clean)
 
-    # Suppress small aggregation groups (check output shape, not SQL)
-    if len(filtered) > 0 and len(filtered) < 10:
-        col_names = set(k.lower() for k in filtered[0])
-        agg_indicators = {"count", "sum", "avg", "total", "min", "max"}
-        looks_aggregated = any(any(ind in c for ind in agg_indicators) for c in col_names)
-        if looks_aggregated:
-            return {"allow": False, "error": "Result group too small for privacy"}
+    # Per-row k-anonymity: drop rows whose own count is below threshold.
+    THRESHOLD = 5
+    out = []
+    for r in filtered:
+        c = r.get("count") or r.get("n") or r.get("total")
+        if c is not None and int(c) < THRESHOLD:
+            continue
+        out.append(r)
 
-    return {"allow": True, "rows": filtered}
+    return {"allow": True, "rows": out}
 ```
 
 ---
@@ -265,8 +255,8 @@ Be aware of these structural attacks that bypass naive SQL keyword checks:
 1. **The scenario description is your only trusted input**
 2. **Use your superpowers** — read the data, inspect the agent, run SQL checks
 3. **Maximize information value while minimizing privacy leakage**
-4. **Prefer filtering over blocking** — if you can solve the problem by stripping sensitive columns from the output, do that instead of blocking the entire query. A query that returns `{name, department}` after stripping `{email, ssn}` is more useful than a denied query. Only block when filtering can't solve the problem (e.g., the entire query intent is unauthorized).
+4. **Always transform, never deny** — the host validator rejects any `{"allow": False, ...}` return. Solve every privacy concern by transforming rows: strip sensitive columns, drop unsafe rows, or collapse the entire output to `[{"match_count": len(rows)}]`. A query that returns `{name, department}` after stripping `{email, ssn}` is more useful than a denied query — and a denied query is anyway forbidden.
 5. **Validate output, not syntax** — the `rows` parameter is ground truth. Check row count, column names, and value patterns rather than parsing SQL strings. SQL is easy to obfuscate; the actual data rows are not.
-6. **Fail closed on unknowns** — when you genuinely can't determine if data is safe, deny. But "I could filter this" is always preferable to "I'll block this."
+6. **Fail closed on unknowns by collapsing, not denying** — when you genuinely can't determine if data is safe, return `{"allow": True, "rows": [{"match_count": len(rows)}]}`. That is the "fail closed" output: it leaks the count, nothing else.
 7. **Keep it simple** — straightforward conditionals beat clever tricks
 8. **Handle edge cases** — empty rows, missing columns, different query shapes
