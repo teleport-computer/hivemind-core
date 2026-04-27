@@ -37,10 +37,23 @@ def tokens_cli():
     default=None,
     help="Pin every prompt through this scope agent id",
 )
+@click.option(
+    "--can-upload-query-agent",
+    "can_upload_query_agent",
+    is_flag=True,
+    default=False,
+    help=(
+        "Allow this token to upload its own query agent code via "
+        "/v1/query-agents/submit. Off by default — opt-in cedes "
+        "execution surface to the recipient. The scope agent still "
+        "policies all SQL the recipient's code emits."
+    ),
+)
 @click.option("--json", "as_json", is_flag=True, help="Emit JSON on stdout")
 def tokens_issue(
     label: str,
     scope_agent: str | None,
+    can_upload_query_agent: bool,
     as_json: bool,
 ):
     """Mint a new query capability token (hmq_).
@@ -68,7 +81,10 @@ def tokens_issue(
     body = {
         "kind": "query",
         "label": label,
-        "constraints": {"scope_agent_id": scope_agent},
+        "constraints": {
+            "scope_agent_id": scope_agent,
+            "can_upload_query_agent": bool(can_upload_query_agent),
+        },
     }
     try:
         resp = _hpost(

@@ -280,6 +280,61 @@ def test_share_mint_emits_valid_uri(share_env):
     assert parsed["compose_hash"] == ""
 
 
+def test_share_mint_with_upload_capability(share_env):
+    """Phase 4: --can-upload-query-agent forwards the constraint to the
+    minted token. The token must then accept /v1/query-agents/submit."""
+    runner, _profile, scope_id, client, _api_key = share_env
+    result = runner.invoke(
+        _cli_mod.cli,
+        ["share", "--mint", "--can-upload-query-agent", "--label", "uploader"],
+    )
+    assert result.exit_code == 0, result.stderr or result.output
+    uri = result.stdout.strip()
+    parsed = _cli_mod._parse_hmq_uri(uri)
+    token = parsed["token"]
+
+    # Listing tokens reflects the constraint persisted server-side.
+    rows = client.get(
+        "/v1/tokens",
+        headers={"Authorization": f"Bearer {_api_key}"},
+    ).json()["tokens"]
+    matched = [
+        r for r in rows if r.get("label") == "uploader"
+    ]
+    assert matched, rows
+    assert matched[0]["constraints"]["can_upload_query_agent"] is True
+    assert matched[0]["constraints"]["scope_agent_id"] == scope_id
+
+    # The token may now post to /v1/query-agents/submit (we just check
+    # the gate accepts it; the build runs in a background task).
+    import io as _io, tarfile as _tar
+    buf = _io.BytesIO()
+    with _tar.open(fileobj=buf, mode="w:gz") as t:
+        for n, b in (("Dockerfile", b"FROM python:3.12-slim\n"),
+                     ("agent.py", b"x\n")):
+            info = _tar.TarInfo(name=n)
+            info.size = len(b)
+            t.addfile(info, _io.BytesIO(b))
+    r = client.post(
+        "/v1/query-agents/submit",
+        headers={"Authorization": f"Bearer {token}"},
+        files={"archive": ("a.tar.gz", buf.getvalue(), "application/gzip")},
+        data={"name": "phase4-share", "prompt": "hi"},
+    )
+    assert r.status_code == 200, r.text
+
+
+def test_share_with_token_rejects_upload_flag(share_env):
+    """--can-upload-query-agent is only meaningful with --mint; passing
+    it together with --token should fail loud rather than silently."""
+    runner, _profile, _scope_id, _client, _api_key = share_env
+    result = runner.invoke(
+        _cli_mod.cli,
+        ["share", "--token", "hmq_abc", "--can-upload-query-agent"],
+    )
+    assert result.exit_code != 0
+
+
 def test_share_with_explicit_token(share_env):
     runner, profile, scope_id, client, api_key = share_env
     # Mint a query token directly via the API first.
@@ -376,6 +431,68 @@ def test_ask_compose_pin_mismatch_aborts(share_env):
     err = result.stderr or result.output
     assert "compose_hash" in err
     assert "mismatch" in err.lower()
+
+
+def test_ask_with_query_agent_routes_to_upload(share_env, tmp_path, monkeypatch):
+    """Phase 4: ``ask --query-agent <dir>`` should not call /v1/query;
+    instead it packs the directory and routes through the upload+poll
+    helper. We stub the helper to assert routing without spinning up a
+    real container build."""
+    runner, _profile, scope_id, client, api_key = share_env
+    r = client.post(
+        "/v1/tokens",
+        headers={"Authorization": f"Bearer {api_key}"},
+        json={
+            "kind": "query",
+            "label": "uploader",
+            "constraints": {
+                "scope_agent_id": scope_id,
+                "can_upload_query_agent": True,
+            },
+        },
+    )
+    token = r.json()["token"]
+
+    agent_dir = tmp_path / "qa"
+    agent_dir.mkdir()
+    (agent_dir / "Dockerfile").write_text("FROM python:3.12-slim\n")
+    (agent_dir / "agent.py").write_text("print('q')\n")
+
+    captured: dict = {}
+
+    def _stub(**kwargs):
+        captured.update(kwargs)
+        click_echo = kwargs.get("as_json")
+        # Mimic the helper printing a result and returning normally.
+        import click as _click
+        _click.echo("uploaded ok")
+
+    from hivemind.cli import recipient as _recip
+    monkeypatch.setattr(_recip, "_upload_query_agent_and_poll", _stub)
+
+    uri = f"hmq://share-test/{scope_id}?token={token}&scheme=http"
+    result = runner.invoke(
+        _cli_mod.cli,
+        ["ask", uri, "How many rows?", "--query-agent", str(agent_dir)],
+    )
+    assert result.exit_code == 0, (result.stderr or result.output)
+    assert "uploaded ok" in result.output
+    assert captured["prompt"] == "How many rows?"
+    assert captured["scope_id"] == scope_id
+    assert captured["archive_name"] == "qa.tar.gz"
+    assert isinstance(captured["archive_bytes"], (bytes, bytearray))
+    assert len(captured["archive_bytes"]) > 0
+
+
+def test_ask_query_agent_path_must_exist(share_env):
+    """``ask --query-agent /nonexistent`` should fail Click validation."""
+    runner, _profile, scope_id, _client, _api_key = share_env
+    uri = f"hmq://share-test/{scope_id}?token=hmq_test&scheme=http"
+    result = runner.invoke(
+        _cli_mod.cli,
+        ["ask", uri, "q", "--query-agent", "/no/such/path"],
+    )
+    assert result.exit_code != 0
 
 
 def test_ask_with_no_pins_skips_pin_verification(share_env):

@@ -33,6 +33,146 @@ def _hpost(*a, **kw):
     return _f(*a, **kw)
 
 
+def _upload_query_agent_and_poll(
+    *,
+    service: str,
+    headers: dict,
+    archive_bytes: bytes,
+    archive_name: str,
+    agent_name: str,
+    description: str,
+    prompt: str,
+    scope_id: str | None,
+    mediator_id: str | None,
+    memory_mb: int,
+    max_llm_calls: int,
+    max_tokens: int,
+    timeout: int,
+    model: str | None,
+    provider: str | None,
+    as_json: bool,
+    fetch: bool,
+) -> None:
+    """Upload an archive to /v1/query-agents/submit and poll until done.
+
+    Shared by ``hivemind run`` and ``hivemind ask --query-agent``. Keeps
+    the same exit-code contract as ``run_cmd`` (2=connect, 3=submit-4xx,
+    4=run failed, 5=timeout).
+    """
+    form_data: dict[str, str] = {
+        "name": agent_name,
+        "prompt": prompt,
+        "description": description,
+        "memory_mb": str(memory_mb),
+        "max_llm_calls": str(max_llm_calls),
+        "max_tokens": str(max_tokens),
+        "timeout_seconds": str(min(timeout, 3600)),
+    }
+    if scope_id:
+        form_data["scope_agent_id"] = scope_id
+    if mediator_id:
+        form_data["mediator_agent_id"] = mediator_id
+    if model:
+        form_data["model"] = model
+    if provider:
+        form_data["provider"] = provider
+
+    if not as_json:
+        click.echo(f"Uploading {archive_name} ({len(archive_bytes)} bytes) → {service}")
+
+    try:
+        resp = _hpost(
+            f"{service}/v1/query-agents/submit",
+            files={
+                "archive": (archive_name, archive_bytes, "application/gzip"),
+            },
+            data=form_data,
+            headers=headers,
+            timeout=60,
+        )
+    except httpx.ConnectError:
+        click.echo(f"Error: Cannot reach {service}", err=True)
+        raise SystemExit(2)
+    except httpx.TimeoutException:
+        click.echo("Error: Upload timed out.", err=True)
+        raise SystemExit(2)
+
+    if resp.status_code >= 400:
+        click.echo(
+            f"Error: Submit failed ({resp.status_code}): {_api_error(resp)}",
+            err=True,
+        )
+        raise SystemExit(3)
+
+    submission = resp.json()
+    run_id = submission["run_id"]
+    agent_id = submission.get("agent_id")
+
+    if not as_json:
+        click.echo(f"Submitted: run_id={run_id} agent_id={agent_id}")
+
+    deadline = time.time() + timeout
+    last_status = ""
+    while time.time() < deadline:
+        try:
+            sr = _hget(
+                f"{service}/v1/agent-runs/{run_id}",
+                headers=headers,
+                timeout=15,
+            )
+            if sr.status_code == 404:
+                time.sleep(2)
+                continue
+            data = sr.json()
+        except httpx.RequestError:
+            time.sleep(2)
+            continue
+
+        status = data.get("status", "")
+        if status != last_status and not as_json:
+            click.echo(f"  status: {status}")
+            last_status = status
+
+        if status == "completed":
+            _emit_run_result(service, data, run_id, as_json=as_json, fetch=fetch)
+            return
+        if status == "failed":
+            err = data.get("error") or data.get("result", {}).get("error") or "?"
+            if as_json:
+                click.echo(_json.dumps({"status": "failed", "error": err, "run_id": run_id}))
+            else:
+                click.echo(f"Error: run failed: {err}", err=True)
+            raise SystemExit(4)
+
+        time.sleep(3)
+
+    if as_json:
+        click.echo(_json.dumps({"status": "timeout", "run_id": run_id}))
+    else:
+        click.echo(
+            f"Error: timed out after {timeout}s. Check `hivemind runs {run_id}`.",
+            err=True,
+        )
+    raise SystemExit(5)
+
+
+def _archive_for_path(path: Path, name: str | None) -> tuple[bytes, str, str]:
+    """Resolve a CLI-provided ``path`` (dir or .tar.gz) into (bytes, archive_name, agent_name)."""
+    if path.is_dir():
+        archive_bytes = _tarball_from_dir(path)
+        archive_name = f"{path.name}.tar.gz"
+        agent_name = name or path.name
+    elif path.suffix in {".gz", ".tgz"} or path.name.endswith(".tar.gz"):
+        archive_bytes = path.read_bytes()
+        archive_name = path.name
+        agent_name = name or path.stem.replace(".tar", "")
+    else:
+        raise click.ClickException(
+            f"Unsupported path type: {path}. Pass a directory or .tar.gz."
+        )
+    return archive_bytes, archive_name, agent_name
+
+
 @click.command()
 @click.argument("uri")
 @click.argument("question")
@@ -88,6 +228,34 @@ def _hpost(*a, **kw):
         "a recipient flip provider per-question without re-deploying."
     ),
 )
+@click.option(
+    "--query-agent",
+    "query_agent_path",
+    type=click.Path(exists=True, file_okay=True, dir_okay=True, path_type=Path),
+    default=None,
+    help=(
+        "Upload your own query agent (directory or .tar.gz) and run the "
+        "question through it instead of the owner's default. Requires "
+        "the URI's token to have can_upload_query_agent=true. The owner-"
+        "pinned scope agent still policies all SQL the code emits."
+    ),
+)
+@click.option(
+    "--memory-mb",
+    type=int,
+    default=256,
+    show_default=True,
+    help="Container memory limit (only used with --query-agent).",
+)
+@click.option("--json", "as_json", is_flag=True, help="Emit JSON on stdout")
+@click.option(
+    "--fetch",
+    is_flag=True,
+    help=(
+        "Download artifacts into ./hivemind-artifacts/<run_id>/ "
+        "(only used with --query-agent)."
+    ),
+)
 def ask(
     uri: str,
     question: str,
@@ -97,6 +265,10 @@ def ask(
     timeout_seconds: int | None,
     model: str | None,
     provider: str | None,
+    query_agent_path: Path | None,
+    memory_mb: int,
+    as_json: bool,
+    fetch: bool,
 ):
     """Send a query through a hmq:// URI shared by an owner.
 
@@ -316,6 +488,39 @@ def ask(
             )
             raise SystemExit(4)
 
+    if query_agent_path is not None:
+        # Phase 4: B-uploadable query agent. All trust pins above
+        # (compose / files / pin envelope) have already been verified
+        # against the URI; routing here just swaps the prompts-only
+        # /v1/query path for an upload+run cycle. The server gates
+        # this on the token's can_upload_query_agent constraint.
+        archive_bytes, archive_name, agent_name = _archive_for_path(
+            query_agent_path, None
+        )
+        # Default the run-side timeout to the gateway-friendly 600s
+        # unless the caller set --timeout (which means per-call cap).
+        run_timeout = timeout_seconds or 600
+        _upload_query_agent_and_poll(
+            service=service,
+            headers=headers,
+            archive_bytes=archive_bytes,
+            archive_name=archive_name,
+            agent_name=agent_name,
+            description=f"hivemind ask --query-agent {query_agent_path.name}",
+            prompt=question,
+            scope_id=scope_id,
+            mediator_id=None,
+            memory_mb=memory_mb,
+            max_llm_calls=max_llm_calls or 20,
+            max_tokens=max_tokens or 100_000,
+            timeout=run_timeout,
+            model=model,
+            provider=provider,
+            as_json=as_json,
+            fetch=fetch,
+        )
+        return
+
     payload: dict = {"query": question, "scope_agent_id": scope_id}
     qa_id = (parsed.get("query_agent_id") or "").strip()
     if qa_id:
@@ -525,119 +730,32 @@ def run_cmd(
     service = config["service"]
     headers = _headers(config)
 
-    if path.is_dir():
-        archive_bytes = _tarball_from_dir(path)
-        archive_name = f"{path.name}.tar.gz"
-        agent_name = name or path.name
-    elif path.suffix in {".gz", ".tgz"} or path.name.endswith(".tar.gz"):
-        archive_bytes = path.read_bytes()
-        archive_name = path.name
-        agent_name = name or path.stem.replace(".tar", "")
-    else:
-        raise click.ClickException(
-            f"Unsupported path type: {path}. Pass a directory or .tar.gz."
-        )
-
+    archive_bytes, archive_name, agent_name = _archive_for_path(path, name)
     scope_id = scope_agent or config.get("scope_agent_id")
     mediator_id = mediator_agent or config.get("mediator_agent_id")
 
-    form_data: dict[str, str] = {
-        "name": agent_name,
-        "prompt": prompt,
-        "description": f"hivemind run {path.name}",
-        "memory_mb": str(memory_mb),
-        "max_llm_calls": str(max_llm_calls),
-        "max_tokens": str(max_tokens),
-        "timeout_seconds": str(min(timeout, 3600)),
-    }
-    if scope_id:
-        form_data["scope_agent_id"] = scope_id
-    if mediator_id:
-        form_data["mediator_agent_id"] = mediator_id
-    if model:
-        form_data["model"] = model
-    if provider:
-        form_data["provider"] = provider
-
     if not as_json:
-        click.echo(f"Packing {path} → {archive_name} ({len(archive_bytes)} bytes)")
-        click.echo(f"Uploading to {service}...")
+        click.echo(f"Packing {path} → {archive_name}")
 
-    try:
-        resp = _hpost(
-            f"{service}/v1/query-agents/submit",
-            files={
-                "archive": (archive_name, archive_bytes, "application/gzip"),
-            },
-            data=form_data,
-            headers=headers,
-            timeout=60,
-        )
-    except httpx.ConnectError:
-        click.echo(f"Error: Cannot reach {service}", err=True)
-        raise SystemExit(2)
-    except httpx.TimeoutException:
-        click.echo("Error: Upload timed out.", err=True)
-        raise SystemExit(2)
-
-    if resp.status_code >= 400:
-        click.echo(
-            f"Error: Submit failed ({resp.status_code}): {_api_error(resp)}",
-            err=True,
-        )
-        raise SystemExit(3)
-
-    submission = resp.json()
-    run_id = submission["run_id"]
-    agent_id = submission.get("agent_id")
-
-    if not as_json:
-        click.echo(f"Submitted: run_id={run_id} agent_id={agent_id}")
-        click.echo(f"Polling /v1/agent-runs/{run_id}...")
-
-    deadline = time.time() + timeout
-    last_status = ""
-    while time.time() < deadline:
-        try:
-            sr = _hget(
-                f"{service}/v1/agent-runs/{run_id}",
-                headers=headers,
-                timeout=15,
-            )
-            if sr.status_code == 404:
-                time.sleep(2)
-                continue
-            data = sr.json()
-        except httpx.RequestError:
-            time.sleep(2)
-            continue
-
-        status = data.get("status", "")
-        if status != last_status and not as_json:
-            click.echo(f"  status: {status}")
-            last_status = status
-
-        if status == "completed":
-            _emit_run_result(service, data, run_id, as_json=as_json, fetch=fetch)
-            return
-        if status == "failed":
-            err = data.get("error") or data.get("result", {}).get("error") or "?"
-            if as_json:
-                click.echo(_json.dumps({"status": "failed", "error": err, "run_id": run_id}))
-            else:
-                click.echo(f"Error: run failed: {err}", err=True)
-            raise SystemExit(4)
-
-        time.sleep(3)
-
-    if as_json:
-        click.echo(_json.dumps({"status": "timeout", "run_id": run_id}))
-    else:
-        click.echo(
-            f"Error: timed out after {timeout}s. Check `hivemind runs {run_id}`.",
-            err=True,
-        )
-    raise SystemExit(5)
+    _upload_query_agent_and_poll(
+        service=service,
+        headers=headers,
+        archive_bytes=archive_bytes,
+        archive_name=archive_name,
+        agent_name=agent_name,
+        description=f"hivemind run {path.name}",
+        prompt=prompt,
+        scope_id=scope_id,
+        mediator_id=mediator_id,
+        memory_mb=memory_mb,
+        max_llm_calls=max_llm_calls,
+        max_tokens=max_tokens,
+        timeout=timeout,
+        model=model,
+        provider=provider,
+        as_json=as_json,
+        fetch=fetch,
+    )
 
 
 @click.command("runs")

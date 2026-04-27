@@ -469,11 +469,25 @@ def load_cmd(
         "bless' first to publish a pin."
     ),
 )
+@click.option(
+    "--can-upload-query-agent",
+    "can_upload_query_agent",
+    is_flag=True,
+    default=False,
+    help=(
+        "When --mint is set, also grant the new token permission to "
+        "upload its own query agent code (Phase 4: B-uploadable). "
+        "Off by default — grant explicitly when you intend the recipient "
+        "to ship their own SQL/analysis logic. The owner-pinned scope "
+        "agent still policies every SQL the recipient's code emits."
+    ),
+)
 def share(
     mint: bool,
     label: str,
     explicit_token: str | None,
     pin_rotation: bool,
+    can_upload_query_agent: bool,
 ):
     """Print a hmq:// URI bundling token + trust pins for a recipient.
 
@@ -519,6 +533,14 @@ def share(
                 "Error: --token must be an hmq_ capability token.", err=True
             )
             raise SystemExit(1)
+        if can_upload_query_agent:
+            click.echo(
+                "Error: --can-upload-query-agent only applies with "
+                "--mint. Re-issue the token via 'hivemind tokens issue "
+                "--can-upload-query-agent' instead.",
+                err=True,
+            )
+            raise SystemExit(1)
         token = explicit_token
     else:
         try:
@@ -528,7 +550,12 @@ def share(
                 json={
                     "kind": "query",
                     "label": label,
-                    "constraints": {"scope_agent_id": scope_id},
+                    "constraints": {
+                        "scope_agent_id": scope_id,
+                        "can_upload_query_agent": bool(
+                            can_upload_query_agent
+                        ),
+                    },
                 },
                 timeout=30,
             )

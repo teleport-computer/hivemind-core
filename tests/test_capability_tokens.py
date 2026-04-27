@@ -109,8 +109,46 @@ def test_mint_query_token_requires_scope_agent_id(registry):
     )
     assert out["token"].startswith(_QUERY_TOKEN_PREFIX)
     assert out["kind"] == "query"
-    assert out["constraints"] == {"scope_agent_id": "abc123"}
+    # Phase 4: ``can_upload_query_agent`` is always emitted; defaults
+    # to false so existing tokens stay prompt-only.
+    assert out["constraints"] == {
+        "scope_agent_id": "abc123",
+        "can_upload_query_agent": False,
+    }
     assert len(out["token_id"]) == 12
+
+
+def test_mint_records_can_upload_query_agent_flag(registry):
+    """Phase 4: ``can_upload_query_agent`` round-trips end to end."""
+    t = registry.provision("phase4_flag_on")
+    registry._test_created_dbs.append(t["db_name"])
+
+    out = registry.mint_capability(
+        t["tenant_id"],
+        "query",
+        "uploader",
+        {"scope_agent_id": "sc1", "can_upload_query_agent": True},
+    )
+    assert out["constraints"] == {
+        "scope_agent_id": "sc1",
+        "can_upload_query_agent": True,
+    }
+    caller = registry.resolve_any(out["token"])
+    assert caller is not None
+    assert caller.constraints["can_upload_query_agent"] is True
+
+
+def test_mint_rejects_non_bool_can_upload(registry):
+    """Phase 4: only true booleans accepted; truthy strings should fail."""
+    t = registry.provision("phase4_bad_type")
+    registry._test_created_dbs.append(t["db_name"])
+    with pytest.raises(ValueError):
+        registry.mint_capability(
+            t["tenant_id"],
+            "query",
+            "bad",
+            {"scope_agent_id": "sc", "can_upload_query_agent": "yes"},
+        )
 
 
 def test_mint_rejects_write_kind(registry):
@@ -223,7 +261,10 @@ def test_resolve_any_query_token(registry):
     assert caller is not None
     assert caller.role == "query"
     assert caller.tenant_id == t["tenant_id"]
-    assert caller.constraints == {"scope_agent_id": "abc123"}
+    assert caller.constraints == {
+        "scope_agent_id": "abc123",
+        "can_upload_query_agent": False,
+    }
     assert caller.token_id == out["token_id"]
 
 

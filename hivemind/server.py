@@ -1673,6 +1673,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # Query-token callers cannot pick their own scope agent — pin it
         # to the one the owner bound the token to.
         if caller.role == "query":
+            # Phase 4: query tokens must opt-in to code execution.
+            # Default-false; owner sets `can_upload_query_agent=true`
+            # explicitly via `tokens issue --can-upload-query-agent` to
+            # cede execution surface to the recipient. Without it the
+            # token can only submit prompts via /v1/query.
+            if not caller.constraints.get("can_upload_query_agent"):
+                raise HTTPException(
+                    status_code=403,
+                    detail=(
+                        "this query token may not upload query agents; "
+                        "owner must mint a token with "
+                        "can_upload_query_agent=true"
+                    ),
+                )
             scope_agent_id = caller.constraints.get("scope_agent_id") or ""
         hm = caller.hive
         try:

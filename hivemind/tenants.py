@@ -372,7 +372,18 @@ class TenantRegistry:
             raise ValueError(
                 "query token requires constraints.scope_agent_id"
             )
-        constraints = {"scope_agent_id": sid}
+        # ``can_upload_query_agent`` (Phase 4) opts a query token into
+        # POST /v1/query-agents/submit. Default false: existing tokens
+        # keep their narrow capability of submitting prompts only.
+        raw_upload = constraints.get("can_upload_query_agent", False)
+        if raw_upload not in (True, False):
+            raise ValueError(
+                "can_upload_query_agent must be a boolean"
+            )
+        constraints = {
+            "scope_agent_id": sid,
+            "can_upload_query_agent": bool(raw_upload),
+        }
 
         rows = self._control_db.execute(
             "SELECT id FROM _tenants WHERE id = %s", [tenant_id]
