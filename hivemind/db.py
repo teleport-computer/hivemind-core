@@ -82,11 +82,44 @@ class Database:
                     CREATE TABLE IF NOT EXISTS _hivemind_agent_files (
                         agent_id TEXT NOT NULL,
                         file_path TEXT NOT NULL,
-                        content TEXT NOT NULL,
+                        content TEXT,
+                        ciphertext TEXT,
                         size_bytes INTEGER NOT NULL,
                         PRIMARY KEY (agent_id, file_path)
                     )
                 """)
+                # Tenant seal: per-tenant-DB DEK wrapped under a KEK
+                # derived from the owner's hmk_ key. Singleton row
+                # (tenant DB == one tenant). Empty until first owner
+                # interaction populates it. Binary fields stored as
+                # base64 TEXT so the values survive JSON transport over
+                # the SQL HTTP proxy without lossy UTF-8 coercion.
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS _hivemind_tenant_kek (
+                        singleton BOOLEAN PRIMARY KEY DEFAULT TRUE
+                            CHECK (singleton),
+                        salt TEXT NOT NULL,
+                        wrapped_dek TEXT NOT NULL,
+                        kdf_params TEXT NOT NULL,
+                        created_at DOUBLE PRECISION NOT NULL
+                    )
+                """)
+                # Migrate _hivemind_agent_files: relax NOT NULL on
+                # legacy `content`, add ciphertext column.
+                try:
+                    cur.execute(
+                        "ALTER TABLE _hivemind_agent_files "
+                        "ALTER COLUMN content DROP NOT NULL"
+                    )
+                except Exception:
+                    pass
+                try:
+                    cur.execute(
+                        "ALTER TABLE _hivemind_agent_files "
+                        "ADD COLUMN IF NOT EXISTS ciphertext TEXT"
+                    )
+                except Exception:
+                    pass
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS _hivemind_query_runs (
                         run_id TEXT PRIMARY KEY,
@@ -247,9 +280,20 @@ class HttpDatabase:
             CREATE TABLE IF NOT EXISTS _hivemind_agent_files (
                 agent_id TEXT NOT NULL,
                 file_path TEXT NOT NULL,
-                content TEXT NOT NULL,
+                content TEXT,
+                ciphertext TEXT,
                 size_bytes INTEGER NOT NULL,
                 PRIMARY KEY (agent_id, file_path)
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS _hivemind_tenant_kek (
+                singleton BOOLEAN PRIMARY KEY DEFAULT TRUE
+                    CHECK (singleton),
+                salt TEXT NOT NULL,
+                wrapped_dek TEXT NOT NULL,
+                kdf_params TEXT NOT NULL,
+                created_at DOUBLE PRECISION NOT NULL
             )
             """,
             """
@@ -316,6 +360,22 @@ class HttpDatabase:
             self.execute_commit(
                 "ALTER TABLE _hivemind_agents "
                 "ADD COLUMN IF NOT EXISTS agent_type TEXT NOT NULL DEFAULT 'query'"
+            )
+        except Exception:
+            pass
+        # Migrate _hivemind_agent_files: relax NOT NULL on legacy
+        # `content`, add ciphertext column (mirrors local Database).
+        try:
+            self.execute_commit(
+                "ALTER TABLE _hivemind_agent_files "
+                "ALTER COLUMN content DROP NOT NULL"
+            )
+        except Exception:
+            pass
+        try:
+            self.execute_commit(
+                "ALTER TABLE _hivemind_agent_files "
+                "ADD COLUMN IF NOT EXISTS ciphertext TEXT"
             )
         except Exception:
             pass
