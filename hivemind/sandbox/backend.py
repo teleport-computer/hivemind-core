@@ -69,13 +69,37 @@ class SandboxBackend:
         resp = await self.llm_client.chat.completions.create(**kwargs)
 
         choice = resp.choices[0]
+        msg = choice.message
+        content = msg.content or ""
+        # Reasoning models (Kimi-K2.6 on Tinfoil, DeepSeek-R1, etc.) return
+        # chain-of-thought in a separate field and may return content=null
+        # when the per-call max_tokens is exhausted by reasoning. Without
+        # this fallback, the agent sees an empty assistant turn and loops
+        # until the host timeout kicks in.
+        reasoning = (
+            getattr(msg, "reasoning", None)
+            or getattr(msg, "reasoning_content", None)
+            or ""
+        )
+        tool_calls = msg.tool_calls or []
+        if not content and reasoning and not tool_calls:
+            logger.info(
+                "reasoning-only response (finish_reason=%s, reasoning_len=%d) — "
+                "surfacing reasoning as content",
+                choice.finish_reason,
+                len(reasoning),
+            )
+            content = reasoning
+
         result: dict = {
-            "content": choice.message.content or "",
+            "content": content,
             "usage": {},
             "finish_reason": choice.finish_reason,
         }
+        if reasoning:
+            result["reasoning"] = reasoning
 
-        if choice.message.tool_calls:
+        if tool_calls:
             result["tool_calls"] = [
                 {
                     "id": tc.id,
@@ -85,7 +109,7 @@ class SandboxBackend:
                         "arguments": tc.function.arguments,
                     },
                 }
-                for tc in choice.message.tool_calls
+                for tc in tool_calls
             ]
 
         if hasattr(resp, "usage") and resp.usage:

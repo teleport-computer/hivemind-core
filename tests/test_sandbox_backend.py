@@ -249,3 +249,169 @@ async def test_backend_raises_on_agent_timeout(monkeypatch):
             tools=_tools(),
             on_tool_call=on_tool_call,
         )
+
+
+@pytest.mark.asyncio
+async def test_llm_caller_surfaces_reasoning_when_content_empty():
+    """Reasoning models (Kimi-K2.6, DeepSeek-R1) may return content=null with
+    chain-of-thought in a separate `reasoning` field. The bridge must fall back
+    to that text so downstream agents see a non-empty assistant turn."""
+    from openai.types.chat.chat_completion import ChatCompletion
+
+    raw = {
+        "id": "chatcmpl-test",
+        "object": "chat.completion",
+        "created": 0,
+        "model": "kimi-k2-6",
+        "choices": [
+            {
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": None,
+                    "reasoning": "the user wants OK",
+                    "tool_calls": [],
+                },
+                "finish_reason": "stop",
+            }
+        ],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+    }
+    fake_resp = ChatCompletion.model_validate(raw)
+
+    client = AsyncMock()
+    client.chat.completions.create = AsyncMock(return_value=fake_resp)
+
+    backend = backend_module.SandboxBackend(
+        llm_client=client,
+        llm_model="kimi-k2-6",
+        settings=_settings(),
+        agent=_agent(),
+    )
+    result = await backend._llm_caller(messages=[{"role": "user", "content": "hi"}], max_tokens=10)
+
+    assert result["content"] == "the user wants OK"
+    assert result["reasoning"] == "the user wants OK"
+    assert result["finish_reason"] == "stop"
+
+
+@pytest.mark.asyncio
+async def test_llm_caller_prefers_real_content_over_reasoning():
+    """When both content and reasoning are present, content wins; reasoning is
+    still surfaced for diagnostics but not duplicated into content."""
+    from openai.types.chat.chat_completion import ChatCompletion
+
+    raw = {
+        "id": "chatcmpl-test",
+        "object": "chat.completion",
+        "created": 0,
+        "model": "kimi-k2-6",
+        "choices": [
+            {
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "OK",
+                    "reasoning": "the user wants OK",
+                },
+                "finish_reason": "stop",
+            }
+        ],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+    }
+    fake_resp = ChatCompletion.model_validate(raw)
+
+    client = AsyncMock()
+    client.chat.completions.create = AsyncMock(return_value=fake_resp)
+
+    backend = backend_module.SandboxBackend(
+        llm_client=client, llm_model="kimi-k2-6", settings=_settings(), agent=_agent()
+    )
+    result = await backend._llm_caller(messages=[{"role": "user", "content": "hi"}], max_tokens=200)
+
+    assert result["content"] == "OK"
+    assert result["reasoning"] == "the user wants OK"
+
+
+@pytest.mark.asyncio
+async def test_llm_caller_handles_deepseek_reasoning_content_field():
+    """DeepSeek-style providers expose chain-of-thought as `reasoning_content`
+    instead of `reasoning`. Both should be honored."""
+    from openai.types.chat.chat_completion import ChatCompletion
+
+    raw = {
+        "id": "chatcmpl-test",
+        "object": "chat.completion",
+        "created": 0,
+        "model": "deepseek-r1",
+        "choices": [
+            {
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": None,
+                    "reasoning_content": "let me think about this",
+                },
+                "finish_reason": "length",
+            }
+        ],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+    }
+    fake_resp = ChatCompletion.model_validate(raw)
+
+    client = AsyncMock()
+    client.chat.completions.create = AsyncMock(return_value=fake_resp)
+
+    backend = backend_module.SandboxBackend(
+        llm_client=client, llm_model="deepseek-r1", settings=_settings(), agent=_agent()
+    )
+    result = await backend._llm_caller(messages=[{"role": "user", "content": "hi"}], max_tokens=10)
+
+    assert result["content"] == "let me think about this"
+    assert result["finish_reason"] == "length"
+
+
+@pytest.mark.asyncio
+async def test_llm_caller_does_not_substitute_reasoning_when_tool_calls_present():
+    """If the model emits tool_calls, an empty content string is normal —
+    don't overwrite it with reasoning text (would confuse the agent loop)."""
+    from openai.types.chat.chat_completion import ChatCompletion
+
+    raw = {
+        "id": "chatcmpl-test",
+        "object": "chat.completion",
+        "created": 0,
+        "model": "kimi-k2-6",
+        "choices": [
+            {
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": None,
+                    "reasoning": "I should call the search tool",
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {"name": "search", "arguments": "{}"},
+                        }
+                    ],
+                },
+                "finish_reason": "tool_calls",
+            }
+        ],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+    }
+    fake_resp = ChatCompletion.model_validate(raw)
+
+    client = AsyncMock()
+    client.chat.completions.create = AsyncMock(return_value=fake_resp)
+
+    backend = backend_module.SandboxBackend(
+        llm_client=client, llm_model="kimi-k2-6", settings=_settings(), agent=_agent()
+    )
+    result = await backend._llm_caller(messages=[{"role": "user", "content": "hi"}], max_tokens=200)
+
+    assert result["content"] == ""
+    assert result["reasoning"] == "I should call the search tool"
+    assert result["tool_calls"][0]["function"]["name"] == "search"
