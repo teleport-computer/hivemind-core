@@ -36,6 +36,85 @@ def _hpost(*a, **kw):
     return _f(*a, **kw)
 
 
+# ── Phase 5: signed run record verification ──
+
+
+def _verify_run_attestation(
+    data: dict,
+    *,
+    expected_pubkey_b64: str | None = None,
+    expected_compose_hash: str | None = None,
+    expected_output: str | None = None,
+) -> tuple[bool, str]:
+    """Verify a run-row's ``attestation`` envelope.
+
+    Returns ``(ok, reason)``. ``ok=True`` means the signature checked out
+    AND every supplied expected_* value matched the signed body. Each
+    expected_* arg is optional; ``None`` skips that check.
+
+    The envelope shape is set by Pipeline._build_run_attestation:
+    ``{body, signature_b64, signer_pubkey_b64}``. ``body`` is the
+    canonical-JSON-signed surface; we re-canonicalize and verify with
+    Ed25519. The recipient is expected to have already pinned the
+    expected pubkey out of band (from ``/v1/attestation`` over the
+    enclave-pinned TLS channel).
+    """
+    import base64
+
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import (
+        Ed25519PublicKey,
+    )
+
+    env = data.get("attestation")
+    if not isinstance(env, dict):
+        return False, "no attestation envelope on run record"
+
+    body = env.get("body")
+    sig_b64 = env.get("signature_b64", "")
+    pub_b64 = env.get("signer_pubkey_b64", "")
+    if not isinstance(body, dict) or not sig_b64 or not pub_b64:
+        return False, "envelope is missing body / signature / pubkey"
+
+    if expected_pubkey_b64 and pub_b64 != expected_pubkey_b64:
+        return (
+            False,
+            "signer pubkey on run record does not match the pubkey "
+            "published by /v1/attestation",
+        )
+
+    if expected_compose_hash and body.get("compose_hash") != expected_compose_hash:
+        return (
+            False,
+            "signed body's compose_hash does not match the bundle's "
+            "compose_hash — different CVM than expected",
+        )
+
+    if expected_output is not None:
+        # Re-derive sha256 over the output we received and compare. The
+        # body commits to the hash, not the bytes — keeps the signed
+        # payload small and stable.
+        h = _hashlib.sha256(
+            (expected_output or "").encode("utf-8", errors="replace")
+        ).hexdigest()
+        if body.get("output_hash") != h:
+            return (
+                False,
+                "signed output_hash does not match the output we "
+                "received — server returned tampered output",
+            )
+
+    try:
+        body_bytes = _json.dumps(
+            body, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+        ).encode("utf-8")
+        sig = base64.b64decode(sig_b64)
+        pub = Ed25519PublicKey.from_public_bytes(base64.b64decode(pub_b64))
+        pub.verify(sig, body_bytes)
+    except Exception as e:
+        return False, f"Ed25519 signature did not verify: {e}"
+    return True, "ok"
+
+
 # ── ask / query helpers ──
 
 
@@ -126,6 +205,9 @@ def _emit_run_result(
     *,
     as_json: bool,
     fetch: bool,
+    expected_pubkey_b64: str | None = None,
+    expected_compose_hash: str | None = None,
+    strict_attestation: bool = True,
 ) -> None:
     # Server returns these as top-level columns from the runs table
     # (see hivemind/sandbox/run_store.py). The legacy ``result.output``
@@ -135,6 +217,18 @@ def _emit_run_result(
     index_output = data.get("index_output") or ""
     mediated = data.get("mediated")  # reserved for future mediator runs
     artifacts = data.get("artifacts", []) or []
+
+    # Phase 5: verify the CVM-signed run attestation. Strict by default —
+    # an unsigned or tampered run record fails closed. The recipient's
+    # ``ask`` flow passes ``expected_pubkey_b64`` from the live
+    # /v1/attestation bundle so an attacker swapping the pubkey on the
+    # run row gets caught here.
+    att_ok, att_reason = _verify_run_attestation(
+        data,
+        expected_pubkey_b64=expected_pubkey_b64,
+        expected_compose_hash=expected_compose_hash,
+        expected_output=output,
+    )
 
     artifact_urls = [
         {
@@ -171,6 +265,29 @@ def _emit_run_result(
                         f"  warn: failed to fetch {fname}: {e}", err=True
                     )
 
+    # In strict mode, refuse to print a tampered or unsigned run.
+    if strict_attestation and not att_ok:
+        if as_json:
+            click.echo(
+                _json.dumps(
+                    {
+                        "status": "attestation_failed",
+                        "run_id": run_id,
+                        "reason": att_reason,
+                    },
+                    indent=2,
+                )
+            )
+        else:
+            click.echo(
+                f"Error: run attestation failed: {att_reason}\n"
+                "  Pass --no-strict-attestation to print the output anyway "
+                "(NOT recommended — you'd be trusting a record the CVM "
+                "didn't sign).",
+                err=True,
+            )
+        raise SystemExit(6)
+
     if as_json:
         click.echo(
             _json.dumps(
@@ -181,6 +298,8 @@ def _emit_run_result(
                     "mediated": mediated,
                     "artifacts": artifact_urls,
                     "fetched": fetched,
+                    "attestation_ok": att_ok,
+                    "attestation_reason": att_reason,
                 },
                 indent=2,
             )
@@ -205,6 +324,14 @@ def _emit_run_result(
         click.echo("\nFetched to ./hivemind-artifacts/{}/".format(run_id))
         for f in fetched:
             click.echo(f"  {f['path']}")
+    if att_ok:
+        click.echo("\n(attestation: ✓ signed by enclave)", err=True)
+    else:
+        click.echo(
+            f"\n(attestation: ✗ {att_reason} — printed anyway because "
+            "--no-strict-attestation is set)",
+            err=True,
+        )
 
 
 def _parse_hmq_uri(uri: str) -> dict:

@@ -150,7 +150,8 @@ class Database:
                         query_ended_at DOUBLE PRECISION,
                         mediator_started_at DOUBLE PRECISION,
                         mediator_ended_at DOUBLE PRECISION,
-                        output TEXT
+                        output TEXT,
+                        attestation JSONB
                     )
                 """)
                 cur.execute("""
@@ -184,6 +185,11 @@ class Database:
                     ("index_started_at", "DOUBLE PRECISION"),
                     ("index_ended_at", "DOUBLE PRECISION"),
                     ("index_output", "TEXT"),
+                    # Phase 5: CVM-signed run records. Single JSONB
+                    # column holds {body, signature_b64, signer_pubkey_b64}
+                    # — base64 wrappers travel cleanly over the SQL HTTP
+                    # proxy where raw bytes wouldn't.
+                    ("attestation", "JSONB"),
                 ]:
                     try:
                         cur.execute(
@@ -361,6 +367,8 @@ class HttpDatabase:
             ("index_started_at", "DOUBLE PRECISION"),
             ("index_ended_at", "DOUBLE PRECISION"),
             ("index_output", "TEXT"),
+            # Phase 5: CVM-signed run records (JSONB blob, base64-safe).
+            ("attestation", "JSONB"),
         ]:
             try:
                 self.execute_commit(

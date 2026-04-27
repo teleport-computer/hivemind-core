@@ -6,6 +6,7 @@ Includes per-stage timing for scope, query, and mediator stages.
 
 from __future__ import annotations
 
+import json
 import time
 
 from ..db import Database
@@ -19,7 +20,7 @@ _COLUMNS = (
     "mediator_started_at, mediator_ended_at, "
     "index_started_at, index_ended_at, index_output, "
     "scope_agent_id, index_agent_id, "
-    "output"
+    "output, attestation"
 )
 
 
@@ -64,17 +65,40 @@ class RunStore:
         *,
         error: str | None = None,
         output: str | None = None,
+        attestation: dict | None = None,
     ) -> bool:
-        """Update run status. Returns True if a row was updated."""
+        """Update run status. Returns True if a row was updated.
+
+        ``attestation`` (Phase 5) is the signed completion record:
+        ``{"body": <signed-body>, "signature_b64": ..., "signer_pubkey_b64": ...}``
+        — written when the pipeline finishes a run inside a CVM with
+        an active KMS-derived run signer. ``COALESCE`` keeps the
+        existing column when the caller doesn't pass one, so the
+        in-flight ``update_status(run_id, "running")`` calls are
+        unaffected.
+        """
         now = time.time()
+        attestation_json = (
+            json.dumps(attestation, sort_keys=True, separators=(",", ":"))
+            if attestation is not None
+            else None
+        )
         rowcount = self.db.execute_commit(
             "UPDATE _hivemind_query_runs "
             "SET status = %s, "
             "error = COALESCE(%s, error), "
             "output = COALESCE(%s, output), "
+            "attestation = COALESCE(%s::jsonb, attestation), "
             "updated_at = %s "
             "WHERE run_id = %s",
-            [status, error, output, now, run_id],
+            [
+                status,
+                error,
+                output,
+                attestation_json,
+                now,
+                run_id,
+            ],
         )
         return rowcount > 0
 

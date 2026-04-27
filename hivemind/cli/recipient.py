@@ -52,6 +52,9 @@ def _upload_query_agent_and_poll(
     provider: str | None,
     as_json: bool,
     fetch: bool,
+    expected_pubkey_b64: str | None = None,
+    expected_compose_hash: str | None = None,
+    strict_attestation: bool = True,
 ) -> None:
     """Upload an archive to /v1/query-agents/submit and poll until done.
 
@@ -134,7 +137,14 @@ def _upload_query_agent_and_poll(
             last_status = status
 
         if status == "completed":
-            _emit_run_result(service, data, run_id, as_json=as_json, fetch=fetch)
+            _emit_run_result(
+                service, data, run_id,
+                as_json=as_json,
+                fetch=fetch,
+                expected_pubkey_b64=expected_pubkey_b64,
+                expected_compose_hash=expected_compose_hash,
+                strict_attestation=strict_attestation,
+            )
             return
         if status == "failed":
             err = data.get("error") or data.get("result", {}).get("error") or "?"
@@ -256,6 +266,16 @@ def _archive_for_path(path: Path, name: str | None) -> tuple[bytes, str, str]:
         "(only used with --query-agent)."
     ),
 )
+@click.option(
+    "--no-strict-attestation",
+    "no_strict_attestation",
+    is_flag=True,
+    help=(
+        "Print run output even if the CVM-signed attestation envelope "
+        "is missing or invalid. Default: strict — abort with exit 6. "
+        "Only useful for debugging against pre-Phase-5 servers."
+    ),
+)
 def ask(
     uri: str,
     question: str,
@@ -269,6 +289,7 @@ def ask(
     memory_mb: int,
     as_json: bool,
     fetch: bool,
+    no_strict_attestation: bool,
 ):
     """Send a query through a hmq:// URI shared by an owner.
 
@@ -497,6 +518,21 @@ def ask(
         archive_bytes, archive_name, agent_name = _archive_for_path(
             query_agent_path, None
         )
+        # Phase 5: pull the live run-signer pubkey + compose_hash from
+        # /v1/attestation so we can verify the signed run record against
+        # the same enclave the URI authorised. Strict-by-default; the
+        # earlier compose/pin checks already established trust in this
+        # bundle, so reading it again is just cache-friendly plumbing.
+        expected_pubkey: str | None = None
+        live_compose_hash: str | None = None
+        try:
+            ar = _hget(f"{service}/v1/attestation", timeout=15)
+            ar_body = ar.json() if ar.status_code < 400 else {}
+            att = (ar_body.get("attestation") or {})
+            expected_pubkey = att.get("run_signer_pubkey_b64") or None
+            live_compose_hash = (att.get("compose_hash") or "").lower() or None
+        except httpx.RequestError:
+            pass
         # Default the run-side timeout to the gateway-friendly 600s
         # unless the caller set --timeout (which means per-call cap).
         run_timeout = timeout_seconds or 600
@@ -518,6 +554,9 @@ def ask(
             provider=provider,
             as_json=as_json,
             fetch=fetch,
+            expected_pubkey_b64=expected_pubkey,
+            expected_compose_hash=live_compose_hash,
+            strict_attestation=not no_strict_attestation,
         )
         return
 
@@ -700,6 +739,15 @@ def query_cmd(
         "'tinfoil' (requires HIVEMIND_TINFOIL_API_KEY on the server)."
     ),
 )
+@click.option(
+    "--no-strict-attestation",
+    "no_strict_attestation",
+    is_flag=True,
+    help=(
+        "Print run output even if the CVM-signed attestation envelope "
+        "is missing or invalid. Default: strict — abort with exit 6."
+    ),
+)
 def run_cmd(
     path: Path,
     prompt: str,
@@ -714,6 +762,7 @@ def run_cmd(
     fetch: bool,
     model: str | None,
     provider: str | None,
+    no_strict_attestation: bool,
 ):
     """Upload, run, and collect a query agent in one command.
 
@@ -737,6 +786,21 @@ def run_cmd(
     if not as_json:
         click.echo(f"Packing {path} → {archive_name}")
 
+    # Phase 5: pull pubkey + compose_hash from /v1/attestation so we can
+    # verify the run's signed attestation envelope. Best-effort fetch —
+    # if the bundle is unavailable we'll fall through to verify-without-
+    # expected-pub, which still catches missing/forged signatures.
+    expected_pubkey: str | None = None
+    live_compose_hash: str | None = None
+    try:
+        ar = _hget(f"{service}/v1/attestation", timeout=15)
+        ar_body = ar.json() if ar.status_code < 400 else {}
+        att = (ar_body.get("attestation") or {})
+        expected_pubkey = att.get("run_signer_pubkey_b64") or None
+        live_compose_hash = (att.get("compose_hash") or "").lower() or None
+    except httpx.RequestError:
+        pass
+
     _upload_query_agent_and_poll(
         service=service,
         headers=headers,
@@ -755,6 +819,9 @@ def run_cmd(
         provider=provider,
         as_json=as_json,
         fetch=fetch,
+        expected_pubkey_b64=expected_pubkey,
+        expected_compose_hash=live_compose_hash,
+        strict_attestation=not no_strict_attestation,
     )
 
 

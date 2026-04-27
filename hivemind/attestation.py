@@ -49,6 +49,12 @@ _state: dict[str, Any] = {
     "reason": None,
     "attestation": None,
     "booted_at": None,
+    # Phase 5: KMS-derived Ed25519 run signer. ``run_signer_priv`` is held
+    # in-process so the pipeline can sign run records; ``run_signer_pub``
+    # (raw 32 bytes) is the public key surfaced in the attestation bundle
+    # so recipients can verify signatures.
+    "run_signer_priv": None,
+    "run_signer_pub": None,
 }
 
 
@@ -202,6 +208,27 @@ def bootstrap() -> None:
         else:
             report_data = _build_report_data_v1()
 
+        # ── Run signer (Phase 5) ──
+        # Derive the Ed25519 keypair the pipeline will use to sign run
+        # records. KMS-released seed → deterministic public key; the
+        # bundle exposes the pubkey so a recipient can verify run
+        # signatures end-to-end. Best-effort: if KMS isn't reachable
+        # (local dev) the run signer simply stays unset and runs are
+        # written without signatures.
+        try:
+            from . import run_signer as _rs
+
+            priv, pub = _rs.derive_run_signer(dstack)
+            _state["run_signer_priv"] = priv
+            _state["run_signer_pub"] = pub
+        except Exception as rs_e:
+            # Don't fail bootstrap — TLS + quote are the load-bearing
+            # bindings. Surface the cause via the bundle so operators
+            # see a missing signer instead of silent skip.
+            _state["run_signer_priv"] = None
+            _state["run_signer_pub"] = None
+            _state["run_signer_error"] = f"run signer derivation failed: {rs_e!r}"
+
         quote_resp = dstack.get_quote(report_data)
         info = dstack.info()
         tcb = info.tcb_info
@@ -211,6 +238,13 @@ def bootstrap() -> None:
             if isinstance(quote_resp.quote, str)
             else quote_resp.quote.hex()
         )
+
+        run_signer_pub_b64 = ""
+        if _state.get("run_signer_pub"):
+            import base64 as _b64
+            run_signer_pub_b64 = _b64.b64encode(
+                _state["run_signer_pub"]
+            ).decode("ascii")
 
         _state["attestation"] = {
             "tdx_quote_hex": quote_hex,
@@ -246,6 +280,13 @@ def bootstrap() -> None:
                 # means Tier 3 isn't available.
                 "pinning_url": _pinning_url(info.app_id),
             },
+            # Phase 5: run-signer pubkey (raw Ed25519, b64). Empty when
+            # KMS isn't reachable (local dev) — the CLI treats that as
+            # "signatures disabled, prompt the user".
+            "run_signer_pubkey_b64": run_signer_pub_b64,
+            "run_signer_key_path": (
+                "hivemind-runs-v1" if run_signer_pub_b64 else ""
+            ),
         }
         # Stash cert/key for the server to consume — server.py reads
         # these and passes them to uvicorn.
@@ -273,6 +314,19 @@ def get_bundle() -> dict[str, Any]:
         "booted_at": _state["booted_at"],
         "attestation": _state["attestation"],
     }
+
+
+def get_run_signer() -> tuple[Any, bytes] | None:
+    """Return ``(Ed25519PrivateKey, raw_pubkey_bytes)`` if KMS bootstrap
+    succeeded, else ``None``. Pipeline calls this once per run to sign
+    the completion record. ``None`` → run record stored without a
+    signature; the CLI's strict mode will then refuse to trust it.
+    """
+    priv = _state.get("run_signer_priv")
+    pub = _state.get("run_signer_pub")
+    if priv is None or pub is None:
+        return None
+    return priv, pub
 
 
 def get_tls_material() -> tuple[bytes, bytes] | None:

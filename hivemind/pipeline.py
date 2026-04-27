@@ -1,4 +1,6 @@
 import asyncio
+import base64
+import hashlib
 import json
 import logging
 import os
@@ -692,6 +694,116 @@ class Pipeline:
         except ValueError:
             raise
 
+    # -- Phase 5: signed run attestation --
+
+    def _sha256_hex(self, value: str) -> str:
+        """sha256 over UTF-8 bytes, hex-encoded. Used for the prompt and
+        output hashes inside the signed payload — keeps the signature body
+        small while still cryptographically committing to the actual text.
+        """
+        return hashlib.sha256(value.encode("utf-8", errors="replace")).hexdigest()
+
+    def _digests_for(self, agent_id: str | None) -> tuple[str, str]:
+        """Return ``(files_digest, attested_files_digest)`` for an agent.
+
+        Empty strings when the agent doesn't exist or has no files.
+        Computed on the same content the runtime reads, so a recipient
+        re-fetching ``/v1/agents/{id}/files`` reproduces both digests.
+        """
+        if not agent_id:
+            return "", ""
+        try:
+            d = self.agent_store.compute_digests(agent_id)
+            return d.get("files_digest", ""), d.get("attested_files_digest", "")
+        except Exception:
+            return "", ""
+
+    def _build_run_attestation(
+        self,
+        *,
+        run_id: str,
+        status: str,
+        query_agent_id: str,
+        scope_agent_id: str | None,
+        prompt: str,
+        output: str,
+        error: str | None,
+    ) -> dict | None:
+        """Build the signed run attestation envelope, or ``None`` if the
+        run signer isn't available (e.g. local dev without dstack).
+
+        Envelope shape:
+          {
+            "body": {
+              "schema_version": 1,
+              "run_id": "...",
+              "status": "completed" | "failed",
+              "compose_hash": "...",
+              "scope_agent_id": "...",
+              "scope_files_digest": "...",
+              "scope_attested_files_digest": "...",
+              "query_agent_id": "...",
+              "query_files_digest": "...",
+              "query_attested_files_digest": "...",
+              "prompt_hash": "<sha256>",
+              "output_hash": "<sha256>",
+              "error_hash": "<sha256>" | "",
+              "timestamp": <unix>,
+              "signer_pubkey_b64": "..."
+            },
+            "signature_b64": "...",
+            "signer_pubkey_b64": "..."
+          }
+
+        ``body`` is what gets canonical-JSON'd and signed; the outer
+        envelope re-publishes the pubkey at top level so a recipient
+        with the JSONB row alone can reconstruct everything without
+        re-fetching ``/v1/attestation``.
+        """
+        from . import attestation as _att
+        from . import run_signer as _rs
+
+        signer = _att.get_run_signer()
+        if signer is None:
+            return None
+        priv, pub_bytes = signer
+
+        bundle = _att.get_bundle()
+        compose_hash = ""
+        if bundle.get("ready"):
+            compose_hash = (bundle.get("attestation") or {}).get(
+                "compose_hash", ""
+            ) or ""
+
+        scope_full, scope_att = self._digests_for(scope_agent_id)
+        query_full, query_att = self._digests_for(query_agent_id)
+        pub_b64 = base64.b64encode(pub_bytes).decode("ascii")
+
+        body = {
+            "schema_version": 1,
+            "run_id": run_id,
+            "status": status,
+            "compose_hash": compose_hash,
+            "scope_agent_id": scope_agent_id or "",
+            "scope_files_digest": scope_full,
+            "scope_attested_files_digest": scope_att,
+            "query_agent_id": query_agent_id,
+            "query_files_digest": query_full,
+            "query_attested_files_digest": query_att,
+            "prompt_hash": self._sha256_hex(prompt or ""),
+            "output_hash": self._sha256_hex(output or ""),
+            "error_hash": self._sha256_hex(error) if error else "",
+            "timestamp": int(time.time()),
+            "signer_pubkey_b64": pub_b64,
+        }
+
+        sig_bytes, _ = _rs.sign_payload(priv, body)
+        return {
+            "body": body,
+            "signature_b64": base64.b64encode(sig_bytes).decode("ascii"),
+            "signer_pubkey_b64": pub_b64,
+        }
+
     # -- Tracked query agent run (background) --
 
     async def run_query_agent_tracked(
@@ -879,17 +991,42 @@ class Pipeline:
             # the query-agent turn via /sandbox/artifact-upload. No post-
             # mediator commit needed — failed runs are swept by the TTL
             # job in hivemind.core.
+            final_output = (query_output or "")[:10000]
+            attestation_envelope = await asyncio.to_thread(
+                self._build_run_attestation,
+                run_id=run_id,
+                status="completed",
+                query_agent_id=agent_id,
+                scope_agent_id=resolved_scope_id,
+                prompt=prompt,
+                output=final_output,
+                error=None,
+            )
             await asyncio.to_thread(
                 run_store.update_status, run_id, "completed",
-                output=(query_output or "")[:10000],
+                output=final_output,
+                attestation=attestation_envelope,
             )
 
         except Exception as e:
             logger.error("Tracked query run %s failed: %s", run_id, e)
             try:
+                err_str = str(e)[:500]
+                attestation_envelope = await asyncio.to_thread(
+                    self._build_run_attestation,
+                    run_id=run_id,
+                    status="failed",
+                    query_agent_id=agent_id,
+                    scope_agent_id=scope_agent_id
+                    or self.settings.default_scope_agent,
+                    prompt=prompt,
+                    output="",
+                    error=err_str,
+                )
                 await asyncio.to_thread(
                     run_store.update_status, run_id, "failed",
-                    error=str(e)[:500],
+                    error=err_str,
+                    attestation=attestation_envelope,
                 )
             except Exception:
                 logger.warning("Failed to update run %s to failed", run_id)
