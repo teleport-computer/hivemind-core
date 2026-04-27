@@ -258,6 +258,94 @@ class TenantRegistry:
             "CREATE INDEX IF NOT EXISTS _capability_tokens_tenant_idx "
             "ON _capability_tokens (tenant_id)"
         )
+        # Compose pins. Owner-signed envelopes that authorize one or more
+        # ``compose_hash`` values for a scope agent. ``hmq_`` URIs can
+        # reference a pin instead of baking a single compose_hash, so
+        # they keep working across redeploys the owner has blessed.
+        # The envelope is the source of truth; ``pubkey_b64`` is stored
+        # alongside as a convenience (it is also embedded in the
+        # envelope) so listings can show the signer without parsing.
+        self._control_db.execute_commit(
+            """
+            CREATE TABLE IF NOT EXISTS _tenant_compose_pins (
+                pin_id      TEXT PRIMARY KEY,
+                tenant_id   TEXT NOT NULL REFERENCES _tenants(id)
+                                ON DELETE CASCADE,
+                envelope    TEXT NOT NULL,
+                pubkey_b64  TEXT NOT NULL,
+                created_at  DOUBLE PRECISION NOT NULL,
+                revoked_at  DOUBLE PRECISION
+            )
+            """
+        )
+        self._control_db.execute_commit(
+            "CREATE INDEX IF NOT EXISTS _tenant_compose_pins_tenant_idx "
+            "ON _tenant_compose_pins (tenant_id, created_at DESC)"
+        )
+
+    # ── Compose-pin operations ──────────────────────────────────────
+
+    def store_compose_pin(
+        self,
+        tenant_id: str,
+        envelope_json: str,
+        pubkey_b64: str,
+    ) -> dict:
+        """Persist a signed compose pin envelope. Caller must have
+        verified the signature already.
+
+        ``pin_id`` is the SHA-256 of the envelope (first 12 hex chars) —
+        deterministic, so re-submitting the same envelope no-ops cleanly.
+        """
+        rows = self._control_db.execute(
+            "SELECT id FROM _tenants WHERE id = %s", [tenant_id]
+        )
+        if not rows:
+            raise KeyError(f"tenant '{tenant_id}' not found")
+        pin_id = hashlib.sha256(envelope_json.encode("utf-8")).hexdigest()[:12]
+        self._control_db.execute_commit(
+            "INSERT INTO _tenant_compose_pins "
+            "(pin_id, tenant_id, envelope, pubkey_b64, created_at) "
+            "VALUES (%s, %s, %s, %s, %s) "
+            "ON CONFLICT (pin_id) DO NOTHING",
+            [pin_id, tenant_id, envelope_json, pubkey_b64, time.time()],
+        )
+        return {"pin_id": pin_id, "tenant_id": tenant_id}
+
+    def list_compose_pins(self, tenant_id: str) -> list[dict]:
+        rows = self._control_db.execute(
+            "SELECT pin_id, envelope, pubkey_b64, created_at, revoked_at "
+            "FROM _tenant_compose_pins WHERE tenant_id = %s "
+            "ORDER BY created_at DESC",
+            [tenant_id],
+        )
+        return [dict(r) for r in rows]
+
+    def get_compose_pin(self, tenant_id: str, pin_id: str) -> dict | None:
+        rows = self._control_db.execute(
+            "SELECT pin_id, envelope, pubkey_b64, created_at, revoked_at "
+            "FROM _tenant_compose_pins WHERE tenant_id = %s AND pin_id = %s",
+            [tenant_id, pin_id],
+        )
+        return dict(rows[0]) if rows else None
+
+    def latest_compose_pin(self, tenant_id: str) -> dict | None:
+        """Most recent non-revoked pin, or ``None``."""
+        rows = self._control_db.execute(
+            "SELECT pin_id, envelope, pubkey_b64, created_at, revoked_at "
+            "FROM _tenant_compose_pins WHERE tenant_id = %s "
+            "AND revoked_at IS NULL ORDER BY created_at DESC LIMIT 1",
+            [tenant_id],
+        )
+        return dict(rows[0]) if rows else None
+
+    def revoke_compose_pin(self, tenant_id: str, pin_id: str) -> bool:
+        rowcount = self._control_db.execute_commit(
+            "UPDATE _tenant_compose_pins SET revoked_at = %s "
+            "WHERE tenant_id = %s AND pin_id = %s AND revoked_at IS NULL",
+            [time.time(), tenant_id, pin_id],
+        )
+        return bool(rowcount)
 
     # ── Capability-token operations ─────────────────────────────────
 
