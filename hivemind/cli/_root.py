@@ -1,0 +1,47 @@
+"""The root ``cli`` Click group."""
+
+import os
+
+import click
+
+
+@click.group()
+@click.option(
+    "-y",
+    "--yes",
+    "auto_yes",
+    is_flag=True,
+    help="Auto-answer 'yes' to the compose-hash approval prompt. "
+    "TLS pinning and the on-chain revoke kill-switch still apply, so a "
+    "tampered or revoked hash still hard-aborts. Use in CI / scripts.",
+)
+@click.option(
+    "--dangerously-skip-attestations",
+    "skip_attestations",
+    is_flag=True,
+    help="Disable ALL attestation verification — no TLS pin, no on-chain "
+    "check, no compose-hash prompt. Only meaningful against a local "
+    "dev server (no TEE). Never use against a Phala CVM.",
+)
+@click.option(
+    "--profile",
+    "profile",
+    default="",
+    envvar="HIVEMIND_PROFILE",
+    metavar="NAME",
+    help="Named identity to use. Each profile is an independent "
+    "service+api_key pair stored at ~/.hivemind/profiles/<NAME>.yaml. "
+    "Defaults to 'default'. Example: hivemind --profile alice query '...'",
+)
+def cli(auto_yes: bool, skip_attestations: bool, profile: str) -> None:
+    """Hivemind — conditional recall for the privacy-quality frontier."""
+    # Set the same env vars the trust layer already reads, so we don't
+    # have to thread a context object into every subcommand. Flags win
+    # over the absence of an env var; if the env var is already set,
+    # leave it alone (most permissive of {flag, env} wins).
+    if auto_yes:
+        os.environ["HIVEMIND_TRUST_ALL"] = "1"
+    if skip_attestations:
+        os.environ["HIVEMIND_NO_TRUST_CHECK"] = "1"
+    if profile:
+        os.environ["HIVEMIND_PROFILE"] = profile
