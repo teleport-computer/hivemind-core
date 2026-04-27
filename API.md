@@ -8,21 +8,19 @@ Base URL (default): `http://localhost:8100`
 
 ## Authentication
 
-Hivemind-core is multi-tenant. Auth is always on. There are four kinds of
-credentials, distinguishable by prefix so a single `Authorization` header
-works for all of them:
+Hivemind-core is multi-tenant. Auth is always on. There are three kinds
+of credentials, distinguishable by prefix so a single `Authorization`
+header works for all of them:
 
 | Prefix | Kind | Scope |
 |---|---|---|
 | `hmk_…` | **tenant owner** | full access to the tenant's DB and pipeline; can mint capability tokens, rotate the key, and run every public endpoint |
 | `hmq_…` | **query capability** | only `/v1/query{,/submit}`, `/v1/query-agents/submit`, `/v1/agents/{id}/attest` (and the `/v1/scope-attest` alias), and read-access to the bound scope agent's source files. Every query is forced through one pinned `scope_agent_id` (the owner picked it at mint time — the holder cannot override) |
-| `hmw_…` | **write capability** | only `/v1/store`, restricted to single `INSERT` statements into a fixed table allowlist. Reads, schema changes, and `_hivemind_*` are 403 |
 | `<admin-key>` | **operator** | only `/v1/admin/tenants/*` (provision/list/delete/register tenants). Cannot read tenant data through this API |
 
 ```http
 Authorization: Bearer hmk_<tenant-api-key>
 Authorization: Bearer hmq_<query-capability-token>
-Authorization: Bearer hmw_<write-capability-token>
 Authorization: Bearer <admin-key>
 ```
 
@@ -60,17 +58,14 @@ Health check (never requires auth).
 
 Execute a SQL statement against the database. For write operations (INSERT, UPDATE, DELETE, CREATE TABLE, etc.).
 
-Accepts owner (`hmk_`) and write (`hmw_`) tokens. Write tokens are
-restricted to a single `INSERT` into one of the table names baked into
-the token (no `_hivemind_*`, no nested DML, no compound statements,
-no SELECT/UPDATE/DELETE). Validated via sqlglot AST — failures return
-`403`.
+Owner-only (`hmk_`). Capability tokens (`hmq_`) cannot reach this
+endpoint — they are pinned to the query pipeline.
 
 **Request body**
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
-| `sql` | string | yes | SQL statement (min length 1). Write tokens: must be a single INSERT into an allowed table |
+| `sql` | string | yes | SQL statement (min length 1) |
 | `params` | array | no | Query parameters (defaults to `[]`). Use `%s` placeholders |
 
 **Example**
@@ -324,9 +319,9 @@ Mint a capability token.
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
-| `kind` | string | yes | `"query"` or `"write"` |
+| `kind` | string | no | Defaults to `"query"`; only `"query"` is currently accepted |
 | `label` | string | no | Free-form bookkeeping label |
-| `constraints` | object | yes | For `query`: `{"scope_agent_id": "..."}`. For `write`: `{"allowed_tables": ["t1", "t2"]}` (≥1 entry, no `_hivemind_*`). |
+| `constraints` | object | yes | `{"scope_agent_id": "..."}` — recipient is forced through that scope agent |
 
 **Example**
 
@@ -339,16 +334,6 @@ curl -X POST $BASE/v1/tokens \
     "kind": "query",
     "label": "research-team",
     "constraints": {"scope_agent_id": "abc123def456"}
-  }'
-
-# Write token bound to a table allowlist
-curl -X POST $BASE/v1/tokens \
-  -H "Authorization: Bearer $OWNER_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "kind": "write",
-    "label": "stream-ingest",
-    "constraints": {"allowed_tables": ["watch_history"]}
   }'
 ```
 
@@ -368,7 +353,7 @@ curl -X POST $BASE/v1/tokens \
 revoke + reissue.
 
 **Common errors**
-- `400` invalid kind / missing required constraint / `_hivemind_*` table
+- `400` invalid kind / missing required constraint
 - `404` unknown tenant id (should not happen via owner key — defensive)
 
 ### `GET /v1/tokens` (owner-only)

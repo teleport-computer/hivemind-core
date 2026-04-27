@@ -229,25 +229,6 @@ async def test_query_token_can_only_attest_bound_agent(app_and_registry):
 
 
 @pytest.mark.asyncio
-async def test_write_token_cannot_attest(app_and_registry):
-    app, registry, created = app_and_registry
-    t = registry.provision("gamma")
-    created.append(t["db_name"])
-    _seed_agent(registry, t["tenant_id"], "any_agent", {"x.py": "1\n"})
-
-    wtoken = registry.mint_capability(
-        t["tenant_id"], "write", "w", {"allowed_tables": ["watch_history"]}
-    )["token"]
-
-    async with _client(app) as c:
-        r = await c.get(
-            "/v1/agents/any_agent/attest",
-            headers={"Authorization": f"Bearer {wtoken}"},
-        )
-        assert r.status_code == 403
-
-
-@pytest.mark.asyncio
 async def test_unknown_agent_returns_404(app_and_registry):
     app, registry, created = app_and_registry
     t = registry.provision("delta")

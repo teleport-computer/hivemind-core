@@ -31,16 +31,18 @@ class Hivemind:
         *,
         tenant_db: str | None = None,
         tenant_id: str | None = None,
+        sealer=None,
     ):
         self.settings = settings
         self.tenant_id = tenant_id
         self.tenant_db = tenant_db
+        self.sealer = sealer
         self.db = connect(
             settings.database_url,
             proxy_key=settings.sql_proxy_key,
             tenant_db=tenant_db,
         )
-        self.agent_store = AgentStore(self.db)
+        self.agent_store = AgentStore(self.db, sealer=sealer, tenant_id=tenant_id)
         self.run_store = RunStore(self.db)
         self.artifact_store = ArtifactStore(self.db)
         self.pipeline: Pipeline | None = None

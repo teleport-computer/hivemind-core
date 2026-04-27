@@ -1,10 +1,13 @@
-"""Capability-token tests — query (hmq_) and write (hmw_) delegations.
+"""Capability-token tests — query (hmq_) delegations only.
 
-Verifies registry storage, the ``resolve_any`` dispatcher, the INSERT-only
-SQL gate used by /v1/store, and the constraint validation rules around
-both kinds. Postgres-backed (re-uses the live DB the rest of the
-tenants suite needs); skips when ``HIVEMIND_TEST_DATABASE_URL`` is
-unreachable.
+Verifies registry storage, the ``resolve_any`` dispatcher, and the
+constraint validation rules. Postgres-backed (re-uses the live DB the
+rest of the tenants suite needs); skips when
+``HIVEMIND_TEST_DATABASE_URL`` is unreachable.
+
+Write tokens (``hmw_``) were removed: ``mint_capability`` only accepts
+``kind='query'``. Tests for the old INSERT-only SQL gate moved out
+together with the gate function.
 """
 
 from __future__ import annotations
@@ -21,9 +24,7 @@ from hivemind.tenants import (
     TenantRegistry,
     _hash_api_key,
     _QUERY_TOKEN_PREFIX,
-    _WRITE_TOKEN_PREFIX,
 )
-from hivemind.tools import is_insert_only_into
 
 
 TEST_DSN = os.environ.get(
@@ -112,29 +113,15 @@ def test_mint_query_token_requires_scope_agent_id(registry):
     assert len(out["token_id"]) == 12
 
 
-def test_mint_write_token_requires_allowed_tables(registry):
+def test_mint_rejects_write_kind(registry):
+    """Write tokens were removed — mint should refuse kind='write'."""
     t = registry.provision("beta")
     registry._test_created_dbs.append(t["db_name"])
-
-    with pytest.raises(ValueError):
-        registry.mint_capability(t["tenant_id"], "write", "no-tables", {})
     with pytest.raises(ValueError):
         registry.mint_capability(
-            t["tenant_id"], "write", "empty",
-            {"allowed_tables": []},
+            t["tenant_id"], "write", "ok",
+            {"allowed_tables": ["watch_history"]},
         )
-    with pytest.raises(ValueError):
-        registry.mint_capability(
-            t["tenant_id"], "write", "internal",
-            {"allowed_tables": ["_hivemind_query_runs"]},
-        )
-
-    out = registry.mint_capability(
-        t["tenant_id"], "write", "ok",
-        {"allowed_tables": ["watch_history", "events"]},
-    )
-    assert out["token"].startswith(_WRITE_TOKEN_PREFIX)
-    assert out["constraints"]["allowed_tables"] == ["watch_history", "events"]
 
 
 def test_mint_invalid_kind(registry):
@@ -173,8 +160,7 @@ def test_list_capabilities_returns_metadata_only(registry):
         t["tenant_id"], "query", "viewer", {"scope_agent_id": "s1"},
     )
     b = registry.mint_capability(
-        t["tenant_id"], "write", "ingest",
-        {"allowed_tables": ["watch_history"]},
+        t["tenant_id"], "query", "ingest", {"scope_agent_id": "s2"},
     )
     rows = registry.list_capabilities(t["tenant_id"])
     ids = {r["token_id"] for r in rows}
@@ -241,21 +227,9 @@ def test_resolve_any_query_token(registry):
     assert caller.token_id == out["token_id"]
 
 
-def test_resolve_any_write_token(registry):
-    t = registry.provision("lambda")
-    registry._test_created_dbs.append(t["db_name"])
-    out = registry.mint_capability(
-        t["tenant_id"], "write", "stream",
-        {"allowed_tables": ["watch_history"]},
-    )
-    caller = registry.resolve_any(out["token"])
-    assert caller is not None
-    assert caller.role == "write"
-    assert caller.constraints == {"allowed_tables": ["watch_history"]}
-
-
 def test_resolve_any_rejects_unknown_prefix(registry):
     assert registry.resolve_any("hmx_garbage") is None
+    assert registry.resolve_any("hmw_garbage") is None  # hmw_ retired
     assert registry.resolve_any("") is None
     assert registry.resolve_any("nope") is None
 
@@ -287,8 +261,7 @@ def test_capability_tokens_cascade_on_tenant_delete(registry):
     t = registry.provision("xi")
     registry._test_created_dbs.append(t["db_name"])
     out = registry.mint_capability(
-        t["tenant_id"], "write", "",
-        {"allowed_tables": ["watch_history"]},
+        t["tenant_id"], "query", "", {"scope_agent_id": "s"},
     )
     registry.delete(t["tenant_id"])
     rows = registry._control_db.execute(
@@ -297,39 +270,3 @@ def test_capability_tokens_cascade_on_tenant_delete(registry):
     )
     assert rows == []
     assert registry.resolve_any(out["token"]) is None
-
-
-# ── INSERT-only gate (used by /v1/store for write tokens) ─────────────
-
-
-@pytest.mark.parametrize("sql", [
-    "INSERT INTO watch_history (id, body) VALUES (1, 'a')",
-    "insert into Watch_History(id) values (1)",
-    """
-    INSERT INTO watch_history (id, body)
-    SELECT 1, 'x'
-    """,
-])
-def test_is_insert_only_into_accepts_valid(sql):
-    is_insert_only_into(sql, ["watch_history"])
-
-
-@pytest.mark.parametrize("sql,reason", [
-    ("SELECT * FROM watch_history", "select"),
-    ("UPDATE watch_history SET body = 'x'", "update"),
-    ("DELETE FROM watch_history", "delete"),
-    ("INSERT INTO other (id) VALUES (1)", "wrong-table"),
-    ("INSERT INTO _hivemind_query_runs (id) VALUES (1)", "internal-table"),
-    ("INSERT INTO watch_history VALUES(1); INSERT INTO watch_history VALUES(2)", "compound"),
-    ("DROP TABLE watch_history", "drop"),
-])
-def test_is_insert_only_into_rejects(sql, reason):
-    with pytest.raises(ValueError):
-        is_insert_only_into(sql, ["watch_history"])
-
-
-def test_is_insert_only_into_rejects_empty_allowlist():
-    with pytest.raises(ValueError):
-        is_insert_only_into(
-            "INSERT INTO watch_history (id) VALUES (1)", [],
-        )

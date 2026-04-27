@@ -106,12 +106,7 @@ Every `--json` output is a stable, pipe-friendly record: `{status, run_id, outpu
 
 ```bash
 # Owner mints a query token bound to a scope agent (recipient cannot bypass it)
-hivemind tokens issue --kind query --label "research-team" \
-  --scope-agent abc123def456
-
-# Owner mints a write token restricted to one or more tables
-hivemind tokens issue --kind write --label "stream-ingest" \
-  --table watch_history --table events
+hivemind tokens issue --label "research-team" --scope-agent abc123def456
 
 hivemind tokens list                # token_id + kind + status + constraints
 hivemind tokens revoke <token_id>   # soft-revoke; future calls 401
@@ -125,9 +120,9 @@ hivemind share --mint                          # prints hmq://host/<scope>?token
 hivemind ask 'hmq://…' "How many rows last month?"
 ```
 
-See **[Capability Tokens](#capability-tokens-delegated-query--write)** for
-the full delegation model (`hmq_` / `hmw_` prefixes, what each can do, how
-the recipient pins binding via `agents attest`).
+See **[Capability Tokens](#capability-tokens-delegated-query)** for the
+full delegation model (`hmq_` prefix, what the holder can do, how the
+recipient pins binding via `agents attest`).
 
 ### Operator commands (`hivemind admin …`)
 
@@ -251,35 +246,29 @@ hivemind --profile alice rotate-key
 
 Treat any tenant key that has not been rotated as bootstrap-only.
 
-### Capability tokens (delegated query / write)
+### Capability tokens (delegated query)
 
 A tenant key (`hmk_…`) is the keys-to-the-kingdom credential — it can read,
 write, mint scope agents, and rotate. To let a third party use a narrow
 slice of your tenant *without* sharing it, mint a **capability token**
-that pins a specific capability:
+that pins a specific scope agent:
 
 | Prefix | Kind | What the holder can do | What's pinned at issue |
 |---|---|---|---|
 | `hmq_…` | query | submit prompts via `/v1/query`, upload their own query agent, read scope-agent files for audit | exactly one **scope agent id** — every query is forced through it |
-| `hmw_…` | write | INSERT into a fixed allowlist of tables via `/v1/store` | one or more **table names** — internal `_hivemind_*` tables always rejected |
 
 ```bash
-# Owner mints a write token for an upstream service streaming events.
-hivemind tokens issue --kind write --label "stream-ingest" --table watch_history
-# → token: hmw_…  (shown ONCE; copy now or revoke + reissue)
-
 # Owner mints a query token bound to a scope agent (the recipient
 # cannot bypass that agent — every prompt is gated through it).
-hivemind tokens issue --kind query --label "research-team" \
-  --scope-agent abc123def456
-# → token: hmq_…
+hivemind tokens issue --label "research-team" --scope-agent abc123def456
+# → token: hmq_…  (shown ONCE; copy now or revoke + reissue)
 
 hivemind tokens list                  # token_id + kind + status + constraints
 hivemind tokens revoke <token_id>     # soft-revoke, future calls 401
 ```
 
-Hand the recipient just the `hmq_…` / `hmw_…` and they use it as
-their `Authorization: Bearer …` (or `hivemind --profile … init --api-key …`).
+Hand the recipient the `hmq_…` and they use it as their
+`Authorization: Bearer …` (or `hivemind --profile … init --api-key …`).
 The plaintext is shown exactly once at issue and only the SHA-256 hash is
 persisted on the CVM — losing the plaintext means revoke + reissue.
 

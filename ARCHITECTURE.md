@@ -33,7 +33,7 @@ POST /v1/query         Query agent + scope agent → sandboxed pipeline → answ
 POST /v1/index         Index agent processes document data → structured index.
 GET  /v1/health        Status, table count, version.
 
-POST /v1/tokens        Mint delegated capability tokens (hmq_/hmw_).
+POST /v1/tokens        Mint delegated capability tokens (hmq_).
 GET  /v1/tokens        List the tenant's tokens (hashes, never plaintext).
 DEL  /v1/tokens/{id}   Soft-revoke a token.
 GET  /v1/scope-attest  Recipient-side: which scope agent + attestation am I bound to?
@@ -394,8 +394,6 @@ tokens — they don't derive from the owner key, they sit alongside it):
   │  hmq_…       │ query    │ /v1/query{,/submit} + upload-and-run a query │
   │              │          │ agent. Always forced through one pinned      │
   │              │          │ scope agent — token holder cannot bypass.    │
-  │  hmw_…       │ write    │ /v1/store INSERT into a fixed table          │
-  │              │          │ allowlist (no _hivemind_*, no other DML).    │
   └──────────────┴──────────┴──────────────────────────────────────────────┘
 ```
 
@@ -405,11 +403,9 @@ reissue. The dispatcher (`tenants.py::resolve_any`) recognizes prefix +
 hash on every request, joins to the tenant, and rejects revoked /
 suspended-tenant lookups with `401`.
 
-`hmw_` SQL is validated by `tools.py::is_insert_only_into` (sqlglot AST
-walk): single INSERT, allowed table only, no nested DML or compound
-statements. `hmq_` requests have their `scope_agent_id` overwritten by
-the binding before reaching the pipeline. Recipients audit their binding
-via `/v1/scope-attest` (returns the bound scope agent, the attestation
+`hmq_` requests have their `scope_agent_id` overwritten by the binding
+before reaching the pipeline. Recipients audit their binding via
+`/v1/scope-attest` (returns the bound scope agent, the attestation
 bundle, and a stable `sha256("<path>\0<content>\0…")` over its files —
 pin the digest out-of-band, re-derive after re-fetching).
 

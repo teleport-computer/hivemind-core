@@ -245,6 +245,28 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app = FastAPI(title="Hivemind Core", version=APP_VERSION, lifespan=lifespan)
 
+    # Translate TenantSealed (raised when an operation needs the
+    # tenant's DEK but no valid bearer has thawed it since process
+    # start) to a clear 503. Capability-token holders see this until
+    # the owner interacts with the system after a redeploy.
+    from .seal import TenantSealed as _TenantSealed
+    from fastapi.responses import JSONResponse as _JSONResponse
+
+    @app.exception_handler(_TenantSealed)
+    async def _on_tenant_sealed(_request, exc):  # pragma: no cover
+        return _JSONResponse(
+            status_code=503,
+            content={
+                "detail": (
+                    "Tenant is sealed: encrypted data cannot be read "
+                    "until the owner (hmk_) interacts after the last "
+                    "process restart. Have the tenant owner make any "
+                    "request, then retry."
+                ),
+                "error": str(exc),
+            },
+        )
+
     cors_origins = [
         origin.strip()
         for origin in (settings.cors_allow_origins or "").split(",")
@@ -268,7 +290,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return auth.removeprefix("Bearer ").strip()
 
     async def get_caller(request: Request) -> Caller:
-        """Auth + role resolution. Recognizes hmk_/hmq_/hmw_ tokens.
+        """Auth + role resolution. Recognizes hmk_ (owner) and hmq_
+        (query capability) tokens.
 
         Stashes ``tenant_id`` and ``caller`` on ``request.state`` so
         downstream code (logging, role-specific handlers) can read them
@@ -312,7 +335,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         Backward-compatible shim for endpoints that pre-date capability
         tokens — they all run as the tenant owner. New endpoints that
-        accept query/write tokens should depend on :func:`get_caller` or
+        accept query tokens should depend on :func:`get_caller` or
         :func:`requires_role` directly.
         """
         return caller.hive
@@ -550,10 +573,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(404, f"tenant '{tenant_id}' not found")
         return result
 
-    # ── Capability tokens (delegated query / write) ──
+    # ── Capability tokens (delegated query) ──
     #
-    # Owner mints query/write tokens to share narrow capabilities with
-    # third parties without exposing their hmk_ key. Plaintext is shown
+    # Owner mints query tokens to share narrow capabilities with third
+    # parties without exposing their hmk_ key. Plaintext is shown
     # exactly once at /issue; only the hash is stored. Listing reveals
     # token_id (a short hex prefix of the hash) for revocation; the
     # plaintext is never recoverable.
@@ -566,14 +589,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     ):
         """Issue a capability token. Body: {kind, label, constraints}.
 
-        For ``kind="query"``: ``constraints.scope_agent_id`` is required
-        and pins every query through the token to that scope agent.
-
-        For ``kind="write"``: ``constraints.allowed_tables`` is required
-        and restricts ``/v1/store`` to single INSERTs into that allowlist
-        (no internal ``_hivemind_*`` tables).
+        Only ``kind="query"`` is supported. ``constraints.scope_agent_id``
+        is required and pins every query through the token to that
+        scope agent.
         """
-        kind = (payload or {}).get("kind", "")
+        kind = (payload or {}).get("kind", "query") or "query"
         label = (payload or {}).get("label", "") or ""
         constraints = (payload or {}).get("constraints") or {}
         registry = _registry(request)
@@ -702,18 +722,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     async def store(
         req: StoreRequest,
-        caller: Caller = Depends(requires_role("owner", "write")),
+        caller: Caller = Depends(requires_role("owner")),
     ):
-        # Write tokens are restricted to INSERTs into a fixed table list.
-        # Owners run the request as-is.
-        if caller.role == "write":
-            from .tools import is_insert_only_into
-
-            allowed = caller.constraints.get("allowed_tables") or []
-            try:
-                is_insert_only_into(req.sql, allowed)
-            except ValueError as e:
-                raise HTTPException(status_code=403, detail=str(e))
         try:
             return await caller.hive.pipeline.run_store(req)
         except ValueError as e:
@@ -1766,7 +1776,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/v1/health", response_model=HealthResponse)
     async def health(
-        caller: Caller = Depends(requires_role("owner", "query", "write")),
+        caller: Caller = Depends(requires_role("owner", "query")),
     ):
         return await asyncio.to_thread(caller.hive.health)
 

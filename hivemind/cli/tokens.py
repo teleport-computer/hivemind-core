@@ -11,14 +11,10 @@ from ._http import _api_error, _hdelete, _hget, _hpost
 
 # ── Capability tokens ──
 #
-# Owner-side commands to issue / list / revoke delegated tokens. Two
-# kinds:
+# Owner-side commands to issue / list / revoke delegated query tokens.
 #   * ``query`` (``hmq_…``) — recipient may submit prompts via /v1/query
 #     and upload their own query agent via /v1/query-agents/submit. Every
 #     such call is forced through the scope agent the owner pins here.
-#   * ``write`` (``hmw_…``) — recipient may INSERT into a fixed table
-#     allowlist via /v1/store. Reads, schema changes, and other tables
-#     are rejected at the server.
 #
 # Plaintext is shown ONCE at issue. Loss == revoke + reissue.
 
@@ -31,12 +27,6 @@ def tokens_cli():
 
 @tokens_cli.command("issue")
 @click.option(
-    "--kind",
-    type=click.Choice(["query", "write"]),
-    required=True,
-    help="'query' for hmq_ tokens, 'write' for hmw_ tokens",
-)
-@click.option(
     "--label",
     default="",
     help="Free-form label shown in `tokens list` for your own bookkeeping",
@@ -45,26 +35,15 @@ def tokens_cli():
     "--scope-agent",
     "scope_agent",
     default=None,
-    help="(query) Pin every prompt through this scope agent id",
-)
-@click.option(
-    "--table",
-    "tables",
-    multiple=True,
-    help=(
-        "(write) Allowed target table for INSERTs. Repeat --table for more "
-        "than one. _hivemind_* names are rejected."
-    ),
+    help="Pin every prompt through this scope agent id",
 )
 @click.option("--json", "as_json", is_flag=True, help="Emit JSON on stdout")
 def tokens_issue(
-    kind: str,
     label: str,
     scope_agent: str | None,
-    tables: tuple[str, ...],
     as_json: bool,
 ):
-    """Mint a new capability token.
+    """Mint a new query capability token (hmq_).
 
     The plaintext is printed exactly once — copy it now or revoke + reissue.
     Only the hash is stored on the core CVM.
@@ -76,28 +55,21 @@ def tokens_issue(
         click.echo("Error: no api_key in config. Run 'hivemind init'.", err=True)
         raise SystemExit(1)
 
-    constraints: dict = {}
-    if kind == "query":
-        if not scope_agent:
-            scope_agent = config.get("scope_agent_id")
-        if not scope_agent:
-            click.echo(
-                "Error: --scope-agent is required for query tokens "
-                "(no scope_agent_id in active profile either)",
-                err=True,
-            )
-            raise SystemExit(2)
-        constraints["scope_agent_id"] = scope_agent
-    else:  # write
-        if not tables:
-            click.echo(
-                "Error: at least one --table is required for write tokens",
-                err=True,
-            )
-            raise SystemExit(2)
-        constraints["allowed_tables"] = list(tables)
+    if not scope_agent:
+        scope_agent = config.get("scope_agent_id")
+    if not scope_agent:
+        click.echo(
+            "Error: --scope-agent is required (no scope_agent_id in active "
+            "profile either)",
+            err=True,
+        )
+        raise SystemExit(2)
 
-    body = {"kind": kind, "label": label, "constraints": constraints}
+    body = {
+        "kind": "query",
+        "label": label,
+        "constraints": {"scope_agent_id": scope_agent},
+    }
     try:
         resp = _hpost(
             f"{service}/v1/tokens", headers=headers, json=body, timeout=30,

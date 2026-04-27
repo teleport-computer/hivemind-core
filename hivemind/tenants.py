@@ -35,6 +35,8 @@ from .admin_proxy import make_admin
 from .config import Settings
 from .core import Hivemind
 from .db import connect as _db_connect
+from .seal import TenantSealer
+from .tenant_seal import ensure_unsealed
 
 logger = logging.getLogger(__name__)
 
@@ -42,14 +44,13 @@ logger = logging.getLogger(__name__)
 _TENANT_ID_PREFIX = "t_"
 _API_KEY_PREFIX = "hmk_"
 
-# Capability-token prefixes. Owner tokens stay on hmk_ for backward compat;
-# the new prefixes let the resolver pick the right table without trying
-# both lookups on every request.
+# Capability-token prefix. Owner tokens stay on hmk_ for backward compat;
+# the prefix lets the resolver pick the right table without trying both
+# lookups on every request.
 _QUERY_TOKEN_PREFIX = "hmq_"  # query-only: submit prompts via the active scope agent
-_WRITE_TOKEN_PREFIX = "hmw_"  # write-only: INSERT into a fixed table allowlist
 
 
-Role = Literal["owner", "query", "write"]
+Role = Literal["owner", "query"]
 
 
 @dataclass(frozen=True)
@@ -62,8 +63,6 @@ class Caller:
       - owner: ``{}``
       - query: ``{"scope_agent_id": <id>}`` — every query through this
         token is forced to use this scope agent (enforced in /v1/query).
-      - write: ``{"allowed_tables": [<table>, ...]}`` — /v1/store accepts
-        only INSERTs into these tables for this caller.
     """
 
     tenant_id: str
@@ -71,6 +70,7 @@ class Caller:
     constraints: dict
     hive: Hivemind
     token_id: str = ""  # hex digest prefix; "" for owner tokens (no row)
+    sealed: bool = False  # capability-token landed on a cold-cache tenant
 
 
 def _new_tenant_id() -> str:
@@ -82,7 +82,7 @@ def _new_api_key() -> str:
 
 
 def _new_capability_token(prefix: str) -> str:
-    """Mint a fresh capability token with the given prefix (hmq_ / hmw_)."""
+    """Mint a fresh capability token with the given prefix (hmq_)."""
     return prefix + secrets.token_urlsafe(32)
 
 
@@ -108,6 +108,9 @@ class TenantRegistry:
         self._lock = threading.RLock()
         self._cache: "OrderedDict[str, Hivemind]" = OrderedDict()
         self._cache_max = max(1, int(settings.tenant_cache_size))
+        # One process-wide DEK cache, shared across tenants. Lives only
+        # in RAM — restart-evicts everything, which is the seal property.
+        self.sealer = TenantSealer()
 
         # Admin client needs to come first so we can auto-create the
         # control DB if it doesn't exist on this Postgres cluster.
@@ -222,14 +225,15 @@ class TenantRegistry:
         )
         # Capability tokens. One row per delegated token; owner key stays
         # in _tenants. ON DELETE CASCADE so tenant deletion sweeps the
-        # delegated tokens too.
+        # delegated tokens too. ``kind`` is kept in the schema but only
+        # ``'query'`` is accepted by mint after the hmw_ removal.
         self._control_db.execute_commit(
             """
             CREATE TABLE IF NOT EXISTS _capability_tokens (
                 token_hash  TEXT PRIMARY KEY,
                 tenant_id   TEXT NOT NULL REFERENCES _tenants(id)
                                 ON DELETE CASCADE,
-                kind        TEXT NOT NULL CHECK (kind IN ('query','write')),
+                kind        TEXT NOT NULL,
                 label       TEXT NOT NULL DEFAULT '',
                 constraints TEXT NOT NULL DEFAULT '{}',
                 created_at  DOUBLE PRECISION NOT NULL,
@@ -237,6 +241,19 @@ class TenantRegistry:
             )
             """
         )
+        # Drop the legacy CHECK constraint that allowed kind='write'.
+        # Best-effort: if it's already gone (pre-migration DBs) skip.
+        for legacy_check in (
+            "_capability_tokens_kind_check",
+            "_capability_tokens_kind_check1",
+        ):
+            try:
+                self._control_db.execute_commit(
+                    f"ALTER TABLE _capability_tokens "
+                    f"DROP CONSTRAINT IF EXISTS {legacy_check}"
+                )
+            except Exception:
+                pass
         self._control_db.execute_commit(
             "CREATE INDEX IF NOT EXISTS _capability_tokens_tenant_idx "
             "ON _capability_tokens (tenant_id)"
@@ -251,38 +268,23 @@ class TenantRegistry:
         label: str,
         constraints: dict | None,
     ) -> dict:
-        """Issue a new query/write token for ``tenant_id``.
+        """Issue a new query token for ``tenant_id``.
 
         Returns ``{"token": "<plaintext>", "token_id": "<short>", "kind",
         "label", "constraints"}``. The plaintext is shown only at this
         call; only the hash is stored. Validates that the tenant exists
-        and that constraints match the kind.
+        and that constraints match the kind. Only ``kind='query'`` is
+        supported (write tokens were removed).
         """
-        if kind not in ("query", "write"):
-            raise ValueError("kind must be 'query' or 'write'")
+        if kind != "query":
+            raise ValueError("kind must be 'query'")
         constraints = dict(constraints or {})
-        if kind == "query":
-            sid = (constraints.get("scope_agent_id") or "").strip()
-            if not sid:
-                raise ValueError(
-                    "query token requires constraints.scope_agent_id"
-                )
-            constraints = {"scope_agent_id": sid}
-        else:  # write
-            tables = constraints.get("allowed_tables") or []
-            if not isinstance(tables, list) or not tables:
-                raise ValueError(
-                    "write token requires constraints.allowed_tables (non-empty list)"
-                )
-            cleaned = [str(t).strip() for t in tables if str(t).strip()]
-            if not cleaned:
-                raise ValueError("allowed_tables must contain at least one table")
-            for t in cleaned:
-                if t.lower().startswith("_hivemind_"):
-                    raise ValueError(
-                        f"write token cannot grant access to internal table {t!r}"
-                    )
-            constraints = {"allowed_tables": cleaned}
+        sid = (constraints.get("scope_agent_id") or "").strip()
+        if not sid:
+            raise ValueError(
+                "query token requires constraints.scope_agent_id"
+            )
+        constraints = {"scope_agent_id": sid}
 
         rows = self._control_db.execute(
             "SELECT id FROM _tenants WHERE id = %s", [tenant_id]
@@ -290,8 +292,7 @@ class TenantRegistry:
         if not rows:
             raise KeyError(f"tenant '{tenant_id}' not found")
 
-        prefix = _QUERY_TOKEN_PREFIX if kind == "query" else _WRITE_TOKEN_PREFIX
-        token = _new_capability_token(prefix)
+        token = _new_capability_token(_QUERY_TOKEN_PREFIX)
         token_hash = _hash_api_key(token)
         self._control_db.execute_commit(
             "INSERT INTO _capability_tokens "
@@ -534,7 +535,10 @@ class TenantRegistry:
             if hm is not None:
                 self._cache.move_to_end(tenant_id)
                 return hm
-        hm = Hivemind(self.settings, tenant_db=db_name, tenant_id=tenant_id)
+        hm = Hivemind(
+            self.settings, tenant_db=db_name, tenant_id=tenant_id,
+            sealer=self.sealer,
+        )
         with self._lock:
             existing = self._cache.get(tenant_id)
             if existing is not None:
@@ -561,11 +565,16 @@ class TenantRegistry:
         Dispatches by prefix:
           - ``hmk_…`` → owner via :meth:`resolve`
           - ``hmq_…`` → query capability via ``_capability_tokens``
-          - ``hmw_…`` → write capability via ``_capability_tokens``
 
         Returns ``None`` if the token doesn't match any active row, the
         backing tenant is suspended, or the row is revoked. Callers
         should treat ``None`` as a 401.
+
+        Side effect: thaws the per-tenant DEK cache when possible. An
+        ``hmk_`` bearer always thaws (and initializes the seal record on
+        first contact). An ``hmq_`` bearer cannot derive the owner-bound
+        KEK, so it leaves the seal sealed; downstream operations that
+        need DEK material will surface ``TenantSealed`` → HTTP 503.
         """
         if not token:
             return None
@@ -574,18 +583,33 @@ class TenantRegistry:
             if res is None:
                 return None
             tenant_id, hive = res
+            unsealed = False
+            try:
+                unsealed = ensure_unsealed(
+                    self.sealer, hive.db, tenant_id, token,
+                    can_initialize=True,
+                )
+            except Exception as e:
+                # Seal failures should not break auth — but they should
+                # be visible. Capability-bound endpoints will 503 if the
+                # cache is needed, surfacing the issue at request time.
+                logger.warning(
+                    "tenant %s seal thaw raised: %s", tenant_id, e,
+                )
+            if not unsealed:
+                # Wrong owner key for an existing seal record (e.g.
+                # post-rotation old key). Treat as 401 — this is the
+                # same outcome as if the API-key hash mismatched.
+                return None
             return Caller(
                 tenant_id=tenant_id,
                 role="owner",
                 constraints={},
                 hive=hive,
                 token_id="",
+                sealed=False,
             )
-        if token.startswith(_QUERY_TOKEN_PREFIX):
-            kind: Role = "query"
-        elif token.startswith(_WRITE_TOKEN_PREFIX):
-            kind = "write"
-        else:
+        if not token.startswith(_QUERY_TOKEN_PREFIX):
             return None
 
         token_hash = _hash_api_key(token)
@@ -604,8 +628,8 @@ class TenantRegistry:
             return None
         if row["suspended"]:
             return None
-        if row["kind"] != kind:
-            # Prefix and stored kind disagree — treat as forgery.
+        if row["kind"] != "query":
+            # Anything other than the supported kind → treat as forgery.
             return None
         try:
             constraints = (
@@ -617,12 +641,17 @@ class TenantRegistry:
         hive = self.for_tenant(tenant_id)
         if hive is None:
             return None
+        # Capability tokens cannot thaw the seal: the owner-bound KEK
+        # is keyed by hmk_, not hmq_. Reads of encrypted data while the
+        # cache is cold will surface TenantSealed → 503.
+        sealed = not self.sealer.is_unsealed(tenant_id)
         return Caller(
             tenant_id=tenant_id,
-            role=kind,
+            role="query",
             constraints=constraints,
             hive=hive,
             token_id=_token_id(token_hash),
+            sealed=sealed,
         )
 
     def resolve(self, api_key: str) -> tuple[str, Hivemind] | None:
@@ -650,7 +679,10 @@ class TenantRegistry:
                 return tenant_id, hm
 
         # Construct outside the lock — bootstrap can take a moment.
-        hm = Hivemind(self.settings, tenant_db=db_name, tenant_id=tenant_id)
+        hm = Hivemind(
+            self.settings, tenant_db=db_name, tenant_id=tenant_id,
+            sealer=self.sealer,
+        )
         try:
             import asyncio
             asyncio.get_running_loop()

@@ -23,12 +23,11 @@ uv run python -m hivemind.server
 
 ## 1) Shell Setup
 
-Every public endpoint requires a tenant credential. Three prefixes — pick
+Every public endpoint requires a tenant credential. Two prefixes — pick
 whichever matches your use case:
 
 - `hmk_…` — owner key from `hivemind admin tenants create` (full access)
-- `hmq_…` — query capability from `hivemind tokens issue --kind query …`
-- `hmw_…` — write capability from `hivemind tokens issue --kind write …`
+- `hmq_…` — query capability from `hivemind tokens issue …`
 
 ```bash
 export BASE="http://localhost:8100"
@@ -323,110 +322,16 @@ Pipeline order:
 2. Query agent runs SQL queries, results filtered through scope function
 3. Mediator optionally filters/audits output
 
-## 10) Delegate Write Access (Capability Tokens)
-
-Use case: an upstream service streams events into one of your tables. You
-don't want to hand it your `hmk_…` (it could read everything, mint more
-tokens, or rotate the key). Mint a **write token** instead — it can only
-INSERT into the tables you pin.
-
-### 10.1 Owner mints the token
-
-```bash
-hivemind tokens issue \
-  --kind write \
-  --label "stream-ingest" \
-  --table watch_history
-# token: hmw_…  (shown ONCE — copy now or revoke + reissue)
-# token_id: 1f4a9b2c8e0d
-```
-
-Or directly via HTTP:
-
-```bash
-curl -X POST $BASE/v1/tokens \
-  -H "Authorization: Bearer $API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "kind": "write",
-    "label": "stream-ingest",
-    "constraints": {"allowed_tables": ["watch_history"]}
-  }' | jq
-```
-
-### 10.2 Recipient uses the token
-
-```bash
-export WRITE_TOKEN="hmw_..."          # shipped to the upstream service
-
-# INSERT into the allowed table — works
-curl -X POST $BASE/v1/store \
-  -H "Authorization: Bearer $WRITE_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "sql": "INSERT INTO watch_history (user_id, title, watched_at) VALUES (%s, %s, %s)",
-    "params": ["u123", "ep1", "2026-04-25T01:00:00Z"]
-  }' | jq
-
-# INSERT into a different table — 403
-curl -X POST $BASE/v1/store \
-  -H "Authorization: Bearer $WRITE_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "sql": "INSERT INTO other_table (id) VALUES (1)"
-  }'
-# {"detail": "table 'other_table' not in write-token allowed_tables …"}
-
-# SELECT — also 403 (write tokens are INSERT-only)
-curl -X POST $BASE/v1/store \
-  -H "Authorization: Bearer $WRITE_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"sql": "SELECT 1"}'
-# {"detail": "write-token allows only INSERT statements"}
-```
-
-### 10.3 Revoke
-
-```bash
-hivemind tokens list                            # find the token_id
-hivemind tokens revoke 1f4a9b2c8e0d
-# the upstream service's WRITE_TOKEN starts returning 401 immediately
-```
-
-### 10.4 Make the upstream's index agent attestable
-
-If the upstream service is going to register its own index agent (the
-one consuming `WRITE_TOKEN` to write rows), publish that agent's
-attestation bundle so downstream consumers can pin it:
-
-```bash
-hivemind agents attest $INDEX_AGENT_ID
-# agent_id:            ix987…
-# image:               your-org/watch-history-indexer:latest
-# image.id:            sha256:7c2e…
-# image.repo_digest:   registry.example.com/your-org/watch-history-indexer@sha256:8d3f…
-# files_count:         4
-# files_digest_sha256: a012…
-# attestation:
-#   compose_hash: 0c86…
-#   app_id:       …
-```
-
-Anyone — not just the tenant owner — can verify a given agent has not
-been tampered with by re-running `agents attest` (or hitting
-`GET /v1/agents/{id}/attest`) and comparing the four pinned values.
-
-## 11) Delegate Query Access (Capability Tokens)
+## 10) Delegate Query Access (Capability Tokens)
 
 Use case: a research collaborator wants to ask questions of your data,
 but you only trust a specific scope agent to gate what they can see.
 
-### 11.1 Owner pins a scope agent and mints the query token
+### 10.1 Owner pins a scope agent and mints the query token
 
 ```bash
 # (Assume scope agent already uploaded with id $SCOPE_ID — see section 9.)
 hivemind tokens issue \
-  --kind query \
   --label "research-collab" \
   --scope-agent "$SCOPE_ID"
 # token: hmq_…
@@ -436,7 +341,7 @@ The token now **forces** every prompt through `$SCOPE_ID`. Any
 `scope_agent_id` the recipient passes in their request body is silently
 overwritten by the server.
 
-### 11.2 Recipient verifies the binding before using it
+### 10.2 Recipient verifies the binding before using it
 
 ```bash
 export QUERY_TOKEN="hmq_..."
@@ -471,7 +376,7 @@ and seeing the same triple proves nothing about the gatekeeper has
 changed — neither the source it was built from, the binary it actually
 runs, nor the host it runs on.
 
-### 11.3 Recipient submits queries (and optionally their own query agent)
+### 10.3 Recipient submits queries (and optionally their own query agent)
 
 ```bash
 # Use an existing query agent
