@@ -1171,8 +1171,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
         await asyncio.to_thread(hm.agent_store.create, config)
 
+        # Persist the upload tmpdir (Dockerfile + source). On Phala, the
+        # CVM root FS — including /var/lib/docker — is reinitialized on
+        # every compose update, so per-agent images get wiped. Stored
+        # build context lets ensure_image_async rebuild from pgdata
+        # (FDE-encrypted, governance-gated) on next invocation.
         try:
-            files = await runner.extract_image_files_async(image_tag)
+            files = await asyncio.to_thread(_read_extracted_files, tmpdir)
             await asyncio.to_thread(hm.agent_store.save_files, agent_id, files)
         except Exception as e:
             logger.warning("Failed to save agent files for %s: %s", agent_id, e)
@@ -1580,8 +1585,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             runner = _create_runner(sandbox_settings)
             image_tag = _tenant_image_tag(hm.tenant_id, agent_id)
 
+            # Capture upload tmpdir (Dockerfile + source) before the
+            # finally block rmtree's it — needed for rebuild-from-pgdata
+            # after a Phala compose update wipes /var/lib/docker.
+            captured_files: dict[str, str] = {}
             try:
                 await runner.build_image_async(tmpdir, image_tag)
+                try:
+                    captured_files = _read_extracted_files(tmpdir)
+                except Exception as e:
+                    logger.warning(
+                        "Failed to read upload context for %s: %s",
+                        agent_id, e,
+                    )
             except Exception as e:
                 logger.exception("Image build failed for agent %s", agent_id)
                 await asyncio.to_thread(
@@ -1611,11 +1627,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             )
             await asyncio.to_thread(hm.agent_store.create, config)
 
-            try:
-                files = await runner.extract_image_files_async(image_tag)
-                await asyncio.to_thread(hm.agent_store.save_files, agent_id, files)
-            except Exception as e:
-                logger.warning("Failed to save agent files for %s: %s", agent_id, e)
+            if captured_files:
+                try:
+                    await asyncio.to_thread(
+                        hm.agent_store.save_files, agent_id, captured_files,
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "Failed to save agent files for %s: %s", agent_id, e,
+                    )
 
             # -- Run pipeline --
             await hm.pipeline.run_query_agent_tracked(

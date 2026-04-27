@@ -204,6 +204,25 @@ class SandboxBackend:
                 **env,
             }
 
+            store = agent_store or self.agent_store
+            if store is not None:
+                try:
+                    files = await asyncio.to_thread(
+                        store.get_files, agent.agent_id,
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "Failed reading stored build context for %s: %s",
+                        agent.agent_id, e,
+                    )
+                    files = None
+                rebuilt = await runner.ensure_image_async(agent.image, files)
+                if rebuilt:
+                    logger.info(
+                        "Rebuilt image %s for agent %s from stored context",
+                        agent.image, agent.agent_id,
+                    )
+
             result = await runner.run_agent(
                 agent=agent,
                 bridge_url=bridge_url,

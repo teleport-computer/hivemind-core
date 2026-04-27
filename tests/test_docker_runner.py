@@ -939,3 +939,137 @@ async def test_build_image_async_returns_tag(tmp_path):
         tag = await runner.build_image_async(str(tmp_path), "test:latest")
 
     assert tag == "test:latest"
+
+
+# ── ensure_image_async tests ──
+#
+# Covers the rebuild-from-stored-context path that fires after a Phala
+# compose update wipes /var/lib/docker. Source survives in pgdata, so
+# the next invocation rebuilds the per-agent image transparently.
+
+
+@pytest.mark.asyncio
+async def test_ensure_image_async_no_op_when_present():
+    mock_client = MagicMock()
+    mock_client.images.get.return_value = MagicMock()  # image present
+
+    settings = _make_settings()
+    with patch("hivemind.sandbox.docker_runner.docker") as mock_docker:
+        mock_docker.from_env.return_value = mock_client
+        mock_docker.errors = __import__("docker").errors
+        runner = DockerRunner(settings)
+        rebuilt = await runner.ensure_image_async(
+            "hivemind-agent-x:latest",
+            {"Dockerfile": "FROM scratch\n", "agent.py": "print(1)\n"},
+        )
+
+    assert rebuilt is False
+    mock_client.images.build.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_ensure_image_async_rebuilds_when_missing():
+    import docker.errors as docker_errors
+    import os
+
+    captured_contents: dict[str, str] = {}
+
+    def _fake_build(**kwargs):
+        # The runner uses TemporaryDirectory, so the build dir only exists
+        # *during* this call — capture what's inside before it's torn down.
+        build_dir = kwargs["path"]
+        for root, _dirs, files in os.walk(build_dir):
+            for fname in files:
+                full = os.path.join(root, fname)
+                rel = os.path.relpath(full, build_dir)
+                with open(full) as f:
+                    captured_contents[rel] = f.read()
+        return (MagicMock(), [])
+
+    mock_client = MagicMock()
+    mock_client.images.get.side_effect = docker_errors.ImageNotFound("missing")
+    mock_client.images.build.side_effect = _fake_build
+
+    settings = _make_settings()
+    with patch("hivemind.sandbox.docker_runner.docker") as mock_docker:
+        mock_docker.from_env.return_value = mock_client
+        mock_docker.errors = docker_errors
+        runner = DockerRunner(settings)
+        rebuilt = await runner.ensure_image_async(
+            "hivemind-agent-x:latest",
+            {
+                "Dockerfile": "FROM scratch\n",
+                "agent.py": "print(1)\n",
+                "pkg/util.py": "X = 1\n",
+            },
+        )
+
+    assert rebuilt is True
+    assert mock_client.images.build.call_count == 1
+    build_kwargs = mock_client.images.build.call_args.kwargs
+    assert build_kwargs["tag"] == "hivemind-agent-x:latest"
+    assert build_kwargs["rm"] is True
+    assert captured_contents == {
+        "Dockerfile": "FROM scratch\n",
+        "agent.py": "print(1)\n",
+        os.path.join("pkg", "util.py"): "X = 1\n",
+    }
+
+
+@pytest.mark.asyncio
+async def test_ensure_image_async_errors_when_no_files():
+    import docker.errors as docker_errors
+
+    mock_client = MagicMock()
+    mock_client.images.get.side_effect = docker_errors.ImageNotFound("missing")
+
+    settings = _make_settings()
+    with patch("hivemind.sandbox.docker_runner.docker") as mock_docker:
+        mock_docker.from_env.return_value = mock_client
+        mock_docker.errors = docker_errors
+        runner = DockerRunner(settings)
+        with pytest.raises(ValueError, match="re-upload"):
+            await runner.ensure_image_async("hivemind-agent-x:latest", None)
+
+
+@pytest.mark.asyncio
+async def test_ensure_image_async_errors_when_dockerfile_missing():
+    import docker.errors as docker_errors
+
+    mock_client = MagicMock()
+    mock_client.images.get.side_effect = docker_errors.ImageNotFound("missing")
+
+    settings = _make_settings()
+    with patch("hivemind.sandbox.docker_runner.docker") as mock_docker:
+        mock_docker.from_env.return_value = mock_client
+        mock_docker.errors = docker_errors
+        runner = DockerRunner(settings)
+        with pytest.raises(ValueError, match="lacks a Dockerfile"):
+            await runner.ensure_image_async(
+                "hivemind-agent-x:latest",
+                {"agent.py": "print(1)\n"},
+            )
+
+
+@pytest.mark.asyncio
+async def test_ensure_image_async_rejects_path_traversal():
+    import docker.errors as docker_errors
+
+    mock_client = MagicMock()
+    mock_client.images.get.side_effect = docker_errors.ImageNotFound("missing")
+
+    settings = _make_settings()
+    with patch("hivemind.sandbox.docker_runner.docker") as mock_docker:
+        mock_docker.from_env.return_value = mock_client
+        mock_docker.errors = docker_errors
+        runner = DockerRunner(settings)
+        with pytest.raises(ValueError, match="unsafe path"):
+            await runner.ensure_image_async(
+                "hivemind-agent-x:latest",
+                {
+                    "Dockerfile": "FROM scratch\n",
+                    "../escape.py": "print(1)\n",
+                },
+            )
+
+    mock_client.images.build.assert_not_called()

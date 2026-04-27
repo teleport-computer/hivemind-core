@@ -820,6 +820,63 @@ class DockerRunner:
         except docker.errors.ImageNotFound:
             return False
 
+    async def ensure_image_async(
+        self, image_tag: str, files: dict[str, str] | None,
+    ) -> bool:
+        """Ensure ``image_tag`` is present locally; rebuild from ``files`` if not.
+
+        Returns True if a rebuild happened, False if the image was already
+        present. Raises ValueError if the image is missing and ``files``
+        does not contain a Dockerfile (e.g. an agent uploaded before the
+        store-build-context migration).
+
+        On Phala the CVM root FS — including /var/lib/docker — is
+        reinitialized on every compose update, so per-agent images get
+        wiped. Source persists in pgdata; this rebuilds on demand the
+        first time the missing agent is invoked after a redeploy.
+        """
+        if await asyncio.to_thread(self.image_exists, image_tag):
+            return False
+        if not files:
+            raise ValueError(
+                f"Docker image {image_tag} is missing and no stored build "
+                "context is available. The agent likely predates the "
+                "rebuild-from-source migration — please re-upload it."
+            )
+        if "Dockerfile" not in files:
+            raise ValueError(
+                f"Docker image {image_tag} is missing and the stored build "
+                "context lacks a Dockerfile (likely an agent uploaded "
+                "before build-context persistence) — please re-upload it."
+            )
+
+        def _materialize_and_build() -> None:
+            with tempfile.TemporaryDirectory(prefix="hivemind-rebuild-") as td:
+                base = os.path.realpath(td)
+                for rel_path, content in files.items():
+                    # Defense-in-depth: refuse absolute / parent-traversing
+                    # paths even though the source comes from our own DB.
+                    if os.path.isabs(rel_path) or ".." in rel_path.split("/"):
+                        raise ValueError(
+                            f"Refusing to materialize unsafe path: {rel_path}"
+                        )
+                    target = os.path.realpath(os.path.join(td, rel_path))
+                    if not target.startswith(base + os.sep) and target != base:
+                        raise ValueError(
+                            f"Refusing to materialize path outside tmpdir: {rel_path}"
+                        )
+                    os.makedirs(os.path.dirname(target), exist_ok=True)
+                    with open(target, "w", encoding="utf-8") as f:
+                        f.write(content)
+                self.build_image(td, image_tag)
+
+        logger.info(
+            "Image %s missing; rebuilding from stored context (%d files)",
+            image_tag, len(files),
+        )
+        await asyncio.to_thread(_materialize_and_build)
+        return True
+
     # ── Image filesystem extraction ──
 
     # Directories to skip when extracting from /
