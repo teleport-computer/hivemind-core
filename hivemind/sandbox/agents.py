@@ -174,40 +174,63 @@ class AgentStore:
             )
         return [self._row_to_config(r) for r in rows]
 
-    def save_files(self, agent_id: str, files: dict[str, str]) -> int:
+    def save_files(
+        self,
+        agent_id: str,
+        files: dict[str, str],
+        private_paths: list[str] | None = None,
+    ) -> int:
         """Store extracted source files for an agent. Returns file count.
 
         Encrypts content under the tenant DEK when a sealer is bound;
         otherwise stores plaintext (legacy / test path).
+
+        ``private_paths`` marks specific files non-attestable: their
+        contents are excluded from ``attested_files_digest`` (the digest
+        recipients verify against published source). They remain bound
+        by ``image_digest`` because the Docker image was built with them.
+        Defaults to all files attestable (backwards-compatible).
         """
+        private = set(private_paths or [])
         encrypt = self._seal_active()
         for path, content in files.items():
             size = len(content.encode())
+            attestable = path not in private
             if encrypt:
                 ct = self._encode_ct(content, agent_id, path)
                 self.db.execute_commit(
                     "INSERT INTO _hivemind_agent_files "
-                    "(agent_id, file_path, content, ciphertext, size_bytes) "
-                    "VALUES (%s, %s, NULL, %s, %s) "
+                    "(agent_id, file_path, content, ciphertext, "
+                    "size_bytes, attestable) "
+                    "VALUES (%s, %s, NULL, %s, %s, %s) "
                     "ON CONFLICT (agent_id, file_path) DO UPDATE SET "
                     "content=NULL, ciphertext=EXCLUDED.ciphertext, "
-                    "size_bytes=EXCLUDED.size_bytes",
-                    [agent_id, path, ct, size],
+                    "size_bytes=EXCLUDED.size_bytes, "
+                    "attestable=EXCLUDED.attestable",
+                    [agent_id, path, ct, size, attestable],
                 )
             else:
                 self.db.execute_commit(
                     "INSERT INTO _hivemind_agent_files "
-                    "(agent_id, file_path, content, ciphertext, size_bytes) "
-                    "VALUES (%s, %s, %s, NULL, %s) "
+                    "(agent_id, file_path, content, ciphertext, "
+                    "size_bytes, attestable) "
+                    "VALUES (%s, %s, %s, NULL, %s, %s) "
                     "ON CONFLICT (agent_id, file_path) DO UPDATE SET "
                     "content=EXCLUDED.content, ciphertext=NULL, "
-                    "size_bytes=EXCLUDED.size_bytes",
-                    [agent_id, path, content, size],
+                    "size_bytes=EXCLUDED.size_bytes, "
+                    "attestable=EXCLUDED.attestable",
+                    [agent_id, path, content, size, attestable],
                 )
         return len(files)
 
-    def replace_files(self, agent_id: str, files: dict[str, str]) -> int:
+    def replace_files(
+        self,
+        agent_id: str,
+        files: dict[str, str],
+        private_paths: list[str] | None = None,
+    ) -> int:
         """Replace all extracted files for an agent."""
+        private = set(private_paths or [])
         self.db.execute_commit(
             "DELETE FROM _hivemind_agent_files WHERE agent_id = %s",
             [agent_id],
@@ -215,31 +238,87 @@ class AgentStore:
         encrypt = self._seal_active()
         for path, content in files.items():
             size = len(content.encode())
+            attestable = path not in private
             if encrypt:
                 ct = self._encode_ct(content, agent_id, path)
                 self.db.execute_commit(
                     "INSERT INTO _hivemind_agent_files "
-                    "(agent_id, file_path, content, ciphertext, size_bytes) "
-                    "VALUES (%s, %s, NULL, %s, %s)",
-                    [agent_id, path, ct, size],
+                    "(agent_id, file_path, content, ciphertext, "
+                    "size_bytes, attestable) "
+                    "VALUES (%s, %s, NULL, %s, %s, %s)",
+                    [agent_id, path, ct, size, attestable],
                 )
             else:
                 self.db.execute_commit(
                     "INSERT INTO _hivemind_agent_files "
-                    "(agent_id, file_path, content, ciphertext, size_bytes) "
-                    "VALUES (%s, %s, %s, NULL, %s)",
-                    [agent_id, path, content, size],
+                    "(agent_id, file_path, content, ciphertext, "
+                    "size_bytes, attestable) "
+                    "VALUES (%s, %s, %s, NULL, %s, %s)",
+                    [agent_id, path, content, size, attestable],
                 )
         return len(files)
 
     def list_file_paths(self, agent_id: str) -> list[dict]:
-        """List extracted files for an agent. Returns [{path, size_bytes}, ...]."""
+        """List extracted files. Returns [{path, size_bytes, attestable}, ...]."""
         rows = self.db.execute(
-            "SELECT file_path, size_bytes FROM _hivemind_agent_files "
+            "SELECT file_path, size_bytes, attestable "
+            "FROM _hivemind_agent_files "
             "WHERE agent_id = %s ORDER BY file_path",
             [agent_id],
         )
-        return [{"path": r["file_path"], "size_bytes": r["size_bytes"]} for r in rows]
+        return [
+            {
+                "path": r["file_path"],
+                "size_bytes": r["size_bytes"],
+                "attestable": bool(r.get("attestable", True)),
+            }
+            for r in rows
+        ]
+
+    def compute_digests(self, agent_id: str) -> dict:
+        """Return ``{files_digest, attested_files_digest, files_count,
+        attested_files_count}`` over this agent's stored files.
+
+        ``files_digest`` covers ALL files (the on-disk reality, what
+        the image was built from). ``attested_files_digest`` covers only
+        files marked ``attestable=True`` — the digest a recipient
+        compares against the agent's published source code. Files marked
+        non-attestable (e.g. ``.env``, secret prompts) are excluded from
+        the attested digest but still part of ``files_digest`` and the
+        Docker image.
+
+        Decrypts content on read so the digest is over plaintext (the
+        same content the agent's code sees at runtime).
+        """
+        import hashlib as _h
+
+        files = self.get_files(agent_id)
+        attestable_set = {
+            r["file_path"]
+            for r in self.db.execute(
+                "SELECT file_path FROM _hivemind_agent_files "
+                "WHERE agent_id = %s AND attestable = TRUE",
+                [agent_id],
+            )
+        }
+        h_all = _h.sha256()
+        h_att = _h.sha256()
+        att_count = 0
+        for path in sorted(files):
+            content = files[path]
+            blob = path.encode("utf-8") + b"\0" + content.encode(
+                "utf-8", errors="replace"
+            ) + b"\0"
+            h_all.update(blob)
+            if path in attestable_set:
+                h_att.update(blob)
+                att_count += 1
+        return {
+            "files_digest": h_all.hexdigest(),
+            "attested_files_digest": h_att.hexdigest(),
+            "files_count": len(files),
+            "attested_files_count": att_count,
+        }
 
     def read_file(self, agent_id: str, file_path: str) -> str | None:
         """Read a single extracted file's content. Returns None if not found.

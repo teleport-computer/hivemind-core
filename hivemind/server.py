@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import os
 import secrets
@@ -997,26 +998,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
         if not agent:
             raise HTTPException(404, "Agent not found")
-        files = await asyncio.to_thread(
-            caller.hive.agent_store.get_files, agent_id
+        # Two digests: ``files_digest_sha256`` (all files, what the image
+        # was built from) and ``attested_files_digest_sha256`` (only files
+        # marked attestable — what a recipient verifies against the
+        # agent's published source). Private files (e.g. secret prompts,
+        # .env) contribute to image_digest but not the attested digest.
+        digests = await asyncio.to_thread(
+            caller.hive.agent_store.compute_digests, agent_id
         )
-        # sha256 of `path\0content\0` for each file in path-sorted order.
-        # Stable, lets the CLI re-derive without ambiguity. Files-empty
-        # case (Phala-built images on a clean CVM) → digest of empty.
-        import hashlib as _h
-
-        h = _h.sha256()
-        for path in sorted(files):
-            h.update(path.encode("utf-8"))
-            h.update(b"\0")
-            h.update(files[path].encode("utf-8", errors="replace"))
-            h.update(b"\0")
-        files_digest = h.hexdigest()
         return {
             "agent_id": agent_id,
             "agent": agent.model_dump(),
-            "files_count": len(files),
-            "files_digest_sha256": files_digest,
+            "files_count": digests["files_count"],
+            "files_digest_sha256": digests["files_digest"],
+            "attested_files_count": digests["attested_files_count"],
+            "attested_files_digest_sha256": digests["attested_files_digest"],
             "image_digest": _image_digest(agent.image),
             "attestation": _att.get_bundle(),
         }
@@ -1071,8 +1067,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         max_llm_calls: Annotated[int, Form(ge=1)] = 20,
         max_tokens: Annotated[int, Form(ge=1)] = 100_000,
         timeout_seconds: Annotated[int, Form(ge=1)] = 120,
+        # JSON-encoded list of file paths to mark non-attestable (e.g.
+        # secret prompts, .env). Excluded from attested_files_digest;
+        # still bound by image_digest. Defaults to []  (all attestable).
+        private_paths: str = Form("[]"),
         hm: Hivemind = Depends(get_tenant_hive),
     ):
+        try:
+            parsed_private = json.loads(private_paths) if private_paths else []
+            if not isinstance(parsed_private, list) or not all(
+                isinstance(p, str) for p in parsed_private
+            ):
+                raise ValueError("must be JSON list of strings")
+        except (ValueError, json.JSONDecodeError) as e:
+            raise HTTPException(
+                status_code=400,
+                detail=f"private_paths: {e}",
+            )
         try:
             content = await _read_upload_bytes_limited(
                 archive,
@@ -1126,6 +1137,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     max_tokens,
                     timeout_seconds,
                     hm,
+                    private_paths=parsed_private,
                 )
 
                 await asyncio.to_thread(
@@ -1162,6 +1174,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         max_tokens: int,
         timeout_seconds: int,
         hm: Hivemind,
+        private_paths: list[str] | None = None,
     ) -> str:
         """Build Docker image, register agent, save files. Returns image tag."""
         image_tag = _tenant_image_tag(hm.tenant_id, agent_id)
@@ -1188,7 +1201,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # (FDE-encrypted, governance-gated) on next invocation.
         try:
             files = await asyncio.to_thread(_read_extracted_files, tmpdir)
-            await asyncio.to_thread(hm.agent_store.save_files, agent_id, files)
+            await asyncio.to_thread(
+                hm.agent_store.save_files,
+                agent_id,
+                files,
+                private_paths or [],
+            )
         except Exception as e:
             logger.warning("Failed to save agent files for %s: %s", agent_id, e)
 

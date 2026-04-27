@@ -85,6 +85,7 @@ class Database:
                         content TEXT,
                         ciphertext TEXT,
                         size_bytes INTEGER NOT NULL,
+                        attestable BOOLEAN NOT NULL DEFAULT TRUE,
                         PRIMARY KEY (agent_id, file_path)
                     )
                 """)
@@ -117,6 +118,18 @@ class Database:
                     cur.execute(
                         "ALTER TABLE _hivemind_agent_files "
                         "ADD COLUMN IF NOT EXISTS ciphertext TEXT"
+                    )
+                except Exception:
+                    pass
+                # Per-file attestable flag: when False the file is excluded
+                # from `attested_files_digest` (B's verification surface) but
+                # still bound by image_digest (CVM still ran with it). Default
+                # TRUE = backwards-compatible (legacy rows fully attestable).
+                try:
+                    cur.execute(
+                        "ALTER TABLE _hivemind_agent_files "
+                        "ADD COLUMN IF NOT EXISTS attestable BOOLEAN "
+                        "NOT NULL DEFAULT TRUE"
                     )
                 except Exception:
                     pass
@@ -283,6 +296,7 @@ class HttpDatabase:
                 content TEXT,
                 ciphertext TEXT,
                 size_bytes INTEGER NOT NULL,
+                attestable BOOLEAN NOT NULL DEFAULT TRUE,
                 PRIMARY KEY (agent_id, file_path)
             )
             """,
@@ -369,6 +383,14 @@ class HttpDatabase:
             self.execute_commit(
                 "ALTER TABLE _hivemind_agent_files "
                 "ALTER COLUMN content DROP NOT NULL"
+            )
+        except Exception:
+            pass
+        try:
+            self.execute_commit(
+                "ALTER TABLE _hivemind_agent_files "
+                "ADD COLUMN IF NOT EXISTS attestable BOOLEAN "
+                "NOT NULL DEFAULT TRUE"
             )
         except Exception:
             pass

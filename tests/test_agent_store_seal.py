@@ -179,3 +179,136 @@ def test_replace_files_keeps_encryption_invariant(fresh_db):
         assert r["ciphertext"] is not None
     files = store.get_files(cfg.agent_id)
     assert files == {"a.py": "v2\n", "b.py": "x\n"}
+
+
+# ── per-file attestable flag ──────────────────────────────────────────
+
+
+def test_default_all_attestable_digests_match(fresh_db):
+    """No private_paths → attested digest equals total digest."""
+    db, _ = fresh_db
+    store = AgentStore(db, sealer=None, tenant_id=None)
+    cfg = _config("agent_default_att")
+    store.upsert(cfg)
+    store.save_files(
+        cfg.agent_id,
+        {"a.py": "x\n", "b.py": "y\n"},
+    )
+
+    digests = store.compute_digests(cfg.agent_id)
+    assert digests["files_count"] == 2
+    assert digests["attested_files_count"] == 2
+    assert digests["files_digest"] == digests["attested_files_digest"]
+    assert digests["files_digest"]  # non-empty
+
+
+def test_private_path_excluded_from_attested_digest(fresh_db):
+    """Files marked private contribute to ``files_digest`` but not
+    ``attested_files_digest``. The attested digest equals the digest
+    over only the public files — what a recipient verifies against
+    published source without holding the secret."""
+    db, _ = fresh_db
+    store = AgentStore(db, sealer=None, tenant_id=None)
+    cfg = _config("agent_private")
+    store.upsert(cfg)
+    public_files = {"a.py": "public_a\n", "b.py": "public_b\n"}
+    store.save_files(
+        cfg.agent_id,
+        {**public_files, "prompt.md": "SECRET RULES\n"},
+        private_paths=["prompt.md"],
+    )
+
+    d_full = store.compute_digests(cfg.agent_id)
+    assert d_full["files_count"] == 3
+    assert d_full["attested_files_count"] == 2
+    assert d_full["files_digest"] != d_full["attested_files_digest"]
+
+    # Recompute the attested digest from a clean store with ONLY the
+    # public files. It must match d_full["attested_files_digest"] —
+    # proving B can verify without holding the private file.
+    store2 = AgentStore(db, sealer=None, tenant_id=None)
+    cfg2 = _config("agent_public_only")
+    store2.upsert(cfg2)
+    store2.save_files(cfg2.agent_id, public_files)
+    d_pub = store2.compute_digests(cfg2.agent_id)
+    assert d_pub["files_digest"] == d_full["attested_files_digest"]
+
+
+def test_changing_private_content_does_not_affect_attested_digest(fresh_db):
+    """Mutating the private file leaves ``attested_files_digest`` stable —
+    the security claim is "public surface unchanged" even as private
+    content rotates (e.g. .env credential rotation)."""
+    db, _ = fresh_db
+    store = AgentStore(db, sealer=None, tenant_id=None)
+    cfg = _config("agent_rot")
+    store.upsert(cfg)
+    public = {"a.py": "x\n"}
+
+    store.save_files(
+        cfg.agent_id,
+        {**public, ".env": "API_KEY=v1\n"},
+        private_paths=[".env"],
+    )
+    d1 = store.compute_digests(cfg.agent_id)
+
+    store.replace_files(
+        cfg.agent_id,
+        {**public, ".env": "API_KEY=v2_rotated\n"},
+        private_paths=[".env"],
+    )
+    d2 = store.compute_digests(cfg.agent_id)
+
+    assert d1["attested_files_digest"] == d2["attested_files_digest"]
+    assert d1["files_digest"] != d2["files_digest"]
+
+
+def test_list_file_paths_surfaces_attestable_flag(fresh_db):
+    """``list_file_paths`` exposes per-file attestable so the CLI can
+    show ``[private]`` markers in the attest output."""
+    db, _ = fresh_db
+    store = AgentStore(db, sealer=None, tenant_id=None)
+    cfg = _config("agent_list")
+    store.upsert(cfg)
+    store.save_files(
+        cfg.agent_id,
+        {"public.py": "p\n", "secret.txt": "s\n"},
+        private_paths=["secret.txt"],
+    )
+    listing = {f["path"]: f["attestable"] for f in store.list_file_paths(cfg.agent_id)}
+    assert listing == {"public.py": True, "secret.txt": False}
+
+
+def test_attestable_under_seal(fresh_db):
+    """Per-file flag works under seal: ciphertext on disk, attested
+    digest computed over the *plaintext* (decrypted on read), private
+    file still excluded."""
+    db, _ = fresh_db
+    sealer = TenantSealer()
+    tenant_id = "t_seal_att"
+    sealer.cache(tenant_id, new_dek())
+    store = AgentStore(db, sealer=sealer, tenant_id=tenant_id)
+    cfg = _config("agent_seal_att")
+    store.upsert(cfg)
+    store.save_files(
+        cfg.agent_id,
+        {"a.py": "code\n", "prompt.md": "SECRET\n"},
+        private_paths=["prompt.md"],
+    )
+
+    # On-disk: both rows are ciphertext.
+    rows = db.execute(
+        "SELECT file_path, content, ciphertext, attestable "
+        "FROM _hivemind_agent_files WHERE agent_id = %s "
+        "ORDER BY file_path",
+        [cfg.agent_id],
+    )
+    by_path = {r["file_path"]: r for r in rows}
+    assert by_path["a.py"]["ciphertext"] is not None
+    assert by_path["prompt.md"]["ciphertext"] is not None
+    assert by_path["a.py"]["attestable"] is True
+    assert by_path["prompt.md"]["attestable"] is False
+
+    digests = store.compute_digests(cfg.agent_id)
+    assert digests["files_count"] == 2
+    assert digests["attested_files_count"] == 1
+    assert digests["files_digest"] != digests["attested_files_digest"]

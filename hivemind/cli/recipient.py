@@ -158,7 +158,18 @@ def ask(
                 err=True,
             )
             raise SystemExit(3)
-        live_files = (r.json().get("files_digest_sha256") or "").lower()
+        # The URI's ``files=`` is the *attested* digest (over public
+        # files only, excluding private prompts/.env). Compare against
+        # ``attested_files_digest_sha256`` when available; pre-Phase-1
+        # servers only expose ``files_digest_sha256``, in which case
+        # both digests are identical (no private files), so the fallback
+        # is correct.
+        body = r.json()
+        live_files = (
+            body.get("attested_files_digest_sha256")
+            or body.get("files_digest_sha256")
+            or ""
+        ).lower()
         if live_files != parsed["files_digest"]:
             click.echo(
                 "Error: files_digest pin mismatch.\n"

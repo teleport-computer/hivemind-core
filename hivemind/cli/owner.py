@@ -226,6 +226,11 @@ def scope(
     service = config["service"]
     headers = _headers(config)
 
+    # When --private-prompt is used, the prompt content stays TEE-resident
+    # AND is excluded from attested_files_digest, so a recipient can verify
+    # the public agent.py / _bridge.py / Dockerfile against the published
+    # source without needing the private prompt to reproduce the digest.
+    private_paths_json = _json.dumps(["prompt.md"]) if private_prompt else "[]"
     try:
         resp = _hpost(
             f"{service}/v1/agents/upload",
@@ -236,6 +241,7 @@ def scope(
                 "name": "private-scope-agent" if private_prompt else "scope-agent",
                 "agent_type": "scope",
                 "description": description,
+                "private_paths": private_paths_json,
             },
             headers=headers,
             timeout=30,
@@ -534,7 +540,16 @@ def share(mint: bool, label: str, explicit_token: str | None):
         click.echo(f"Error {r.status_code}: {_api_error(r)}", err=True)
         raise SystemExit(3)
     pin = r.json()
-    files_digest = (pin.get("files_digest_sha256") or "").lower()
+    # ``files=`` carries the *attested* files digest (excludes private
+    # files like the scope prompt). Recipient verifies live
+    # ``attested_files_digest_sha256`` matches. Older deployments only
+    # expose ``files_digest_sha256`` (over all files); fall back to it
+    # so this CLI keeps minting URIs against pre-Phase-1 servers.
+    files_digest = (
+        pin.get("attested_files_digest_sha256")
+        or pin.get("files_digest_sha256")
+        or ""
+    ).lower()
     inner_att = (pin.get("attestation") or {}).get("attestation") or {}
     compose_hash = (inner_att.get("compose_hash") or "").lower()
 

@@ -126,12 +126,22 @@ def agents_rm(agent_id: str, as_json: bool):
 @click.option(
     "--description", default="", help="Free-form description for the listing."
 )
+@click.option(
+    "--private",
+    "private_paths",
+    multiple=True,
+    help="File path inside the archive to mark non-attestable (e.g. "
+    "``--private prompt.md --private .env``). Excluded from "
+    "``attested_files_digest`` so a recipient can verify the public "
+    "agent code without holding the private file. Repeatable.",
+)
 @click.option("--json", "as_json", is_flag=True, help="Emit JSON on stdout")
 def agents_upload(
     path: Path,
     agent_type: str,
     name: str | None,
     description: str,
+    private_paths: tuple[str, ...],
     as_json: bool,
 ):
     """Upload an arbitrary directory or .tar.gz to /v1/agents/upload.
@@ -178,6 +188,7 @@ def agents_upload(
                 "agent_type": agent_type,
                 "description": description
                 or f"hivemind agents upload {path.name}",
+                "private_paths": _json.dumps(list(private_paths)),
             },
             headers=headers,
             timeout=60,
@@ -373,8 +384,17 @@ def agents_attest(
         click.echo(f"image.id:            {img['id']}")
     for d in img.get("repo_digests") or []:
         click.echo(f"image.repo_digest:   {d}")
-    click.echo(f"files_count:         {data['files_count']}")
-    click.echo(f"files_digest_sha256: {data['files_digest_sha256']}")
+    click.echo(f"files_count:                  {data['files_count']}")
+    click.echo(f"files_digest_sha256:          {data['files_digest_sha256']}")
+    if "attested_files_digest_sha256" in data:
+        click.echo(
+            f"attested_files_count:         "
+            f"{data.get('attested_files_count', '')}"
+        )
+        click.echo(
+            f"attested_files_digest_sha256: "
+            f"{data['attested_files_digest_sha256']}"
+        )
     att = data.get("attestation") or {}
     inner = att.get("attestation") or {}
     if inner:
@@ -385,7 +405,8 @@ def agents_attest(
         click.echo("")
         click.echo("files:")
         for f in files_listing:
-            click.echo(f"  {f['size_bytes']:>10}  {f['path']}")
+            mark = "" if f.get("attestable", True) else "  [private]"
+            click.echo(f"  {f['size_bytes']:>10}  {f['path']}{mark}")
     if file_body is not None:
         click.echo("")
         click.echo(f"── {show_file} ──")
