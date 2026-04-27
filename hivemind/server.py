@@ -622,32 +622,55 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return {"status": "ok", "version": APP_VERSION}
 
     @app.get("/v1/admin/llm-probe", dependencies=[Depends(check_admin)])
-    async def llm_probe():
+    async def llm_probe(provider: str = "", model: str = ""):
         """Admin-only: probe LLM provider connectivity from inside the CVM.
 
+        Query params:
+          provider: 'openrouter' (default) or 'tinfoil'.
+          model:    optional model id. If empty, uses the configured default.
+
         Returns timing + status for a minimal chat completion. Helps
-        diagnose CVM↔provider network issues without SSH.
+        diagnose CVM↔provider network issues (auth, model id, network)
+        without SSH'ing into the CVM.
         """
         import time as _t
         import httpx as _httpx
+
+        prov_key = (provider or "").strip().lower() or "openrouter"
+        if prov_key == "tinfoil":
+            base_url = settings.tinfoil_base_url
+            api_key = settings.tinfoil_api_key
+        elif prov_key == "openrouter":
+            base_url = settings.llm_base_url
+            api_key = settings.llm_api_key
+        else:
+            return {"error": f"unknown provider {provider!r}, expected 'openrouter' or 'tinfoil'"}
+
+        chosen_model = (model or "").strip() or settings.llm_model
         out: dict = {
-            "base_url": settings.llm_base_url,
-            "model": settings.llm_model,
+            "provider": prov_key,
+            "base_url": base_url,
+            "model": chosen_model,
+            "api_key_configured": bool(api_key),
             "timeout_seconds": settings.llm_timeout_seconds,
         }
+        if not api_key:
+            out["error"] = f"{prov_key} api_key not configured on server"
+            return out
+
         t0 = _t.perf_counter()
         try:
             async with _httpx.AsyncClient(
                 timeout=_httpx.Timeout(connect=5.0, read=15.0, write=5.0, pool=5.0),
             ) as client:
                 r = await client.post(
-                    f"{settings.llm_base_url.rstrip('/')}/chat/completions",
+                    f"{base_url.rstrip('/')}/chat/completions",
                     headers={
-                        "Authorization": f"Bearer {settings.llm_api_key}",
+                        "Authorization": f"Bearer {api_key}",
                         "Content-Type": "application/json",
                     },
                     json={
-                        "model": settings.llm_model,
+                        "model": chosen_model,
                         "messages": [{"role": "user", "content": "reply OK"}],
                         "max_tokens": 5,
                     },
