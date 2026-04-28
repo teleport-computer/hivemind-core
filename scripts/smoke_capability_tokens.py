@@ -1,8 +1,7 @@
 """Post-deploy smoke test for capability tokens.
 
 Run after pushing a new core CVM image. Walks the lifecycle for query
-tokens (the only kind after hmw_ removal) against a live deployment
-using the active profile's owner key:
+tokens against a live deployment using the active profile's owner key:
 
     1. /v1/tokens — issue a query token (pinned to a scope agent id)
     2. /v1/tokens — list shows the token, no plaintext

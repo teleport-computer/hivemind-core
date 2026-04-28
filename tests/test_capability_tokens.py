@@ -1,13 +1,9 @@
-"""Capability-token tests — query (hmq_) delegations only.
+"""Capability-token tests — query (hmq_) delegations.
 
 Verifies registry storage, the ``resolve_any`` dispatcher, and the
 constraint validation rules. Postgres-backed (re-uses the live DB the
 rest of the tenants suite needs); skips when
 ``HIVEMIND_TEST_DATABASE_URL`` is unreachable.
-
-Write tokens (``hmw_``) were removed: ``mint_capability`` only accepts
-``kind='query'``. Tests for the old INSERT-only SQL gate moved out
-together with the gate function.
 """
 
 from __future__ import annotations
@@ -270,7 +266,7 @@ def test_resolve_any_query_token(registry):
 
 def test_resolve_any_rejects_unknown_prefix(registry):
     assert registry.resolve_any("hmx_garbage") is None
-    assert registry.resolve_any("hmw_garbage") is None  # hmw_ retired
+    assert registry.resolve_any("hmw_garbage") is None
     assert registry.resolve_any("") is None
     assert registry.resolve_any("nope") is None
 

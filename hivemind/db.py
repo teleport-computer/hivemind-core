@@ -75,9 +75,14 @@ class Database:
                         max_llm_calls INTEGER NOT NULL DEFAULT 20,
                         max_tokens INTEGER NOT NULL DEFAULT 100000,
                         timeout_seconds INTEGER NOT NULL DEFAULT 120,
+                        inspection_mode TEXT NOT NULL DEFAULT 'full',
                         created_at DOUBLE PRECISION NOT NULL
                     )
                 """)
+                # `attestable=False` excludes a file from
+                # `attested_files_digest` (B's verification surface) while
+                # still binding it via image_digest. `ciphertext` carries
+                # sealed source when inspection_mode='sealed'.
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS _hivemind_agent_files (
                         agent_id TEXT NOT NULL,
@@ -105,38 +110,17 @@ class Database:
                         created_at DOUBLE PRECISION NOT NULL
                     )
                 """)
-                # Migrate _hivemind_agent_files: relax NOT NULL on
-                # legacy `content`, add ciphertext column.
-                try:
-                    cur.execute(
-                        "ALTER TABLE _hivemind_agent_files "
-                        "ALTER COLUMN content DROP NOT NULL"
-                    )
-                except Exception:
-                    pass
-                try:
-                    cur.execute(
-                        "ALTER TABLE _hivemind_agent_files "
-                        "ADD COLUMN IF NOT EXISTS ciphertext TEXT"
-                    )
-                except Exception:
-                    pass
-                # Per-file attestable flag: when False the file is excluded
-                # from `attested_files_digest` (B's verification surface) but
-                # still bound by image_digest (CVM still ran with it). Default
-                # TRUE = backwards-compatible (legacy rows fully attestable).
-                try:
-                    cur.execute(
-                        "ALTER TABLE _hivemind_agent_files "
-                        "ADD COLUMN IF NOT EXISTS attestable BOOLEAN "
-                        "NOT NULL DEFAULT TRUE"
-                    )
-                except Exception:
-                    pass
+                # `attestation` JSONB carries the CVM-signed run envelope
+                # ({body, signature_b64, signer_pubkey_b64}); base64
+                # wrappers travel cleanly over the SQL HTTP proxy.
+                # `issuer_token_id` is the 12-hex prefix of the bearer
+                # that issued the run (NULL for owner-initiated runs).
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS _hivemind_query_runs (
                         run_id TEXT PRIMARY KEY,
                         agent_id TEXT NOT NULL,
+                        scope_agent_id TEXT,
+                        index_agent_id TEXT,
                         status TEXT NOT NULL DEFAULT 'pending',
                         s3_url TEXT,
                         error TEXT,
@@ -150,8 +134,12 @@ class Database:
                         query_ended_at DOUBLE PRECISION,
                         mediator_started_at DOUBLE PRECISION,
                         mediator_ended_at DOUBLE PRECISION,
+                        index_started_at DOUBLE PRECISION,
+                        index_ended_at DOUBLE PRECISION,
                         output TEXT,
-                        attestation JSONB
+                        index_output TEXT,
+                        attestation JSONB,
+                        issuer_token_id TEXT
                     )
                 """)
                 cur.execute("""
@@ -169,59 +157,6 @@ class Database:
                     "CREATE INDEX IF NOT EXISTS _hivemind_query_artifacts_created_idx "
                     "ON _hivemind_query_artifacts (created_at)"
                 )
-                # Migrate existing tables: add columns if missing
-                for col, coltype in [
-                    ("build_started_at", "DOUBLE PRECISION"),
-                    ("build_ended_at", "DOUBLE PRECISION"),
-                    ("scope_started_at", "DOUBLE PRECISION"),
-                    ("scope_ended_at", "DOUBLE PRECISION"),
-                    ("query_started_at", "DOUBLE PRECISION"),
-                    ("query_ended_at", "DOUBLE PRECISION"),
-                    ("mediator_started_at", "DOUBLE PRECISION"),
-                    ("mediator_ended_at", "DOUBLE PRECISION"),
-                    ("output", "TEXT"),
-                    ("scope_agent_id", "TEXT"),
-                    ("index_agent_id", "TEXT"),
-                    ("index_started_at", "DOUBLE PRECISION"),
-                    ("index_ended_at", "DOUBLE PRECISION"),
-                    ("index_output", "TEXT"),
-                    # Phase 5: CVM-signed run records. Single JSONB
-                    # column holds {body, signature_b64, signer_pubkey_b64}
-                    # — base64 wrappers travel cleanly over the SQL HTTP
-                    # proxy where raw bytes wouldn't.
-                    ("attestation", "JSONB"),
-                    # Audit: short token id (12-hex prefix from
-                    # _capability_tokens) of the bearer that issued
-                    # this run. NULL for owner-initiated runs (no
-                    # capability row to point at).
-                    ("issuer_token_id", "TEXT"),
-                ]:
-                    try:
-                        cur.execute(
-                            f"ALTER TABLE _hivemind_query_runs "
-                            f"ADD COLUMN IF NOT EXISTS {col} {coltype}"
-                        )
-                    except Exception:
-                        pass  # column already exists
-                # Migrate _hivemind_agents: add agent_type if missing
-                try:
-                    cur.execute(
-                        "ALTER TABLE _hivemind_agents "
-                        "ADD COLUMN IF NOT EXISTS agent_type TEXT NOT NULL DEFAULT 'query'"
-                    )
-                except Exception:
-                    pass
-                # Phase 6: per-agent inspection contract. Default 'full'
-                # = legacy behaviour (A can read B's source). 'sealed'
-                # = source encrypted under enclave-only KMS key.
-                try:
-                    cur.execute(
-                        "ALTER TABLE _hivemind_agents "
-                        "ADD COLUMN IF NOT EXISTS inspection_mode "
-                        "TEXT NOT NULL DEFAULT 'full'"
-                    )
-                except Exception:
-                    pass
             self._conn.commit()
 
     def execute(self, sql: str, params: list | tuple | None = None) -> list[dict]:
@@ -308,6 +243,7 @@ class HttpDatabase:
                 max_llm_calls INTEGER NOT NULL DEFAULT 20,
                 max_tokens INTEGER NOT NULL DEFAULT 100000,
                 timeout_seconds INTEGER NOT NULL DEFAULT 120,
+                inspection_mode TEXT NOT NULL DEFAULT 'full',
                 created_at DOUBLE PRECISION NOT NULL
             )
             """,
@@ -336,18 +272,27 @@ class HttpDatabase:
             CREATE TABLE IF NOT EXISTS _hivemind_query_runs (
                 run_id TEXT PRIMARY KEY,
                 agent_id TEXT NOT NULL,
+                scope_agent_id TEXT,
+                index_agent_id TEXT,
                 status TEXT NOT NULL DEFAULT 'pending',
                 s3_url TEXT,
                 error TEXT,
                 created_at DOUBLE PRECISION NOT NULL,
                 updated_at DOUBLE PRECISION NOT NULL,
+                build_started_at DOUBLE PRECISION,
+                build_ended_at DOUBLE PRECISION,
                 scope_started_at DOUBLE PRECISION,
                 scope_ended_at DOUBLE PRECISION,
                 query_started_at DOUBLE PRECISION,
                 query_ended_at DOUBLE PRECISION,
                 mediator_started_at DOUBLE PRECISION,
                 mediator_ended_at DOUBLE PRECISION,
-                output TEXT
+                index_started_at DOUBLE PRECISION,
+                index_ended_at DOUBLE PRECISION,
+                output TEXT,
+                index_output TEXT,
+                attestation JSONB,
+                issuer_token_id TEXT
             )
             """,
             """
@@ -367,75 +312,6 @@ class HttpDatabase:
             """,
         ]:
             self.execute_commit(ddl)
-        # Migrate existing tables
-        for col, coltype in [
-            ("build_started_at", "DOUBLE PRECISION"),
-            ("build_ended_at", "DOUBLE PRECISION"),
-            ("scope_started_at", "DOUBLE PRECISION"),
-            ("scope_ended_at", "DOUBLE PRECISION"),
-            ("query_started_at", "DOUBLE PRECISION"),
-            ("query_ended_at", "DOUBLE PRECISION"),
-            ("mediator_started_at", "DOUBLE PRECISION"),
-            ("mediator_ended_at", "DOUBLE PRECISION"),
-            ("output", "TEXT"),
-            ("scope_agent_id", "TEXT"),
-            ("index_agent_id", "TEXT"),
-            ("index_started_at", "DOUBLE PRECISION"),
-            ("index_ended_at", "DOUBLE PRECISION"),
-            ("index_output", "TEXT"),
-            # Phase 5: CVM-signed run records (JSONB blob, base64-safe).
-            ("attestation", "JSONB"),
-            # Audit: 12-hex token id of issuer; NULL for owner runs.
-            ("issuer_token_id", "TEXT"),
-        ]:
-            try:
-                self.execute_commit(
-                    f"ALTER TABLE _hivemind_query_runs "
-                    f"ADD COLUMN IF NOT EXISTS {col} {coltype}"
-                )
-            except Exception:
-                pass
-        # Migrate _hivemind_agents: add agent_type if missing
-        try:
-            self.execute_commit(
-                "ALTER TABLE _hivemind_agents "
-                "ADD COLUMN IF NOT EXISTS agent_type TEXT NOT NULL DEFAULT 'query'"
-            )
-        except Exception:
-            pass
-        # Phase 6: per-agent inspection_mode (mirrors local Database).
-        try:
-            self.execute_commit(
-                "ALTER TABLE _hivemind_agents "
-                "ADD COLUMN IF NOT EXISTS inspection_mode "
-                "TEXT NOT NULL DEFAULT 'full'"
-            )
-        except Exception:
-            pass
-        # Migrate _hivemind_agent_files: relax NOT NULL on legacy
-        # `content`, add ciphertext column (mirrors local Database).
-        try:
-            self.execute_commit(
-                "ALTER TABLE _hivemind_agent_files "
-                "ALTER COLUMN content DROP NOT NULL"
-            )
-        except Exception:
-            pass
-        try:
-            self.execute_commit(
-                "ALTER TABLE _hivemind_agent_files "
-                "ADD COLUMN IF NOT EXISTS attestable BOOLEAN "
-                "NOT NULL DEFAULT TRUE"
-            )
-        except Exception:
-            pass
-        try:
-            self.execute_commit(
-                "ALTER TABLE _hivemind_agent_files "
-                "ADD COLUMN IF NOT EXISTS ciphertext TEXT"
-            )
-        except Exception:
-            pass
 
     def _check(self, resp) -> dict:
         if resp.status_code >= 400:

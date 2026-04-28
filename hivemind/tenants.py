@@ -227,7 +227,7 @@ class TenantRegistry:
         # Capability tokens. One row per delegated token; owner key stays
         # in _tenants. ON DELETE CASCADE so tenant deletion sweeps the
         # delegated tokens too. ``kind`` is kept in the schema but only
-        # ``'query'`` is accepted by mint after the hmw_ removal.
+        # ``'query'`` is accepted by mint.
         self._control_db.execute_commit(
             """
             CREATE TABLE IF NOT EXISTS _capability_tokens (
