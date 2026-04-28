@@ -173,31 +173,44 @@ echo "Stored records"
 
 ## 5) Query Data
 
+`/v1/query/run/submit` is tracked-async only — it returns a `run_id`
+immediately and the pipeline runs in the background. Poll via
+`GET /v1/agent-runs/{run_id}` until status is `completed` or `failed`.
+
 ### 5.1 Basic query
 
 ```bash
-api -X POST "$BASE/v1/query" \
+RUN_ID=$(api -X POST "$BASE/v1/query/run/submit" \
   -H "Content-Type: application/json" \
   -d "{
     \"query\": \"What technical decisions were made recently?\",
     \"query_agent_id\": \"$QUERY_AGENT\"
-  }" | jq
+  }" | jq -r '.run_id')
+
+# Poll until done
+while true; do
+  STATUS=$(api "$BASE/v1/agent-runs/$RUN_ID" | jq -r '.status')
+  [ "$STATUS" = "completed" ] || [ "$STATUS" = "failed" ] && break
+  sleep 2
+done
+api "$BASE/v1/agent-runs/$RUN_ID" | jq
 ```
 
-Example response:
+Submission response:
 
 ```json
 {
-  "output": "Two decisions were made: migrate payments to Stripe and switch internal APIs to gRPC.",
-  "mediated": false,
-  "usage": {"total_tokens": 8421, "max_tokens": 200000}
+  "run_id": "r_abc123def456",
+  "query_agent_id": "default-query",
+  "scope_agent_id": null,
+  "status": "pending"
 }
 ```
 
 ### 5.2 Query with explicit token cap
 
 ```bash
-api -X POST "$BASE/v1/query" \
+api -X POST "$BASE/v1/query/run/submit" \
   -H "Content-Type: application/json" \
   -d "{
     \"query\": \"Summarize decisions in one paragraph\",
@@ -307,7 +320,7 @@ MEDIATOR_ID=$(api -X POST "$BASE/v1/agents/upload" \
   -F "name=mediator-agent" \
   -F "archive=@mediator.tar.gz" | jq -r '.agent_id')
 
-api -X POST "$BASE/v1/query" \
+api -X POST "$BASE/v1/query/run/submit" \
   -H "Content-Type: application/json" \
   -d "{
     \"query\": \"What did the payments team decide?\",

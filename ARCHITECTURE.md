@@ -31,8 +31,9 @@ The app defines the schema. Hivemind-core protects the data.
 
 ```
 POST /v1/store         Raw SQL writes. App-defined schema.
-POST /v1/query         Query agent + scope agent → sandboxed pipeline → answer.
-                       Async variant: POST /v1/query/submit + GET /v1/query/runs/{id}.
+POST /v1/query/run/submit
+                       Query agent + scope agent → sandboxed pipeline → answer.
+                       Tracked async only; poll via GET /v1/agent-runs/{id}.
 POST /v1/index         Index agent processes document data → structured index.
 GET  /v1/health        Status, table count, version.
 
@@ -71,17 +72,19 @@ The core privacy mechanism. User submits a question + agent IDs. The pipeline:
 ```
   Client
     │
-    │  POST /v1/query {
+    │  POST /v1/query/run/submit {
     │    "query": "What are the trending topics this week?",
     │    "query_agent_id": "analytics-v1",
     │    "scope_agent_id": "aggregate-only"
     │  }
+    │  → { "run_id": "r_abc…", "status": "pending" }
     │
     ▼
-  Pipeline (scope → query → mediate)
+  Pipeline (scope → query → mediate) runs async, signs the result
     │
     ▼
-  Response: { "output": "Dance challenges are trending...", "mediated": true }
+  GET /v1/agent-runs/{run_id}
+  → { "status": "completed", "output": "Dance challenges are trending...", … }
 ```
 
 ---

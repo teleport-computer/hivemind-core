@@ -102,9 +102,14 @@ curl -X POST http://localhost:8100/v1/store \
 - `403` forbidden (capability token used outside its allowed scope)
 - `422` invalid request body
 
-### `POST /v1/query`
+### `POST /v1/query/run/submit`
 
-Run query pipeline: optional scope agent -> query agent -> optional mediator.
+Run the query pipeline: optional scope agent -> query agent -> optional
+mediator. Tracked-async only — synchronous `/v1/query` was removed
+because it could not survive the Phala gateway's 60s read timeout and
+never produced a Phase 5 signed envelope. Returns immediately with a
+`run_id`; the pipeline runs in the background and the completed
+`run_store` row carries an Ed25519 attestation signature.
 
 Accepts owner (`hmk_`) and query (`hmq_`) tokens. For query tokens the
 server **forces** `scope_agent_id` to the value bound at issue — any
@@ -131,7 +136,7 @@ The scope agent outputs `{"scope_fn": "def scope(sql, params, rows): ..."}` — 
 **Example**
 
 ```bash
-curl -X POST http://localhost:8100/v1/query \
+curl -X POST http://localhost:8100/v1/query/run/submit \
   -H "Authorization: Bearer $API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
@@ -145,11 +150,14 @@ curl -X POST http://localhost:8100/v1/query \
 
 ```json
 {
-  "output": "Two decisions were made: migrate payments to Stripe and switch internal APIs to gRPC.",
-  "mediated": false,
-  "usage": {"total_tokens": 12345, "max_tokens": 50000}
+  "run_id": "r_abc123def456",
+  "query_agent_id": "default-query",
+  "scope_agent_id": null,
+  "status": "pending"
 }
 ```
+
+Poll status with `GET /v1/agent-runs/{run_id}` (see below).
 
 **Common errors**
 - `400` no query agent configured, agent not found, invalid scope-agent output, scope function compilation error
@@ -157,47 +165,36 @@ curl -X POST http://localhost:8100/v1/query \
 - `403` forbidden (capability token used outside its allowed scope)
 - `422` validation errors (for example `max_tokens <= 0`)
 
-### `POST /v1/query/submit`
+### `GET /v1/agent-runs/{run_id}`
 
-Async variant of `/v1/query`. Returns immediately with a `run_id`; the
-pipeline runs in the background. Designed for the Phala gateway timeout
-(60s upstream) — long pipelines must use the async path.
-
-**Request body**: same as `POST /v1/query`. Auth: same (owner + query).
-
-**Response 200**
-
-```json
-{"run_id": "r_abc123def456", "status": "pending"}
-```
-
-### `GET /v1/query/runs/{run_id}`
-
-Poll an async run.
+Poll a tracked async run (query, query-agent submission, or any other
+run executed via `run_store`).
 
 **Response 200**
 
 ```json
 {
   "run_id": "r_abc123def456",
+  "agent_id": "abc123def456",
   "status": "completed",
   "output": "...",
-  "mediated": false,
-  "usage": {"total_tokens": 12345, "max_tokens": 50000},
-  "artifacts": [{"filename": "...", "url": "..."}]
+  "error": null,
+  "artifacts": [{"filename": "...", "size_bytes": 2431, "created_at": 0}],
+  "artifact_retention_seconds": 86400
 }
 ```
 
 `status` is one of `pending`, `running`, `completed`, `failed`. While
 `pending`/`running` the body lacks `output`. On `failed` the `error`
-field carries the failure reason.
+field carries the failure reason. Artifacts are downloaded via
+`GET /v1/query/runs/{run_id}/artifacts/{filename}`.
 
 ### `POST /v1/query-agents/submit`
 
-Capability-token-friendly variant of `/v1/agents/upload` + `/v1/query/submit`.
-A query-token holder uploads their own query agent tarball and immediately
-runs it through their token's bound scope agent. Tarball survives only
-for the run.
+Capability-token-friendly variant of `/v1/agents/upload` +
+`/v1/query/run/submit`. A query-token holder uploads their own query
+agent tarball and immediately runs it through their token's bound scope
+agent. Tarball survives only for the run.
 
 **Request**: `multipart/form-data` with `archive`, `name`, `query`, optional
 `description`, `max_tokens`. Auth: owner or query token.
@@ -710,6 +707,8 @@ Tools are role-dependent with different access levels:
 ## Python Client Example
 
 ```python
+import time
+
 import httpx
 
 BASE = "http://localhost:8100"
@@ -740,17 +739,24 @@ store_resp = client.post(
 store_resp.raise_for_status()
 print(store_resp.json())  # {"rows": [], "rowcount": 1}
 
-# Query
-query_resp = client.post(
-    "/v1/query",
+# Query (tracked-async — submit then poll)
+submit = client.post(
+    "/v1/query/run/submit",
     json={
         "query": "What decisions were made?",
         "query_agent_id": "default-query",
         "max_tokens": 50000,
     },
 )
-query_resp.raise_for_status()
+submit.raise_for_status()
+run_id = submit.json()["run_id"]
 
-print(query_resp.json()["output"])
-print(query_resp.json()["usage"])
+while True:
+    run = client.get(f"/v1/agent-runs/{run_id}").json()
+    if run["status"] in ("completed", "failed"):
+        break
+    time.sleep(2)
+
+print(run.get("output"))
+print(run.get("error"))
 ```

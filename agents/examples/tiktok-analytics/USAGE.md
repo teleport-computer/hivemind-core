@@ -194,8 +194,8 @@ curl -s -X POST "$CORE_URL/v1/agents/upload" \
   | python3 -m json.tool
 # → {"agent_id": "...", "name": "tiktok-analytics", "files_extracted": 3}
 
-# 之后通过 /v1/query/submit 指定 agent_id 执行
-curl -s -X POST "$CORE_URL/v1/query/submit" \
+# 之后通过 /v1/query/run/submit 指定 agent_id 执行
+curl -s -X POST "$CORE_URL/v1/query/run/submit" \
   -H "Content-Type: application/json" \
   -d '{
     "query": "Analyse TikTok watch history",

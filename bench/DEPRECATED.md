@@ -12,15 +12,14 @@ The benchmark exhausted its signal after 51 iterations. Further runs produce noi
 
 LEARNINGS next-step #2 is the pair-generation harness: `POST /v1/query/pair` runs two mediators with different `strictness` from the same scope output; a `_hivemind_preferences` table records the user's A/B choice. Preference data is what subsequent personalization work (L2 profile, DPO fine-tunes) needs.
 
-## Code here still works
+## Code here is stale
 
-Nothing in `bench/` is broken — the GAN loop, scenario definitions, red-team evolver, and LLM judge all run. If you need to re-validate a model change against adversarial queries later (e.g. "does the new scope prompt still defend 100% on PII after a refactor?"), run:
-
-```
-python -m bench.cli run --url <server> --scenario pii_redaction --rounds 1
-```
-
-Just treat results as a sanity check, not a leaderboard.
+`bench/runner.py` calls the synchronous `POST /v1/query` endpoint, which
+was removed in `3443e5e` (Phase 5.1) — every endpoint now goes through
+the tracked-async path `POST /v1/query/run/submit` + poll
+`GET /v1/agent-runs/{id}`. Anyone reviving this harness must port
+`runner.py:50` to the new flow. The GAN loop, scenario definitions,
+red-team evolver, and LLM judge are otherwise intact.
 
 ## Canonical results
 
