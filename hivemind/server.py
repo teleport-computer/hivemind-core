@@ -14,7 +14,7 @@ from uuid import uuid4
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse, Response
+from fastapi.responses import JSONResponse, Response
 from pydantic import ValidationError
 
 from .config import Settings
@@ -32,10 +32,6 @@ from .tenants import Caller, Role, TenantRegistry
 from .version import APP_VERSION
 
 logger = logging.getLogger(__name__)
-
-# Load UI HTML from file next to this module
-_UI_HTML_PATH = Path(__file__).with_name("ui.html")
-_UI_HTML = _UI_HTML_PATH.read_text(encoding="utf-8") if _UI_HTML_PATH.exists() else "<h1>UI not found</h1>"
 
 _IGNORED_TAR_TYPES = {
     tarfile.XHDTYPE,         # PAX extended header
@@ -2042,12 +2038,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         caller: Caller = Depends(requires_role("owner", "query")),
     ):
         return await asyncio.to_thread(caller.hive.health)
-
-    # ── Web UI ──
-
-    @app.get("/", response_class=HTMLResponse)
-    async def ui_page():
-        return _UI_HTML
 
     return app
 
