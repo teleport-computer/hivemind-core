@@ -261,7 +261,7 @@ maps to their data. The admin's copy of the original key is now worthless.
 
 Hand the bootstrap `hmk_...` to your user (out-of-band, e.g. 1Password).
 They rotate it, then use the rotated key as their normal bearer token
-against `/v1/query`, `/v1/store`, etc. Their data lives in an isolated
+against `/v1/query/run/submit`, `/v1/store`, etc. Their data lives in an isolated
 Postgres database (`tenant_t_abc123...`) that no other tenant — and, after
 rotation, not even you (the admin) — can read via this API.
 

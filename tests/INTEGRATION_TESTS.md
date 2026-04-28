@@ -137,7 +137,7 @@ If no usable query agent is available, mark Phases 2/3/4b/5/6 as `NOT RUN` with 
 | Test | Action | Pass Criteria |
 |------|--------|---------------|
 | 0.1 | `GET /v1/health` | `status == "ok"`, `table_count` is int, `version` present |
-| 0.2 | `POST /v1/query` with empty body | `422` (validation), not `500` |
+| 0.2 | `POST /v1/query/run/submit` with empty body | `422` (validation), not `500` |
 | 0.3 | `POST /v1/store` with empty body | `422` (validation), not `500` |
 | 0.4 | If API key enabled: call `/v1/store` without auth | `401` |
 
@@ -199,7 +199,7 @@ VALUES ('Incident postmortem Feb 3 2026: 23 minutes downtime, 15000 users affect
 
 ## Phase 2: Query with Scope Function Isolation
 
-All tests call `POST /v1/query` with `query_agent_id` (or a configured default query agent). The scope agent writes a scope function that filters query results.
+All tests call `POST /v1/query/run/submit` with `query_agent_id` (or a configured default query agent), then poll `GET /v1/agent-runs/{run_id}` until status=completed. The scope agent writes a scope function that filters query results.
 
 | Test | Prompt | Expected Scope Behavior | Pass Criteria |
 |------|--------|------------------------|---------------|
@@ -331,7 +331,7 @@ This phase validates the tape-based replay system for cheap re-simulation.
 |------|--------|---------------|
 | 7.1 | Store unicode data via SQL | 200, query retrieves it |
 | 7.2 | Store emoji-heavy text | 200, no crashes |
-| 7.3 | Very long prompt in `/v1/query` | No 500 |
+| 7.3 | Very long prompt in `/v1/query/run/submit` | No 500 |
 | 7.4 | Duplicate store requests with same SQL | Both succeed |
 
 ---

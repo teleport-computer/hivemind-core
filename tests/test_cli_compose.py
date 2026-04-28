@@ -333,8 +333,8 @@ def _bless_and_mint(runner, scheme: str = "http") -> str:
 
 def test_ask_accepts_valid_pin_rotation_uri(share_env):
     """A genuine pin-rotation URI passes verification (even though the
-    actual /v1/query call may then fail on missing query agent — we
-    only assert no pin error fires)."""
+    actual /v1/query/run/submit call may then fail on missing query
+    agent — we only assert no pin error fires)."""
     runner, *_ = share_env
     uri = _bless_and_mint(runner)
     result = runner.invoke(_cli_mod.cli, ["ask", uri, "hi"])

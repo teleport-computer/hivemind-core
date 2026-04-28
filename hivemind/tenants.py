@@ -62,7 +62,8 @@ class Caller:
     depends on role:
       - owner: ``{}``
       - query: ``{"scope_agent_id": <id>}`` — every query through this
-        token is forced to use this scope agent (enforced in /v1/query).
+        token is forced to use this scope agent (enforced in
+        /v1/query/run/submit).
     """
 
     tenant_id: str

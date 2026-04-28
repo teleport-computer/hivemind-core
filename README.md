@@ -189,7 +189,7 @@ auto-migrated to `~/.hivemind/profiles/default.yaml` on first use.
 Four HTTP endpoint groups, one enforcement primitive:
 
 - `POST /v1/store` — raw SQL writes against Postgres. The app owns the schema.
-- `POST /v1/query` (and `/v1/query/submit` for async runs) — runs the **scope → query → mediator** agent pipeline and returns the answer.
+- `POST /v1/query/run/submit` — runs the **scope → query → mediator** agent pipeline. Returns a `run_id`; poll `GET /v1/agent-runs/{run_id}` until the run completes. Completed rows carry an Ed25519-signed attestation envelope (Phase 5) so recipients can verify the output came from the expected enclave.
 - `POST /v1/index` — runs an index agent over documents and stores structured output.
 - `POST /v1/tokens` (and `GET /v1/scope-attest`) — mint / list / revoke delegated capability tokens; recipients verify their binding via scope-attest. See **[Capability tokens](#capability-tokens-delegated-query)** below.
 
@@ -255,7 +255,7 @@ that pins a specific scope agent:
 
 | Prefix | Kind | What the holder can do | What's pinned at issue |
 |---|---|---|---|
-| `hmq_…` | query | submit prompts via `/v1/query`, upload their own query agent, read scope-agent files for audit | exactly one **scope agent id** — every query is forced through it |
+| `hmq_…` | query | submit prompts via `/v1/query/run/submit`, upload their own query agent, read scope-agent files for audit | exactly one **scope agent id** — every query is forced through it |
 
 ```bash
 # Owner mints a query token bound to a scope agent (the recipient

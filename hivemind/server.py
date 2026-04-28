@@ -24,7 +24,6 @@ from .models import (
     IndexRequest,
     IndexResponse,
     QueryRequest,
-    QueryResponse,
     StoreRequest,
     StoreResponse,
 )
@@ -892,75 +891,66 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # Always overwrite — query tokens cannot bypass their bound scope.
         return req.model_copy(update={"scope_agent_id": bound})
 
-    @app.post(
-        "/v1/query",
-        response_model=QueryResponse,
-    )
-    async def query(
+    # ── Query submit (tracked async) ──
+    #
+    # The only query-execution endpoint. Synchronous ``POST /v1/query``
+    # was removed because (a) it doesn't survive the Phala gateway's
+    # 60s read timeout and (b) it never produced a Phase 5 signed
+    # envelope, so strict-default attestation silently degraded for
+    # every URI-based recipient call. Backed by the run_store table —
+    # completed rows carry an Ed25519 signature over the run body.
+    # Recipients poll status via ``GET /v1/agent-runs/{run_id}``.
+
+    @app.post("/v1/query/run/submit")
+    async def submit_query_run(
         req: QueryRequest,
         caller: Caller = Depends(requires_role("owner", "query")),
     ):
-        req = _force_scope_for_query_token(req, caller)
-        try:
-            return await caller.hive.pipeline.run_query(req)
-        except ValueError as e:
-            raise HTTPException(status_code=400, detail=str(e))
+        """Submit a query for tracked async processing.
 
-    # ── Async query (submit + poll) ──
-    # For deployments behind reverse proxies with short timeouts (e.g. Phala 60s).
-
-    _pending_queries: dict[str, dict] = {}
-
-    @app.post("/v1/query/submit")
-    async def submit_query(
-        req: QueryRequest,
-        caller: Caller = Depends(requires_role("owner", "query")),
-    ):
-        """Submit a query for async processing. Returns a run_id to poll."""
+        Identical contract to the legacy ``/v1/query/submit`` (returns a
+        ``run_id``) but routes through ``run_query_agent_tracked`` so the
+        completed run row carries a signed attestation envelope.
+        """
         req = _force_scope_for_query_token(req, caller)
         hm = caller.hive
+        query_agent_id = req.query_agent_id or hm.settings.default_query_agent
+        scope_agent_id = req.scope_agent_id or hm.settings.default_scope_agent
+        if not query_agent_id:
+            raise HTTPException(
+                400, "query_agent_id is required (no default configured)"
+            )
+
         run_id = uuid4().hex[:12]
-        _pending_queries[run_id] = {
-            "status": "running",
-            "result": None,
-            "error": None,
-            "tenant_id": hm.tenant_id,
-        }
-
-        async def _run():
-            try:
-                result = await hm.pipeline.run_query(req)
-                _pending_queries[run_id] = {
-                    "status": "completed",
-                    "result": result.model_dump(),
-                    "error": None,
-                    "tenant_id": hm.tenant_id,
-                }
-            except Exception as e:
-                _pending_queries[run_id] = {
-                    "status": "failed",
-                    "result": None,
-                    "error": str(e),
-                    "tenant_id": hm.tenant_id,
-                }
-
-        asyncio.create_task(_run())
-        return {"run_id": run_id, "status": "running"}
-
-    @app.get("/v1/query/runs/{run_id}")
-    async def get_query_status(
-        run_id: str,
-        caller: Caller = Depends(requires_role("owner", "query")),
-    ):
-        """Poll the status of an async query."""
-        entry = _pending_queries.get(run_id)
-        if not entry or entry.get("tenant_id") != caller.tenant_id:
-            raise HTTPException(404, "Query run not found")
-        payload = {k: v for k, v in entry.items() if k != "tenant_id"}
-        return JSONResponse(
-            content={"run_id": run_id, **payload},
-            headers={"Cache-Control": "no-cache, no-store"},
+        await asyncio.to_thread(
+            hm.run_store.create, run_id, query_agent_id,
+            scope_agent_id=scope_agent_id,
         )
+
+        asyncio.create_task(
+            hm.pipeline.run_query_agent_tracked(
+                agent_id=query_agent_id,
+                run_id=run_id,
+                run_store=hm.run_store,
+                artifact_store=hm.artifact_store,
+                artifact_retention_seconds=hm.settings.artifact_retention_seconds,
+                prompt=req.query,
+                scope_agent_id=scope_agent_id,
+                mediator_agent_id=req.mediator_agent_id,
+                max_tokens=req.max_tokens,
+                max_calls=req.max_llm_calls,
+                timeout_seconds=req.timeout_seconds,
+                model=req.model,
+                provider=req.provider,
+            )
+        )
+
+        return {
+            "run_id": run_id,
+            "query_agent_id": query_agent_id,
+            "scope_agent_id": scope_agent_id,
+            "status": "pending",
+        }
 
     @app.post(
         "/v1/index",
@@ -1677,7 +1667,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             # Default-false; owner sets `can_upload_query_agent=true`
             # explicitly via `tokens issue --can-upload-query-agent` to
             # cede execution surface to the recipient. Without it the
-            # token can only submit prompts via /v1/query.
+            # token can only submit prompts via /v1/query/run/submit.
             if not caller.constraints.get("can_upload_query_agent"):
                 raise HTTPException(
                     status_code=403,

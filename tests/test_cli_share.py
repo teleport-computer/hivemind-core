@@ -434,10 +434,10 @@ def test_ask_compose_pin_mismatch_aborts(share_env):
 
 
 def test_ask_with_query_agent_routes_to_upload(share_env, tmp_path, monkeypatch):
-    """Phase 4: ``ask --query-agent <dir>`` should not call /v1/query;
-    instead it packs the directory and routes through the upload+poll
-    helper. We stub the helper to assert routing without spinning up a
-    real container build."""
+    """Phase 4: ``ask --query-agent <dir>`` should not call
+    /v1/query/run/submit; instead it packs the directory and routes
+    through the upload+poll helper. We stub the helper to assert
+    routing without spinning up a real container build."""
     runner, _profile, scope_id, client, api_key = share_env
     r = client.post(
         "/v1/tokens",
@@ -497,9 +497,9 @@ def test_ask_query_agent_path_must_exist(share_env):
 
 def test_ask_with_no_pins_skips_pin_verification(share_env):
     """With pins absent, ``ask`` skips verification entirely and goes
-    straight to ``/v1/query``. We can't pin on exit code 0 (the test
-    pipeline has no query agent loaded), but we can confirm no
-    pin-mismatch error appeared in stderr."""
+    straight to ``/v1/query/run/submit``. We can't pin on exit code 0
+    (the test pipeline has no query agent loaded), but we can confirm
+    no pin-mismatch error appeared in stderr."""
     runner, profile, scope_id, client, api_key = share_env
     r = client.post(
         "/v1/tokens",

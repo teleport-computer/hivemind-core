@@ -186,13 +186,13 @@ class TestStore:
 class TestQuery:
     @pytest.mark.asyncio
     async def test_query_empty_body_422(self, client):
-        resp = await client.post("/v1/query", json={})
+        resp = await client.post("/v1/query/run/submit", json={})
         assert resp.status_code == 422
 
     @pytest.mark.asyncio
     async def test_query_no_agent_400(self, client):
         resp = await client.post(
-            "/v1/query", json={"query": "What happened?"}
+            "/v1/query/run/submit", json={"query": "What happened?"}
         )
         # No default query agent configured → 400
         assert resp.status_code == 400
@@ -200,7 +200,7 @@ class TestQuery:
     @pytest.mark.asyncio
     async def test_query_prompt_alias(self, client):
         resp = await client.post(
-            "/v1/query", json={"prompt": "What happened?"}
+            "/v1/query/run/submit", json={"prompt": "What happened?"}
         )
         # Should accept prompt as alias for query, still fail on no agent
         assert resp.status_code == 400

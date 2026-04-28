@@ -118,77 +118,106 @@ def _verify_run_attestation(
 # ── ask / query helpers ──
 
 
-def _query_sync(service: str, headers: dict, payload: dict) -> None:
+def _query_tracked(
+    service: str,
+    headers: dict,
+    payload: dict,
+    *,
+    expected_pubkey_b64: str | None = None,
+    expected_compose_hash: str | None = None,
+    strict_attestation: bool = True,
+    as_json: bool = False,
+    fetch: bool = False,
+    poll_seconds: int = 600,
+) -> None:
+    """Submit a query, poll the run row, verify the Phase 5 envelope.
+
+    POSTs to ``/v1/query/run/submit`` (the only async query path — the
+    legacy in-memory ``/v1/query/submit`` was removed because it never
+    produced a signed envelope and so silently bypassed strict-default
+    attestation). Polls ``/v1/agent-runs/{run_id}`` until the row
+    reaches ``completed`` or ``failed``, then hands off to
+    ``_emit_run_result`` which Ed25519-verifies the signed body and
+    pubkey-matches it against ``expected_pubkey_b64`` (sourced from
+    ``/v1/attestation`` on the recipient side).
+    """
     try:
         resp = _hpost(
-            f"{service}/v1/query",
+            f"{service}/v1/query/run/submit",
             json=payload,
             headers=headers,
-            timeout=120,
+            timeout=30,
         )
         resp.raise_for_status()
-    except httpx.ConnectError:
-        click.echo(f"Error: Cannot reach {service}", err=True)
-        raise SystemExit(1)
     except httpx.HTTPStatusError as e:
         click.echo(
             f"Error: {e.response.status_code}: {_api_error(e.response)}",
             err=True,
         )
         raise SystemExit(1)
-    except httpx.TimeoutException:
-        click.echo(
-            "Error: Query timed out. Try --async for long-running queries.",
-            err=True,
-        )
-        raise SystemExit(1)
-
-    result = resp.json()
-    click.echo(result.get("output", "No output"))
-    if result.get("mediated"):
-        click.echo("\n(mediated)", err=True)
-
-
-def _query_async(service: str, headers: dict, payload: dict) -> None:
-    try:
-        resp = _hpost(
-            f"{service}/v1/query/submit",
-            json=payload,
-            headers=headers,
-            timeout=30,
-        )
-        resp.raise_for_status()
     except httpx.RequestError as e:
         click.echo(f"Error: {e}", err=True)
         raise SystemExit(1)
 
     run_id = resp.json().get("run_id")
-    click.echo(f"Submitted (run: {run_id}). Polling...")
+    if not as_json:
+        click.echo(f"Submitted (run: {run_id}). Polling...")
 
-    for _ in range(120):
-        time.sleep(2)
+    deadline = time.monotonic() + poll_seconds
+    last_status = ""
+    while time.monotonic() < deadline:
         try:
             sr = _hget(
-                f"{service}/v1/query/runs/{run_id}",
+                f"{service}/v1/agent-runs/{run_id}",
                 headers=headers,
-                timeout=10,
+                timeout=15,
             )
+            if sr.status_code == 404:
+                time.sleep(2)
+                continue
             data = sr.json()
-            status = data.get("status", "")
-            if status == "completed":
-                result = data.get("result", {})
-                click.echo(result.get("output", "No output"))
-                if result.get("mediated"):
-                    click.echo("\n(mediated)", err=True)
-                return
-            if status == "failed":
-                click.echo(f"Error: {data.get('error', '?')}", err=True)
-                raise SystemExit(1)
         except httpx.RequestError:
-            pass
+            time.sleep(2)
+            continue
 
-    click.echo("Error: Query did not complete within timeout.", err=True)
-    raise SystemExit(1)
+        status = data.get("status", "")
+        if status != last_status and not as_json:
+            click.echo(f"  status: {status}")
+            last_status = status
+
+        if status == "completed":
+            _emit_run_result(
+                service, data, run_id,
+                as_json=as_json,
+                fetch=fetch,
+                expected_pubkey_b64=expected_pubkey_b64,
+                expected_compose_hash=expected_compose_hash,
+                strict_attestation=strict_attestation,
+            )
+            return
+        if status == "failed":
+            err = data.get("error") or "?"
+            if as_json:
+                click.echo(
+                    _json.dumps(
+                        {"status": "failed", "error": err, "run_id": run_id}
+                    )
+                )
+            else:
+                click.echo(f"Error: run failed: {err}", err=True)
+            raise SystemExit(4)
+
+        time.sleep(3)
+
+    if as_json:
+        click.echo(_json.dumps({"status": "timeout", "run_id": run_id}))
+    else:
+        click.echo(
+            f"Error: timed out after {poll_seconds}s. "
+            f"Check `hivemind runs {run_id}`.",
+            err=True,
+        )
+    raise SystemExit(5)
 
 
 # ── Approach A: run / runs / agents ──

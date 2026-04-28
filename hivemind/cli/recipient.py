@@ -17,8 +17,7 @@ from ._shared import (
     _artifact_url,
     _emit_run_result,
     _parse_hmq_uri,
-    _query_async,
-    _query_sync,
+    _query_tracked,
 )
 
 
@@ -187,16 +186,6 @@ def _archive_for_path(path: Path, name: str | None) -> tuple[bytes, str, str]:
 @click.argument("uri")
 @click.argument("question")
 @click.option(
-    "--sync",
-    "force_sync",
-    is_flag=True,
-    help=(
-        "Force synchronous /v1/query (60s gateway timeout). Default is "
-        "async submit+poll, which is the only mode that survives the "
-        "Phala gateway's nginx 60s read timeout for slow agent runs."
-    ),
-)
-@click.option(
     "--max-tokens",
     type=int,
     default=None,
@@ -279,7 +268,6 @@ def _archive_for_path(path: Path, name: str | None) -> tuple[bytes, str, str]:
 def ask(
     uri: str,
     question: str,
-    force_sync: bool,
     max_tokens: int | None,
     max_llm_calls: int | None,
     timeout_seconds: int | None,
@@ -513,8 +501,8 @@ def ask(
         # Phase 4: B-uploadable query agent. All trust pins above
         # (compose / files / pin envelope) have already been verified
         # against the URI; routing here just swaps the prompts-only
-        # /v1/query path for an upload+run cycle. The server gates
-        # this on the token's can_upload_query_agent constraint.
+        # /v1/query/run/submit path for an upload+run cycle. The server
+        # gates this on the token's can_upload_query_agent constraint.
         archive_bytes, archive_name, agent_name = _archive_for_path(
             query_agent_path, None
         )
@@ -574,18 +562,34 @@ def ask(
         payload["model"] = model
     if provider:
         payload["provider"] = provider
-    if force_sync:
-        _query_sync(service, headers, payload)
-    else:
-        _query_async(service, headers, payload)
+
+    # Phase 5: pull the live signer pubkey + compose_hash from
+    # /v1/attestation so _emit_run_result can verify the signed run
+    # body matches the same enclave the URI's pins authorised.
+    expected_pubkey: str | None = None
+    live_compose_hash: str | None = None
+    try:
+        ar = _hget(f"{service}/v1/attestation", timeout=15)
+        ar_body = ar.json() if ar.status_code < 400 else {}
+        att = (ar_body.get("attestation") or {})
+        expected_pubkey = att.get("run_signer_pubkey_b64") or None
+        live_compose_hash = (att.get("compose_hash") or "").lower() or None
+    except httpx.RequestError:
+        pass
+
+    _query_tracked(
+        service, headers, payload,
+        expected_pubkey_b64=expected_pubkey,
+        expected_compose_hash=live_compose_hash,
+        strict_attestation=not no_strict_attestation,
+        as_json=as_json,
+        poll_seconds=timeout_seconds or 600,
+    )
 
 
 @click.command("query")
 @click.argument("question")
 @click.option("--endpoint", default=None, help="Override service URL")
-@click.option(
-    "--async", "use_async", is_flag=True, help="Use async submit+poll"
-)
 @click.option(
     "--agent",
     "query_agent",
@@ -633,16 +637,25 @@ def ask(
         "'tinfoil' (requires HIVEMIND_TINFOIL_API_KEY on the server)."
     ),
 )
+@click.option(
+    "--no-strict-attestation",
+    "no_strict_attestation",
+    is_flag=True,
+    help=(
+        "Print run output even if the CVM-signed attestation envelope "
+        "is missing or invalid. Default: strict — abort with exit 6."
+    ),
+)
 def query_cmd(
     question: str,
     endpoint: str | None,
-    use_async: bool,
     query_agent: str | None,
     max_tokens: int | None,
     max_llm_calls: int | None,
     timeout_seconds: int | None,
     model: str | None,
     provider: str | None,
+    no_strict_attestation: bool,
 ):
     """Send a natural-language query to the hivemind service."""
     config = _load_config()
@@ -669,10 +682,24 @@ def query_cmd(
     if provider:
         payload["provider"] = provider
 
-    if use_async:
-        _query_async(service, headers, payload)
-    else:
-        _query_sync(service, headers, payload)
+    expected_pubkey: str | None = None
+    live_compose_hash: str | None = None
+    try:
+        ar = _hget(f"{service}/v1/attestation", timeout=15)
+        ar_body = ar.json() if ar.status_code < 400 else {}
+        att = (ar_body.get("attestation") or {})
+        expected_pubkey = att.get("run_signer_pubkey_b64") or None
+        live_compose_hash = (att.get("compose_hash") or "").lower() or None
+    except httpx.RequestError:
+        pass
+
+    _query_tracked(
+        service, headers, payload,
+        expected_pubkey_b64=expected_pubkey,
+        expected_compose_hash=live_compose_hash,
+        strict_attestation=not no_strict_attestation,
+        poll_seconds=timeout_seconds or 600,
+    )
 
 
 @click.command("run")
