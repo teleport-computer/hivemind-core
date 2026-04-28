@@ -15,7 +15,7 @@ header works for all of them:
 | Prefix | Kind | Scope |
 |---|---|---|
 | `hmk_…` | **tenant owner** | full access to the tenant's DB and pipeline; can mint capability tokens, rotate the key, and run every public endpoint |
-| `hmq_…` | **query capability** | only `/v1/query{,/submit}`, `/v1/query-agents/submit`, `/v1/agents/{id}/attest` (and the `/v1/scope-attest` alias), and read-access to the bound scope agent's source files. Every query is forced through one pinned `scope_agent_id` (the owner picked it at mint time — the holder cannot override) |
+| `hmq_…` | **query capability** | only `/v1/query/run/submit`, `/v1/query-agents/submit`, `/v1/agents/{id}/attest` (and the `/v1/scope-attest` wrapper), and read-access to the bound scope agent's source files. Every query is forced through one pinned `scope_agent_id` (the owner picked it at mint time — the holder cannot override) |
 | `<admin-key>` | **operator** | only `/v1/admin/tenants/*` (provision/list/delete/register tenants). Cannot read tenant data through this API |
 
 ```http
@@ -35,7 +35,6 @@ admin tenants create`. To mint capability tokens: `POST /v1/tokens` or
 
 - IDs (`agent_id`) are opaque strings (currently 12-char hex).
 - Most endpoints use JSON. `POST /v1/agents/upload` uses `multipart/form-data`.
-- `POST /v1/query` canonical field is `query`. `prompt` is still accepted as a deprecated alias.
 - Validation errors return `422` (Pydantic/FastAPI). Runtime errors return `400`/`404`/`503`/`500` with `{"detail": ...}`.
 - `503 sealed`: tenant agent files are encrypted at rest under a per-tenant DEK wrapped by the owner's `hmk_` key. The DEK cache lives only in process memory, so a CVM restart wipes it. Capability-token (`hmq_`) requests that need to read encrypted data return `503` with `detail: "Tenant is sealed: ..."` until the owner makes any authenticated request and re-thaws the cache. See [ARCHITECTURE.md § Tenant Seal](ARCHITECTURE.md#tenant-seal-application-layer-encryption).
 
@@ -117,7 +116,6 @@ cannot bypass its gatekeeper.
 | Field | Type | Required | Notes |
 |---|---|---|---|
 | `query` | string | yes | Canonical field, min length 1 |
-| `prompt` | string | no | Deprecated alias; used only if `query` missing/blank |
 | `query_agent_id` | string | no | Required unless default query agent configured |
 | `scope_agent_id` | string | no | Scope agent writes a scope function for result filtering. **Ignored for `hmq_` tokens** (server overrides with the bound id) |
 | `mediator_agent_id` | string | no | Optional output auditing/filtering |
@@ -209,10 +207,6 @@ for the run.
 ```json
 {"run_id": "r_xxxx", "agent_id": "abc123def456", "status": "pending"}
 ```
-
-### `GET /v1/query-agents/runs/{run_id}` / `GET /v1/query-agents/runs`
-
-Same lifecycle as `/v1/query/runs/...` for agent-submission runs.
 
 ### `POST /v1/index`
 
@@ -429,8 +423,9 @@ the scope agent the token is bound to; other ids return `404`).
 
 ### `GET /v1/scope-attest`
 
-**Alias** for `GET /v1/agents/{agent_id}/attest`, used by the share/ask
-flow when a query-token holder doesn't have a profile or known agent id.
+**Wrapper** around `GET /v1/agents/{agent_id}/attest`, used by the
+share/ask flow when a query-token holder doesn't have a profile or
+known agent id.
 The response preserves the legacy top-level `scope_agent_id` key in
 addition to the canonical `agent_id`.
 

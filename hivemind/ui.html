@@ -392,15 +392,9 @@ function startPolling(runId) {
 
 async function pollRun(runId) {
   try {
-    let d;
     const resp = await fetch('/v1/agent-runs/' + runId, {headers: headers()});
-    if (resp.ok) {
-      d = await resp.json();
-    } else {
-      const resp2 = await fetch('/v1/query-agents/runs/' + runId, {headers: headers()});
-      if (!resp2.ok) return;
-      d = await resp2.json();
-    }
+    if (!resp.ok) return;
+    const d = await resp.json();
     updateStages(d);
     updateRunInHistory(d);
     if (d.status === 'completed' || d.status === 'failed') {
@@ -537,14 +531,9 @@ async function viewRun(runId) {
   $('agent-badges').innerHTML = '';
   resetBars();
   try {
-    let d;
     const resp = await fetch('/v1/agent-runs/' + runId, {headers: headers()});
-    if (resp.ok) { d = await resp.json(); }
-    else {
-      const resp2 = await fetch('/v1/query-agents/runs/' + runId, {headers: headers()});
-      if (!resp2.ok) return;
-      d = await resp2.json();
-    }
+    if (!resp.ok) return;
+    const d = await resp.json();
     showAgentBadges(d.agent_id, d.scope_agent_id, d.index_agent_id);
     updateStages(d);
     if (d.status === 'completed' || d.status === 'failed') { showResult(d); }
@@ -560,10 +549,6 @@ renderHistory();
     let runs = [];
     const resp = await fetch('/v1/agent-runs?limit=20', {headers: headers()});
     if (resp.ok) { const d = await resp.json(); if (Array.isArray(d)) runs = d; }
-    if (!runs.length) {
-      const resp2 = await fetch('/v1/query-agents/runs?limit=20', {headers: headers()});
-      if (resp2.ok) { const d2 = await resp2.json(); if (Array.isArray(d2)) runs = d2; }
-    }
     if (runs.length) {
       const hist = getHistory();
       for (const r of runs) {

@@ -60,7 +60,7 @@ export RUN_ID="a1b2c3d4e5f6"  # 替换为实际返回值
 ### Step 3: 轮询任务状态
 
 ```bash
-curl -s "$CORE_URL/v1/query-agents/runs/$RUN_ID" | python3 -m json.tool
+curl -s "$CORE_URL/v1/agent-runs/$RUN_ID" | python3 -m json.tool
 ```
 
 **状态流转：** `pending` → `running` → `completed` / `failed`
@@ -112,7 +112,7 @@ curl -s "$CORE_URL/v1/query/runs/$RUN_ID/artifacts/report.json" -o report.json
 
 ```bash
 while true; do
-  STATUS=$(curl -s "$CORE_URL/v1/query-agents/runs/$RUN_ID")
+  STATUS=$(curl -s "$CORE_URL/v1/agent-runs/$RUN_ID")
   echo "$STATUS" | python3 -m json.tool
 
   S=$(echo "$STATUS" | python3 -c "import sys,json; print(json.load(sys.stdin)['status'])")

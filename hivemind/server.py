@@ -1940,38 +1940,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             except Exception:
                 pass
 
-    @app.get("/v1/query-agents/runs/{run_id}")
-    async def get_query_run(
-        run_id: str,
-        caller: Caller = Depends(requires_role("owner", "query")),
-    ):
-        """Get the status and result of a query agent run."""
-        hm = caller.hive
-        run = await asyncio.to_thread(hm.run_store.get, run_id)
-        if not run:
-            raise HTTPException(404, "Run not found")
-        run["artifacts"] = await asyncio.to_thread(
-            hm.artifact_store.list_for_run, run_id
-        )
-        run["artifact_retention_seconds"] = hm.settings.artifact_retention_seconds
-        return JSONResponse(
-            content=run,
-            headers={"Cache-Control": "no-cache, no-store"},
-        )
-
-    # ── List recent runs ──
-
-    @app.get("/v1/query-agents/runs")
-    async def list_query_runs(
-        limit: int = 20,
-        caller: Caller = Depends(requires_role("owner", "query")),
-    ):
-        """List recent query agent runs."""
-        return await asyncio.to_thread(
-            caller.hive.run_store.list_recent, min(limit, 100)
-        )
-
-    # ── Unified run status ──
+    # ── Run status / list ──
 
     @app.get("/v1/agent-runs/{run_id}")
     async def get_agent_run(
