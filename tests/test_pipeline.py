@@ -92,7 +92,7 @@ class TestRunQuery:
     async def test_scope_agent_not_found(self, pg_db):
         pipeline = _make_pipeline(pg_db)
         req = QueryRequest(
-            prompt="What?",
+            query="What?",
             query_agent_id="q1",
             scope_agent_id="nonexistent",
         )
@@ -126,7 +126,7 @@ class TestRunQuery:
         monkeypatch.setattr(pipeline_module, "SandboxBackend", FakeBackend)
 
         req = QueryRequest(
-            prompt="What?",
+            query="What?",
             query_agent_id="q1",
             scope_agent_id="scope-returns",
         )
@@ -162,7 +162,7 @@ class TestRunQuery:
         monkeypatch.setattr(pipeline_module, "SandboxBackend", FakeBackend)
 
         req = QueryRequest(
-            prompt="What?",
+            query="What?",
             query_agent_id="q1",
             scope_agent_id="scope-rejects",
         )
