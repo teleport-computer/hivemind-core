@@ -135,6 +135,21 @@ def agents_rm(agent_id: str, as_json: bool):
     "``attested_files_digest`` so a recipient can verify the public "
     "agent code without holding the private file. Repeatable.",
 )
+@click.option(
+    "--inspection-mode",
+    type=click.Choice(["full", "sealed"]),
+    default="full",
+    show_default=True,
+    help=(
+        "Privacy contract for the uploaded agent. 'full' (legacy) — owner "
+        "can read source via /v1/agents/{id}/files. 'sealed' — bytes "
+        "encrypted under an enclave-only KMS key; only the running CVM "
+        "can decrypt. Image digest + attested file list still bind the "
+        "workload either way. Query agents uploaded via "
+        "/v1/query-agents/submit inherit the bound scope agent's mode "
+        "and cannot override here."
+    ),
+)
 @click.option("--json", "as_json", is_flag=True, help="Emit JSON on stdout")
 def agents_upload(
     path: Path,
@@ -142,6 +157,7 @@ def agents_upload(
     name: str | None,
     description: str,
     private_paths: tuple[str, ...],
+    inspection_mode: str,
     as_json: bool,
 ):
     """Upload an arbitrary directory or .tar.gz to /v1/agents/upload.
@@ -189,6 +205,7 @@ def agents_upload(
                 "description": description
                 or f"hivemind agents upload {path.name}",
                 "private_paths": _json.dumps(list(private_paths)),
+                "inspection_mode": inspection_mode,
             },
             headers=headers,
             timeout=60,

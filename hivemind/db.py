@@ -190,6 +190,11 @@ class Database:
                     # — base64 wrappers travel cleanly over the SQL HTTP
                     # proxy where raw bytes wouldn't.
                     ("attestation", "JSONB"),
+                    # Audit: short token id (12-hex prefix from
+                    # _capability_tokens) of the bearer that issued
+                    # this run. NULL for owner-initiated runs (no
+                    # capability row to point at).
+                    ("issuer_token_id", "TEXT"),
                 ]:
                     try:
                         cur.execute(
@@ -380,6 +385,8 @@ class HttpDatabase:
             ("index_output", "TEXT"),
             # Phase 5: CVM-signed run records (JSONB blob, base64-safe).
             ("attestation", "JSONB"),
+            # Audit: 12-hex token id of issuer; NULL for owner runs.
+            ("issuer_token_id", "TEXT"),
         ]:
             try:
                 self.execute_commit(

@@ -155,10 +155,29 @@ def init(service: str, api_key: str):
     help="Upload the file as the entire scope prompt (no public template). "
     "Uses agents/private-default-scope; prompt content stays TEE-resident.",
 )
+@click.option(
+    "--inspection-mode",
+    type=click.Choice(["full", "sealed"]),
+    default="full",
+    show_default=True,
+    help=(
+        "Privacy contract for this scope agent (and any query agents "
+        "uploaded against it via /v1/query-agents/submit, which inherit "
+        "this mode):\n"
+        "  full   — anyone holding an owner token can read source via "
+        "/v1/agents/{id}/files. Image digest + attested file list bind "
+        "the workload, but plaintext is owner-readable.\n"
+        "  sealed — bytes encrypted under an enclave-only KMS key bound "
+        "to this CVM's compose_hash. Even the owner can't read the "
+        "plaintext; only the running enclave can decrypt. Image digest "
+        "+ attested file list still bind the workload."
+    ),
+)
 def scope(
     rules: str | None,
     from_file: Path | None,
     private_prompt: Path | None,
+    inspection_mode: str,
 ):
     """Upload a scope agent with English privacy rules.
 
@@ -242,6 +261,7 @@ def scope(
                 "agent_type": "scope",
                 "description": description,
                 "private_paths": private_paths_json,
+                "inspection_mode": inspection_mode,
             },
             headers=headers,
             timeout=30,

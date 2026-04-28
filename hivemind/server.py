@@ -185,16 +185,17 @@ def _safe_extract_tar(
 
 
 def _validate_inspection_mode(mode: str) -> str:
-    """Coerce/validate an upload-side ``inspection_mode`` form field.
+    """Coerce/validate an owner-side ``inspection_mode`` form field.
 
-    Returns the normalized mode (``"full"`` or ``"sealed"``). Raises
-    HTTPException(400) when unsupported, or HTTPException(400) when the
-    requested mode isn't in the room's ``accepted_inspection_modes``
-    policy. Sealed mode additionally requires the enclave-only KMS key
-    to be available; missing key → HTTPException(503).
+    Inspection policy is per-agent: A picks ``full`` or ``sealed`` once,
+    when uploading the scope agent. Uploaded query agents (B's path)
+    inherit the bound scope agent's mode — they don't get to pick.
+
+    Returns the normalized mode. Raises HTTPException(400) on unknown
+    value, or HTTPException(503) when ``sealed`` is requested but the
+    enclave-only KMS key isn't available.
     """
     from . import agent_seal as _aseal
-    from . import attestation as _att
 
     m = (mode or "full").strip().lower() or "full"
     if m not in {"full", "sealed"}:
@@ -205,24 +206,13 @@ def _validate_inspection_mode(mode: str) -> str:
                 f"(got {mode!r})"
             ),
         )
-    accepted = _att._accepted_inspection_modes()
-    if m not in accepted:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"inspection_mode={m!r} is not accepted by this room "
-                f"(accepted: {sorted(accepted)}). The room owner sets "
-                f"this policy via HIVEMIND_ACCEPTED_INSPECTION_MODES."
-            ),
-        )
     if m == "sealed" and not _aseal.is_available():
         raise HTTPException(
             status_code=503,
             detail=(
                 "sealed inspection_mode requires a live dstack-KMS "
                 "connection; the agent_seal key is not currently "
-                "available. Retry once attestation is healthy or fall "
-                "back to 'full'."
+                "available."
             ),
         )
     return m
@@ -969,6 +959,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         await asyncio.to_thread(
             hm.run_store.create, run_id, query_agent_id,
             scope_agent_id=scope_agent_id,
+            issuer_token_id=(caller.token_id or None),
         )
 
         asyncio.create_task(
@@ -1265,8 +1256,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # secret prompts, .env). Excluded from attested_files_digest;
         # still bound by image_digest. Defaults to []  (all attestable).
         private_paths: str = Form("[]"),
-        # 'full' (legacy) or 'sealed'. Must be in this room's
-        # accepted_inspection_modes; sealed needs KMS available.
+        # 'full' (legacy) or 'sealed'. Sealed needs KMS available.
         inspection_mode: str = Form("full"),
         hm: Hivemind = Depends(get_tenant_hive),
     ):
@@ -1734,15 +1724,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # server to have HIVEMIND_TINFOIL_API_KEY configured.
         model: str | None = Form(None),
         provider: str | None = Form(None),
-        # Recipient-chosen inspection_mode for THIS uploaded query agent.
-        # Must be in the room's accepted_inspection_modes (visible via
-        # /v1/attestation). 'sealed' encrypts files under the
-        # enclave-only KMS key so even the room owner can't read source.
-        inspection_mode: str = Form("full"),
         caller: Caller = Depends(requires_role("owner", "query")),
     ):
-        """Upload query agent source, create a run record, and kick off execution."""
-        validated_mode = _validate_inspection_mode(inspection_mode)
+        """Upload query agent source, create a run record, and kick off execution.
+
+        The uploaded query agent inherits its inspection_mode from the
+        bound scope agent: in a sealed room, the query agent is sealed;
+        in a full room, full. B doesn't pick — A's scope-agent policy
+        is the contract.
+        """
         # Query-token callers cannot pick their own scope agent — pin it
         # to the one the owner bound the token to.
         if caller.role == "query":
@@ -1762,6 +1752,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 )
             scope_agent_id = caller.constraints.get("scope_agent_id") or ""
         hm = caller.hive
+
+        # Inherit inspection_mode from the bound scope agent. The mode
+        # is part of A's pre-committed contract (visible via
+        # /v1/scope-attest); B's CLI shows it before upload and aborts
+        # if B doesn't accept. A scope agent's mode is non-overridable
+        # at upload time — that's the whole point of binding it to A's
+        # scope-agent attestation.
+        scope_cfg = None
+        if scope_agent_id:
+            scope_cfg = await asyncio.to_thread(
+                hm.agent_store.get, scope_agent_id,
+            )
+        inherited_mode = (
+            getattr(scope_cfg, "inspection_mode", "full") or "full"
+        )
+        validated_mode = _validate_inspection_mode(inherited_mode)
+
         try:
             content = await _read_upload_bytes_limited(
                 archive, max_bytes=MAX_UPLOAD_SIZE,
@@ -1779,7 +1786,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # Create run record immediately, return fast
         agent_id = uuid4().hex[:12]
         run_id = uuid4().hex[:12]
-        await asyncio.to_thread(hm.run_store.create, run_id, agent_id)
+        await asyncio.to_thread(
+            hm.run_store.create, run_id, agent_id,
+            issuer_token_id=(caller.token_id or None),
+        )
 
         # Everything else runs in background
         asyncio.create_task(
@@ -1985,11 +1995,37 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/v1/agent-runs")
     async def list_agent_runs(
         limit: int = 20,
+        token_id: str | None = None,
         caller: Caller = Depends(requires_role("owner", "query")),
     ):
-        """List recent agent runs."""
+        """List recent agent runs.
+
+        ``token_id`` (owner-only): filter to runs initiated by a single
+        capability token. Pass the 12-hex prefix returned by
+        ``/v1/tokens`` (or ``hivemind tokens list``). Lets A audit
+        per-token activity without leaking the raw bearer.
+        Query-token callers can't pass this — their view is implicitly
+        scoped to the runs they themselves initiated, but listing other
+        tokens' activity is owner-only.
+        """
+        capped = min(limit, 100)
+        if token_id:
+            tid = token_id.strip().lower()
+            if caller.role != "owner":
+                raise HTTPException(
+                    status_code=403,
+                    detail="token_id filter is owner-only",
+                )
+            if not tid or len(tid) < 6:
+                raise HTTPException(
+                    status_code=400,
+                    detail="token_id must be at least 6 hex chars",
+                )
+            return await asyncio.to_thread(
+                caller.hive.run_store.list_by_token, tid, capped,
+            )
         return await asyncio.to_thread(
-            caller.hive.run_store.list_recent, min(limit, 100)
+            caller.hive.run_store.list_recent, capped,
         )
 
     # ── Artifact fetch (Postgres-backed; no S3) ──

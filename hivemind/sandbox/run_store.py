@@ -20,7 +20,7 @@ _COLUMNS = (
     "mediator_started_at, mediator_ended_at, "
     "index_started_at, index_ended_at, index_output, "
     "scope_agent_id, index_agent_id, "
-    "output, attestation"
+    "output, attestation, issuer_token_id"
 )
 
 
@@ -37,21 +37,32 @@ class RunStore:
         *,
         scope_agent_id: str | None = None,
         index_agent_id: str | None = None,
+        issuer_token_id: str | None = None,
     ) -> dict:
-        """Create a new run record with status=pending."""
+        """Create a new run record with status=pending.
+
+        ``issuer_token_id`` is the 12-hex prefix of the capability
+        token that initiated this run (None for owner-initiated runs).
+        Stored so A can audit "which hmq_ token did what" via
+        ``GET /v1/agent-runs?token_id=…``.
+        """
         now = time.time()
         self.db.execute_commit(
             "INSERT INTO _hivemind_query_runs "
             "(run_id, agent_id, scope_agent_id, index_agent_id, "
-            "status, created_at, updated_at) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s)",
-            [run_id, agent_id, scope_agent_id, index_agent_id, "pending", now, now],
+            "issuer_token_id, status, created_at, updated_at) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+            [
+                run_id, agent_id, scope_agent_id, index_agent_id,
+                issuer_token_id, "pending", now, now,
+            ],
         )
         return {
             "run_id": run_id,
             "agent_id": agent_id,
             "scope_agent_id": scope_agent_id,
             "index_agent_id": index_agent_id,
+            "issuer_token_id": issuer_token_id,
             "status": "pending",
             "error": None,
             "created_at": now,
@@ -178,4 +189,21 @@ class RunStore:
             f"SELECT {_COLUMNS} FROM _hivemind_query_runs "
             "ORDER BY created_at DESC LIMIT %s",
             [limit],
+        )
+
+    def list_by_token(
+        self, issuer_token_id: str, limit: int = 50,
+    ) -> list[dict]:
+        """List runs initiated by a given capability token, newest first.
+
+        Used by the owner-side audit endpoint
+        (``GET /v1/agent-runs?token_id=…``) so A can see what each
+        ``hmq_`` token they minted has actually done. The token_id is
+        the 12-hex prefix from ``_capability_tokens``.
+        """
+        return self.db.execute(
+            f"SELECT {_COLUMNS} FROM _hivemind_query_runs "
+            "WHERE issuer_token_id = %s "
+            "ORDER BY created_at DESC LIMIT %s",
+            [issuer_token_id, limit],
         )

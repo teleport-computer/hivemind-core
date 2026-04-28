@@ -166,30 +166,6 @@ def _app_auth_metadata() -> dict[str, Any]:
     }
 
 
-def _accepted_inspection_modes() -> list[str]:
-    """Parse HIVEMIND_ACCEPTED_INSPECTION_MODES into a deduplicated list.
-
-    Unknown values are dropped; an empty result falls back to ['full'].
-    The result is what B's CLI sees in /v1/attestation as the room's
-    inspection menu — bound to compose_hash because the env var is
-    part of the compose definition.
-    """
-    from .config import Settings
-
-    valid = {"full", "sealed"}
-    try:
-        cfg = Settings()
-    except Exception:
-        return ["full"]
-    raw = (cfg.accepted_inspection_modes or "").strip()
-    items = [m.strip().lower() for m in raw.split(",") if m.strip()]
-    out: list[str] = []
-    for m in items:
-        if m in valid and m not in out:
-            out.append(m)
-    return out or ["full"]
-
-
 def bootstrap() -> None:
     """Fetch the quote + measurement registers once at startup.
 
@@ -325,12 +301,6 @@ def bootstrap() -> None:
             "run_signer_key_path": (
                 "hivemind-runs-v1" if run_signer_pub_b64 else ""
             ),
-            # Phase 6: room-level inspection policy. Recipient (B) reads
-            # this BEFORE uploading an agent: it tells them what modes
-            # the room accepts ('full' = A reads source, 'sealed' = no
-            # one can read source after upload). Bound by compose_hash
-            # via HIVEMIND_ACCEPTED_INSPECTION_MODES env var.
-            "accepted_inspection_modes": _accepted_inspection_modes(),
         }
         # Stash cert/key for the server to consume — server.py reads
         # these and passes them to uvicorn.

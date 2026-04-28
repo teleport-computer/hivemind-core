@@ -90,20 +90,6 @@ class Settings(BaseSettings):
     app_auth_rpc_url: str = "https://ethereum-sepolia-rpc.publicnode.com"
     app_auth_explorer_base_url: str = "https://sepolia.etherscan.io"
 
-    # Phase 6: room-level inspection policy. Comma-separated set of
-    # modes A's room accepts for B-uploaded query agents:
-    #   "full"   — A can read B's source via /v1/agents/{id}/files/
-    #   "sealed" — bytes are encrypted under a KMS-derived enclave key
-    #              that no token (incl. A's hmk_) can release; the
-    #              files endpoint refuses to serve them. Image digest
-    #              + file list are still attested.
-    # Default "full" preserves legacy behaviour. Add "sealed" to offer
-    # B-private uploads. The set is part of compose (env var) → bound
-    # by compose_hash → surfaced in /v1/attestation so B verifies the
-    # offered set BEFORE upload. B picks among the offered modes or
-    # walks away — A always sets the menu, B never forces a mode.
-    accepted_inspection_modes: str = "full"
-
     # Default agents (Docker images) — empty = not available
     autoload_default_agents: bool = True
     default_index_agent: str = ""

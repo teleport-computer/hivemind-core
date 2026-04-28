@@ -148,6 +148,64 @@ def tokens_list(as_json: bool):
         )
 
 
+@tokens_cli.command("audit")
+@click.argument("token_id")
+@click.option(
+    "--limit",
+    type=int,
+    default=50,
+    show_default=True,
+    help="Max rows to show.",
+)
+@click.option("--json", "as_json", is_flag=True, help="Emit JSON on stdout")
+def tokens_audit(token_id: str, limit: int, as_json: bool):
+    """Show what a recipient hmq_ token has actually done.
+
+    Lists every run initiated by the given token (12-hex prefix from
+    ``hivemind tokens list``). Owner-only.
+    """
+    config = _load_config()
+    service = config["service"]
+    headers = _headers(config)
+    if "Authorization" not in headers:
+        click.echo("Error: no api_key in config. Run 'hivemind init'.", err=True)
+        raise SystemExit(1)
+    tid = (token_id or "").strip().lower()
+    if len(tid) < 6:
+        click.echo("Error: token_id must be at least 6 hex chars.", err=True)
+        raise SystemExit(2)
+    from urllib.parse import quote as _quote
+    url = (
+        f"{service}/v1/agent-runs?limit={limit}&token_id={_quote(tid)}"
+    )
+    try:
+        resp = _hget(url, headers=headers, timeout=30)
+    except httpx.RequestError as e:
+        click.echo(f"Error: {e}", err=True)
+        raise SystemExit(2)
+    if resp.status_code >= 400:
+        click.echo(f"Error {resp.status_code}: {_api_error(resp)}", err=True)
+        raise SystemExit(3)
+    rows = resp.json()
+    if as_json:
+        click.echo(_json.dumps(rows, indent=2, default=str))
+        return
+    if not rows:
+        click.echo(f"(no runs initiated by token {tid})")
+        return
+    click.echo(f"Runs initiated by token {tid}:")
+    click.echo(
+        f"{'RUN_ID':<14} {'AGENT_ID':<14} {'STATUS':<10} CREATED"
+    )
+    for r in rows:
+        click.echo(
+            f"{r.get('run_id','?'):<14} "
+            f"{r.get('agent_id','?'):<14} "
+            f"{str(r.get('status','?')):<10} "
+            f"{r.get('created_at','')}"
+        )
+
+
 @tokens_cli.command("revoke")
 @click.argument("token_id")
 @click.option("--json", "as_json", is_flag=True, help="Emit JSON on stdout")

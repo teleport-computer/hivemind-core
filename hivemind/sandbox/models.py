@@ -17,12 +17,12 @@ class AgentConfig(BaseModel):
     max_llm_calls: int = Field(default=20, ge=1)
     max_tokens: int = Field(default=100_000, ge=1)
     timeout_seconds: int = Field(default=120, ge=1)
-    # Phase 6: per-agent inspection contract.
-    #   "full"   — A's owner token can read source via files endpoint.
+    # Per-agent inspection contract. Picked once at upload; query
+    # agents inherit from their bound scope agent.
+    #   "full"   — owner token can read source via files endpoint.
     #   "sealed" — bytes encrypted under enclave-only KMS key; files
-    #              endpoint refuses plaintext to anyone, image digest
-    #              + file list are still attested. B picks at upload
-    #              from the room's accepted_inspection_modes.
+    #              endpoint refuses plaintext to anyone. Image digest
+    #              + attested file list still bind the workload.
     inspection_mode: str = "full"
 
 
