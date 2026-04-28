@@ -208,7 +208,9 @@ class SandboxBackend:
             if store is not None:
                 try:
                     files = await asyncio.to_thread(
-                        store.get_files, agent.agent_id,
+                        lambda: store.get_files(
+                            agent.agent_id, allow_sealed=True,
+                        ),
                     )
                 except Exception as e:
                     logger.warning(
