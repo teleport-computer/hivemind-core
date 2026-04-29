@@ -365,9 +365,16 @@ def rooms_cli():
     "llm_providers",
     multiple=True,
     default=("tinfoil",),
-    help="Allowed LLM provider. Repeat for multiple. Use --no-llm for none.",
+    help=(
+        "Allowed LLM provider. Repeat for multiple. "
+        "Dynamic rooms need at least one unless --no-llm is intentional."
+    ),
 )
-@click.option("--no-llm", is_flag=True, help="Disable external LLM egress.")
+@click.option(
+    "--no-llm",
+    is_flag=True,
+    help="Disable bridge LLM egress for pinned non-LLM agents.",
+)
 @click.option("--allow-artifacts", is_flag=True, help="Allow artifact uploads.")
 @click.option(
     "--trust-mode",

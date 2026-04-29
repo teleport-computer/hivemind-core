@@ -193,6 +193,27 @@ def test_room_create_mints_signed_manifest_and_room_token(room_env):
     assert status.json()["item_count"] == 0
 
 
+def test_room_rules_default_to_agent_policy(room_env):
+    client, tenant, _hive = room_env
+    out = _create_fixed_room(
+        client,
+        tenant["api_key"],
+        rules="Only aggregate watch-history answers.",
+        policy=None,
+    )
+
+    manifest = out["room"]["manifest"]
+    assert manifest["rules"] == "Only aggregate watch-history answers."
+    assert manifest["policy"] == "Only aggregate watch-history answers."
+
+    who = client.get("/v1/whoami", headers=_headers(out["token"]))
+    assert who.status_code == 200
+    assert (
+        who.json()["constraints"]["policy"]
+        == "Only aggregate watch-history answers."
+    )
+
+
 def test_room_envelope_verification_detects_tamper(room_env):
     client, tenant, _hive = room_env
     out = _create_fixed_room(client, tenant["api_key"])

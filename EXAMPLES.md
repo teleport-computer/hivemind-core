@@ -62,13 +62,19 @@ hivemind room create scope_agent_id \
 For the current live watch-history tenant:
 
 ```bash
-hivemind --profile watch-history room create fae0070e6f1f \
-  --query-agent 730f2d35c608 \
+hivemind --profile watch-history room create agents/default-scope \
+  --name watch-history-hashtags \
+  --query-agent agents/default-query \
+  --mediator-agent agents/default-mediator \
+  --scope-visibility inspectable \
+  --query-visibility inspectable \
   --rules-file rules.md \
-  --trust-mode owner_approved
+  --trust-mode owner_approved \
+  --llm-provider tinfoil \
+  --llm-provider openrouter
 ```
 
-## No External LLM Egress
+## Non-LLM Room Egress Deny
 
 ```bash
 hivemind room create ./agents/my-scope \
@@ -77,6 +83,7 @@ hivemind room create ./agents/my-scope \
 ```
 
 The sandbox bridge rejects all LLM calls. The final room output is still allowed.
+Use this only for pinned agents that do not call LLM endpoints.
 
 ## Owner-Approved Deployment Updates
 

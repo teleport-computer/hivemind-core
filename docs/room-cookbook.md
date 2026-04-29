@@ -7,6 +7,8 @@ rules, and need to choose the smallest correct command.
 
 `--rules-file` reads plain text. Markdown is the recommended convention because
 room rules are human policy, not machine configuration.
+The same text is also used as the scope/mediator policy unless you pass a
+separate `--policy-file`.
 
 ```md
 # Rules
@@ -51,10 +53,10 @@ the uploaded source is stored.
 For the current live watch-history tenant:
 
 ```bash
-hivemind --profile watch-history room create fae0070e6f1f \
+hivemind --profile watch-history room create agents/default-scope \
   --name watch-history-hashtags \
-  --query-agent 730f2d35c608 \
-  --mediator-agent default-mediator \
+  --query-agent agents/default-query \
+  --mediator-agent agents/default-mediator \
   --scope-visibility inspectable \
   --query-visibility inspectable \
   --rules-file rules.md \
@@ -154,7 +156,7 @@ hivemind room create <scope-agent-id-or-path> \
   --llm-provider openrouter
 ```
 
-To disable external LLM calls:
+For non-LLM rooms only, disable bridge LLM egress:
 
 ```bash
 hivemind room create <scope-agent-id-or-path> \
@@ -164,5 +166,5 @@ hivemind room create <scope-agent-id-or-path> \
 ```
 
 Use `--no-llm` only for rooms whose pinned agents are deterministic and never
-call the bridge LLM endpoints. Do not use it for the default dynamic
-scope/query/mediator flow.
+call the bridge LLM endpoints. Natural-language scope/query/mediator rooms
+should allow at least one LLM provider.

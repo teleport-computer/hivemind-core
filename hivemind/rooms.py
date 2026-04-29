@@ -151,6 +151,8 @@ class RoomCreateRequest(BaseModel):
             self.query_agent_id = self.query_agent_id.strip() or None
         if self.mediator_agent_id is not None:
             self.mediator_agent_id = self.mediator_agent_id.strip() or None
+        if self.policy is None:
+            self.policy = self.rules or ""
         self.scope_agent_id = self.scope_agent_id.strip()
         return self
 

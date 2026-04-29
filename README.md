@@ -41,7 +41,9 @@ hivemind room create ./scope-agent \
 ```
 
 The rules file is plain text; Markdown is conventional because humans read
-and sign it. Use YAML only if your own agents are written to interpret YAML.
+and sign it. The same text is used as the scope/mediator policy unless
+`--policy-file` is passed. Use YAML only if your own agents are written to
+interpret YAML.
 
 Connect a local profile to a deployed service:
 
@@ -175,12 +177,6 @@ hivemind room create ./scope-agent \
   --mediator-agent ./mediator-agent \
   --query-visibility sealed \
   --rules-file rules.md
-
-# Only for deterministic agents: no external LLM calls are allowed.
-hivemind room create ./scope-agent \
-  --query-agent ./query-agent \
-  --rules-file rules.md \
-  --no-llm
 ```
 
 Visibility modes:
@@ -190,6 +186,10 @@ Visibility modes:
 - `sealed`: participants see metadata and digests, but source bytes are
   encrypted and are not served through the files API. Run prompts are not
   stored as plaintext; signed run attestations still include the prompt hash.
+
+Dynamic scope/query/mediator rooms need an allowed LLM provider, usually the
+default Tinfoil egress or an explicit `--llm-provider openrouter`. `--no-llm`
+is only an egress-deny policy for pinned agents that do not call LLM endpoints.
 
 ## Participant Flow
 
