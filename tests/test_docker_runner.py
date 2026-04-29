@@ -278,6 +278,41 @@ async def test_run_agent_non_linux_skips_bridge_only_egress_even_fail_closed():
 
 
 @pytest.mark.asyncio
+async def test_run_agent_internal_network_skips_host_iptables_even_on_linux():
+    container = MockContainer(exit_code=0, stdout=b"ok")
+    mock_client = MockDockerClient(container)
+    settings = _make_settings(
+        docker_network_internal=True,
+        enforce_bridge_only_egress=True,
+        enforce_bridge_only_egress_fail_closed=True,
+    )
+    agent = _make_agent()
+
+    with patch("hivemind.sandbox.docker_runner.docker") as mock_docker, patch(
+        "hivemind.sandbox.docker_runner.platform.system", return_value="Linux"
+    ), patch(
+        "hivemind.sandbox.docker_runner.subprocess.run"
+    ) as mock_subprocess:
+        mock_docker.from_env.return_value = mock_client
+        mock_docker.errors = __import__("docker").errors
+
+        runner = DockerRunner(settings)
+        result = await runner.run_agent(
+            agent=agent,
+            bridge_url="http://0.0.0.0:9999",
+            session_token="tok-123",
+            env={"BRIDGE_URL": "http://0.0.0.0:9999", "SESSION_TOKEN": "tok-123"},
+        )
+
+    assert result.exit_code == 0
+    assert container.killed is False
+    assert not any(
+        call.args and call.args[0] and call.args[0][0] == "iptables"
+        for call in mock_subprocess.call_args_list
+    )
+
+
+@pytest.mark.asyncio
 async def test_run_agent_timeout():
     class SlowContainer(MockContainer):
         def wait(self):

@@ -55,6 +55,7 @@ class DockerRunner:
         # sandbox network at startup and use self's IP on that network as
         # the bridge host. Populated lazily in _ensure_network().
         self._self_sandbox_ip: str | None = None
+        self._network_internal_effective: bool | None = None
 
     def _client_from_base_url(self, base_url: str) -> docker.DockerClient:
         return docker.DockerClient(base_url=base_url)
@@ -220,6 +221,10 @@ class DockerRunner:
             )
             self._network_id = network.id
             logger.info("Created Docker network %s (internal=%s)", name, internal)
+
+        self._network_internal_effective = bool(
+            (getattr(network, "attrs", {}) or {}).get("Internal", internal)
+        )
 
         # When running inside a container (e.g., Phala CVM), attach self to
         # the sandbox network so spawned siblings can reach our bridge.
@@ -647,7 +652,12 @@ class DockerRunner:
             )
 
             if self.settings.enforce_bridge_only_egress:
-                if platform.system() != "Linux":
+                if self._network_internal_effective:
+                    logger.info(
+                        "Skipping host iptables egress rules because Docker network %s is internal",
+                        network_name,
+                    )
+                elif platform.system() != "Linux":
                     logger.warning(
                         "Bridge-only host egress enforcement is supported only on Linux; "
                         "continuing without host firewall rules on %s",
