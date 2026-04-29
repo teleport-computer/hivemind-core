@@ -792,6 +792,23 @@ class DockerRunner:
 
     # ── Image building ──
 
+    def _ensure_agent_base_for_dockerfile(self, dockerfile: str) -> None:
+        with open(dockerfile, encoding="utf-8") as f:
+            for raw_line in f:
+                parts = raw_line.strip().split()
+                if len(parts) < 2 or parts[0].upper() != "FROM":
+                    continue
+                if not parts[1].startswith("hivemind-agent-base"):
+                    continue
+                from ..agent_base_bootstrap import ensure_agent_base_image
+
+                if not ensure_agent_base_image():
+                    raise RuntimeError(
+                        "hivemind-agent-base:latest is required by this "
+                        "agent Dockerfile but could not be provisioned"
+                    )
+                return
+
     def build_image(self, build_path: str, tag: str) -> str:
         """Build a Docker image from a directory containing a Dockerfile.
 
@@ -812,6 +829,7 @@ class DockerRunner:
             raise ValueError(
                 "No Dockerfile found in upload. A Dockerfile is required."
             )
+        self._ensure_agent_base_for_dockerfile(dockerfile)
 
         client = self._get_client()
         build_kwargs: dict = {
