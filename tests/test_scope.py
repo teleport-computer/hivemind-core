@@ -1,8 +1,15 @@
 """Tests for scope function compilation and evaluation — SQL query firewall."""
 
+import json
+import time
+
 import pytest
 
-from hivemind.scope import compile_scope_fn, apply_scope_fn
+from hivemind.scope import (
+    SCOPE_FN_TIMEOUT,
+    apply_scope_fn,
+    compile_scope_fn,
+)
 
 
 class TestCompileScopeFn:
@@ -287,6 +294,100 @@ class TestApplyScopeFn:
         )
         result = apply_scope_fn(fn, "SELECT 1", [], [])
         assert result["allow"] is False
+
+
+class TestScopeRuntimeIsolation:
+    """End-to-end checks that the multiprocessing isolation in apply_scope_fn
+    actually fires when a malicious scope_fn would otherwise hang the bridge
+    process. The C1 fix in build_sql_tools depends on this contract holding —
+    these tests guard against regressions where the timeout silently drops."""
+
+    def test_infinite_loop_is_killed_within_timeout(self):
+        source = (
+            "def scope(sql, params, rows):\n"
+            "    while True:\n"
+            "        pass\n"
+        )
+        fn = compile_scope_fn(source)
+        t0 = time.monotonic()
+        result = apply_scope_fn(fn, "SELECT 1", [], [], _source=source)
+        elapsed = time.monotonic() - t0
+        assert result["allow"] is False
+        assert "timed out" in result["error"].lower()
+        # Subprocess fork + kill overhead can add a couple seconds beyond the
+        # nominal 5s budget; we just want to confirm the kill happened, not
+        # let the test wedge on a regression that fails to kill at all.
+        assert elapsed < SCOPE_FN_TIMEOUT + 5
+
+    def test_memory_blowup_is_killed(self):
+        # Allocate a huge list to trigger either a memory cap or the timeout.
+        # Either outcome is a fail-closed result — what we don't want is a
+        # silent OOM of the bridge or a 60s+ hang.
+        source = (
+            "def scope(sql, params, rows):\n"
+            "    big = []\n"
+            "    while True:\n"
+            "        big.extend(range(1_000_000))\n"
+        )
+        fn = compile_scope_fn(source)
+        t0 = time.monotonic()
+        result = apply_scope_fn(fn, "SELECT 1", [], [], _source=source)
+        elapsed = time.monotonic() - t0
+        assert result["allow"] is False
+        assert "error" in result
+        assert elapsed < SCOPE_FN_TIMEOUT + 5
+
+    def test_well_behaved_fn_runs_in_subprocess_path(self):
+        # Sanity: passing _source must not break normal calls.
+        source = (
+            "def scope(sql, params, rows):\n"
+            "    return {'allow': True, 'rows': rows}\n"
+        )
+        fn = compile_scope_fn(source)
+        result = apply_scope_fn(
+            fn, "SELECT 1", [], [{"a": 1}, {"a": 2}], _source=source,
+        )
+        assert result == {"allow": True, "rows": [{"a": 1}, {"a": 2}]}
+
+
+class TestExecuteSqlScopeIsolation:
+    """End-to-end check: build_sql_tools.execute_sql is the runtime path the
+    LLM-supplied scope_fn actually flows through. C1 plumbed scope_fn_source
+    so this path uses apply_scope_fn (subprocess + timeout) instead of an
+    inline call. Regression-guard the wiring."""
+
+    def test_execute_sql_kills_runaway_scope_fn(self, monkeypatch):
+        from hivemind.tools import AccessLevel, build_sql_tools
+
+        # Stub the DB so we don't need Postgres for this test — execute_sql
+        # only needs a list of rows and the scope check around it.
+        class FakeDB:
+            def execute(self, sql, params=None):
+                return [{"a": 1}, {"a": 2}]
+
+            def execute_commit(self, sql, params=None):  # pragma: no cover
+                return 0
+
+        runaway_source = (
+            "def scope(sql, params, rows):\n"
+            "    while True:\n"
+            "        pass\n"
+        )
+        runaway_fn = compile_scope_fn(runaway_source)
+
+        tools = build_sql_tools(
+            FakeDB(),
+            AccessLevel.SCOPED,
+            scope_fn=runaway_fn,
+            scope_fn_source=runaway_source,
+        )
+        execute_sql = {t.name: t for t in tools}["execute_sql"].handler
+
+        t0 = time.monotonic()
+        result = json.loads(execute_sql("SELECT * FROM t"))
+        elapsed = time.monotonic() - t0
+        assert "error" in result
+        assert elapsed < SCOPE_FN_TIMEOUT + 5
 
 
 class TestScopeSecurityBypass:
