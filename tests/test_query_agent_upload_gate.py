@@ -117,6 +117,7 @@ def gated_env():
     hive.agent_store.save_files(
         scope_id, {"Dockerfile": "FROM python:3.12-slim\n", "agent.py": "x\n"},
     )
+    settings.default_scope_agent = scope_id
 
     locked = registry.mint_capability(
         t["tenant_id"], "query", "no-upload",

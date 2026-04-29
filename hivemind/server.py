@@ -213,7 +213,6 @@ def _validate_inspection_mode(mode: str) -> str:
         )
     return m
 
-
 def _read_extracted_files(tmpdir: str) -> dict[str, str]:
     """Read all extracted source files from a directory as {path: content}."""
     files: dict[str, str] = {}
@@ -398,6 +397,27 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         :func:`requires_role` directly.
         """
         return caller.hive
+
+    def _require_scope_agent_id(hm: Hivemind, scope_agent_id: str | None) -> str:
+        """Resolve the effective scope agent or reject the request up front."""
+        resolved = (scope_agent_id or hm.settings.default_scope_agent or "").strip()
+        if not resolved:
+            raise HTTPException(
+                400,
+                "scope_agent_id is required (no default scope agent configured)",
+            )
+        return resolved
+
+    async def _ensure_scope_agent_exists(hm: Hivemind, scope_agent_id: str) -> None:
+        agent = await asyncio.to_thread(hm.agent_store.get, scope_agent_id)
+        if not agent:
+            raise HTTPException(404, f"Scope agent '{scope_agent_id}' not found")
+
+    def _caller_can_access_run(caller: Caller, run: dict) -> bool:
+        """Owner sees tenant runs; query tokens see only their own runs."""
+        if caller.role == "owner":
+            return True
+        return bool(caller.token_id) and run.get("issuer_token_id") == caller.token_id
 
     async def check_admin(request: Request):
         """Gate admin endpoints with the separate HIVEMIND_ADMIN_KEY."""
@@ -974,11 +994,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         req = _force_scope_for_query_token(req, caller)
         hm = caller.hive
         query_agent_id = req.query_agent_id or hm.settings.default_query_agent
-        scope_agent_id = req.scope_agent_id or hm.settings.default_scope_agent
+        scope_agent_id = _require_scope_agent_id(hm, req.scope_agent_id)
         if not query_agent_id:
             raise HTTPException(
                 400, "query_agent_id is required (no default configured)"
             )
+        await _ensure_scope_agent_exists(hm, scope_agent_id)
 
         run_id = uuid4().hex[:12]
         await asyncio.to_thread(
@@ -1471,6 +1492,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         build all, then run the full pipeline with tracking."""
 
         validated_query_mode = _validate_inspection_mode(query_inspection_mode)
+        has_scope_upload = bool(scope_archive and scope_archive.filename)
+        default_scope_id = (hm.settings.default_scope_agent or "").strip()
+        if not has_scope_upload and not default_scope_id:
+            raise HTTPException(
+                400,
+                "scope_archive or default scope agent is required",
+            )
+        if not has_scope_upload:
+            await _ensure_scope_agent_exists(hm, default_scope_id)
 
         # Read archives
         try:
@@ -1528,12 +1558,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # Generate IDs
         query_agent_id = uuid4().hex[:12]
         scope_agent_id = uuid4().hex[:12] if scope_tmpdir else None
+        effective_scope_agent_id = scope_agent_id or default_scope_id
         index_agent_id = uuid4().hex[:12] if index_tmpdir else None
         run_id = uuid4().hex[:12]
 
         await asyncio.to_thread(
             hm.run_store.create, run_id, query_agent_id,
-            scope_agent_id=scope_agent_id,
+            scope_agent_id=effective_scope_agent_id,
             index_agent_id=index_agent_id,
         )
 
@@ -1552,7 +1583,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 query_entrypoint=query_entrypoint,
                 # Scope
                 scope_tmpdir=scope_tmpdir,
-                scope_agent_id=scope_agent_id,
+                scope_agent_id=effective_scope_agent_id,
                 scope_name=scope_name,
                 scope_entrypoint=scope_entrypoint,
                 # Index
@@ -1579,7 +1610,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return {
             "run_id": run_id,
             "query_agent_id": query_agent_id,
-            "scope_agent_id": scope_agent_id,
+            "scope_agent_id": effective_scope_agent_id,
             "index_agent_id": index_agent_id,
             "status": "pending",
             "query_inspection_mode": validated_query_mode,
@@ -1778,6 +1809,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 )
             scope_agent_id = caller.constraints.get("scope_agent_id") or ""
         hm = caller.hive
+        scope_agent_id = _require_scope_agent_id(hm, scope_agent_id)
 
         # Inherit inspection_mode from the bound scope agent. The mode
         # is part of A's pre-committed contract (visible via
@@ -1785,11 +1817,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # if B doesn't accept. A scope agent's mode is non-overridable
         # at upload time — that's the whole point of binding it to A's
         # scope-agent attestation.
-        scope_cfg = None
-        if scope_agent_id:
-            scope_cfg = await asyncio.to_thread(
-                hm.agent_store.get, scope_agent_id,
-            )
+        scope_cfg = await asyncio.to_thread(
+            hm.agent_store.get, scope_agent_id,
+        )
+        if not scope_cfg:
+            raise HTTPException(404, f"Scope agent '{scope_agent_id}' not found")
         inherited_mode = (
             getattr(scope_cfg, "inspection_mode", "full") or "full"
         )
@@ -1814,6 +1846,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         run_id = uuid4().hex[:12]
         await asyncio.to_thread(
             hm.run_store.create, run_id, agent_id,
+            scope_agent_id=scope_agent_id,
             issuer_token_id=(caller.token_id or None),
         )
 
@@ -1977,7 +2010,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         """Get the status and result of an agent run."""
         hm = caller.hive
         run = await asyncio.to_thread(hm.run_store.get, run_id)
-        if not run:
+        if not run or not _caller_can_access_run(caller, run):
             raise HTTPException(404, "Run not found")
         run["artifacts"] = await asyncio.to_thread(
             hm.artifact_store.list_for_run, run_id
@@ -2020,6 +2053,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return await asyncio.to_thread(
                 caller.hive.run_store.list_by_token, tid, capped,
             )
+        if caller.role == "query":
+            return await asyncio.to_thread(
+                caller.hive.run_store.list_by_token, caller.token_id, capped,
+            )
         return await asyncio.to_thread(
             caller.hive.run_store.list_recent, capped,
         )
@@ -2041,6 +2078,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         `artifact_retention_seconds` (default 24h). Nothing is written to
         external object storage.
         """
+        run = await asyncio.to_thread(hm.run_store.get, run_id)
+        if not run or not _caller_can_access_run(caller, run):
+            raise HTTPException(404, "Artifact not found or expired")
         artifact = await asyncio.to_thread(
             hm.artifact_store.get, run_id, filename
         )

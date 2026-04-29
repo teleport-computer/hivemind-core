@@ -125,8 +125,9 @@ services:
 
       # Docker sandbox — agents run as containers via host Docker daemon
       HIVEMIND_BRIDGE_HOST: "0.0.0.0"
-      HIVEMIND_DOCKER_NETWORK_INTERNAL: "false"
-      HIVEMIND_ENFORCE_BRIDGE_ONLY_EGRESS: "false"
+      HIVEMIND_DOCKER_NETWORK_INTERNAL: "true"
+      HIVEMIND_ENFORCE_BRIDGE_ONLY_EGRESS: "true"
+      HIVEMIND_ENFORCE_BRIDGE_ONLY_EGRESS_FAIL_CLOSED: "true"
       HIVEMIND_CONTAINER_MEMORY_MB: "1024"
 
       # Global ceilings on per-call budget. Per-call --max-tokens /
@@ -146,13 +147,6 @@ services:
       HIVEMIND_DEFAULT_QUERY_IMAGE: ${HIVEMIND_DEFAULT_QUERY_IMAGE:-}
       HIVEMIND_DEFAULT_INDEX_IMAGE: ${HIVEMIND_DEFAULT_INDEX_IMAGE:-}
       HIVEMIND_DEFAULT_MEDIATOR_IMAGE: ${HIVEMIND_DEFAULT_MEDIATOR_IMAGE:-}
-
-      # Phase 6: room policy for B's uploaded query agent. CSV of
-      # 'full,sealed'. Bound to compose_hash, so B can pin "this room
-      # accepts sealed" in the URI's compose= field. Default keeps
-      # legacy ['full']-only behavior; bump to 'full,sealed' to let B
-      # encrypt their source under the enclave-only KMS key.
-      HIVEMIND_ACCEPTED_INSPECTION_MODES: ${HIVEMIND_ACCEPTED_INSPECTION_MODES:-full,sealed}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       # dstack socket — lets hivemind fetch its TDX quote + measurements

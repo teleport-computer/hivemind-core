@@ -184,6 +184,17 @@ class Pipeline:
         # before we burn scope-stage budget.
         self._client_for(req_provider)
 
+        query_agent_id = req.query_agent_id or self.settings.default_query_agent
+        if not query_agent_id:
+            raise ValueError(
+                "No query agent specified and no default configured"
+            )
+
+        if not (req.scope_agent_id or self.settings.default_scope_agent):
+            raise ValueError(
+                "scope_agent_id is required (no default scope agent configured)"
+            )
+
         if req.scope_agent_id:
             scope_fn, scope_fn_source, scope_usage = await self._run_scope_agent(
                 req, max_tokens=scope_budget,
@@ -204,12 +215,6 @@ class Pipeline:
             remaining = max(1, remaining - used)
 
         # Stage 1: Query agent
-        query_agent_id = req.query_agent_id or self.settings.default_query_agent
-        if not query_agent_id:
-            raise ValueError(
-                "No query agent specified and no default configured"
-            )
-
         query_max_tokens = remaining
         if mediator_agent_id and remaining > MEDIATOR_MIN_TOKENS:
             query_max_tokens = max(1, remaining - _mediator_reserve(remaining))
@@ -844,6 +849,11 @@ class Pipeline:
             scope_fn = None
             scope_fn_source = ""
             resolved_scope_id = scope_agent_id or self.settings.default_scope_agent
+            if not resolved_scope_id:
+                raise ValueError(
+                    "scope_agent_id is required "
+                    "(no default scope agent configured)"
+                )
             if resolved_scope_id:
                 scope_t0 = time.time()
                 await asyncio.to_thread(

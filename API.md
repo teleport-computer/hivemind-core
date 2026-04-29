@@ -15,7 +15,7 @@ header works for all of them:
 | Prefix | Kind | Scope |
 |---|---|---|
 | `hmk_…` | **tenant owner** | full access to the tenant's DB and pipeline; can mint capability tokens, rotate the key, and run every public endpoint |
-| `hmq_…` | **query capability** | only `/v1/query/run/submit`, `/v1/query-agents/submit`, `/v1/agents/{id}/attest` (and the `/v1/scope-attest` wrapper), and read-access to the bound scope agent's source files. Every query is forced through one pinned `scope_agent_id` (the owner picked it at mint time — the holder cannot override) |
+| `hmq_…` | **query capability** | only `/v1/query/run/submit`, `/v1/query-agents/submit`, its own `/v1/agent-runs/*` results/artifacts, `/v1/agents/{id}/attest` (and the `/v1/scope-attest` wrapper), and read-access to the bound scope agent's source files. Every query is forced through one pinned `scope_agent_id` (the owner picked it at mint time — the holder cannot override) |
 | `<admin-key>` | **operator** | only `/v1/admin/tenants/*` (provision/list/delete/register tenants). Cannot read tenant data through this API |
 
 ```http
@@ -104,7 +104,7 @@ curl -X POST http://localhost:8100/v1/store \
 
 ### `POST /v1/query/run/submit`
 
-Run the query pipeline: optional scope agent -> query agent -> optional
+Run the query pipeline: scope agent -> query agent -> optional
 mediator. Tracked-async only — synchronous `/v1/query` was removed
 because it could not survive the Phala gateway's 60s read timeout and
 never produced a Phase 5 signed envelope. Returns immediately with a
@@ -122,14 +122,14 @@ cannot bypass its gatekeeper.
 |---|---|---|---|
 | `query` | string | yes | Canonical field, min length 1 |
 | `query_agent_id` | string | no | Required unless default query agent configured |
-| `scope_agent_id` | string | no | Scope agent writes a scope function for result filtering. **Ignored for `hmq_` tokens** (server overrides with the bound id) |
+| `scope_agent_id` | string | no | Required unless a default scope agent is configured. Scope agent writes a scope function for result filtering. **Ignored for `hmq_` tokens** (server overrides with the bound id) |
 | `mediator_agent_id` | string | no | Optional output auditing/filtering |
 | `max_tokens` | integer | no | Per-request cap (min 1), clamped to server global max |
 
 Scope resolution:
 1. `scope_agent_id` if provided
 2. else configured default scope agent
-3. else unscoped (all query results pass through)
+3. else request is rejected with `400`
 
 The scope agent outputs `{"scope_fn": "def scope(sql, params, rows): ..."}` — a Python function that acts as a query firewall. Every SQL query the query agent issues has its results passed through this function.
 
@@ -142,6 +142,7 @@ curl -X POST http://localhost:8100/v1/query/run/submit \
   -d '{
     "query": "What technical decisions were made recently?",
     "query_agent_id": "default-query",
+    "scope_agent_id": "default-scope",
     "max_tokens": 50000
   }'
 ```
@@ -152,7 +153,7 @@ curl -X POST http://localhost:8100/v1/query/run/submit \
 {
   "run_id": "r_abc123def456",
   "query_agent_id": "default-query",
-  "scope_agent_id": null,
+  "scope_agent_id": "default-scope",
   "status": "pending"
 }
 ```
@@ -168,7 +169,9 @@ Poll status with `GET /v1/agent-runs/{run_id}` (see below).
 ### `GET /v1/agent-runs/{run_id}`
 
 Poll a tracked async run (query, query-agent submission, or any other
-run executed via `run_store`).
+run executed via `run_store`). Owners can read any run in their tenant.
+Query-token holders can read only runs that token initiated; other run ids
+return `404`.
 
 **Response 200**
 
@@ -187,7 +190,8 @@ run executed via `run_store`).
 `status` is one of `pending`, `running`, `completed`, `failed`. While
 `pending`/`running` the body lacks `output`. On `failed` the `error`
 field carries the failure reason. Artifacts are downloaded via
-`GET /v1/query/runs/{run_id}/artifacts/{filename}`.
+`GET /v1/query/runs/{run_id}/artifacts/{filename}` with the same owner /
+issuer-token visibility rules.
 
 ### `POST /v1/query-agents/submit`
 
@@ -197,7 +201,9 @@ agent tarball and immediately runs it through their token's bound scope
 agent. Tarball survives only for the run.
 
 **Request**: `multipart/form-data` with `archive`, `name`, `query`, optional
-`description`, `max_tokens`. Auth: owner or query token.
+`description`, `max_tokens`. Auth: owner or query token. Owner callers must
+provide `scope_agent_id` unless a default scope agent is configured; query
+tokens inherit the bound scope agent and cannot override it.
 
 **Response 200**
 

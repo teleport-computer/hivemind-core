@@ -264,6 +264,78 @@ def test_owner_can_filter_runs_by_token_id(env_factory):
     assert {rid_a, rid_b} <= rids_all
 
 
+def test_query_token_lists_only_its_own_runs(env_factory):
+    """A query token must not see other hmq_ tokens' run history."""
+    client, _owner, make_room = env_factory
+    room_a = make_room("full")
+    room_b = make_room("full")
+
+    ra = _submit(client, room_a["token"])
+    rb = _submit(client, room_b["token"])
+    assert ra.status_code == 200 and rb.status_code == 200
+    rid_a = ra.json()["run_id"]
+    rid_b = rb.json()["run_id"]
+
+    resp = client.get(
+        "/v1/agent-runs",
+        headers={"Authorization": f"Bearer {room_a['token']}"},
+    )
+    assert resp.status_code == 200, resp.text
+    rows = resp.json()
+    run_ids = {r["run_id"] for r in rows}
+    assert rid_a in run_ids
+    assert rid_b not in run_ids
+    assert {r["issuer_token_id"] for r in rows} == {room_a["token_id"]}
+
+
+def test_query_token_cannot_fetch_other_token_run(env_factory):
+    client, _owner, make_room = env_factory
+    room_a = make_room("full")
+    room_b = make_room("full")
+
+    ra = _submit(client, room_a["token"])
+    rb = _submit(client, room_b["token"])
+    assert ra.status_code == 200 and rb.status_code == 200
+    rid_a = ra.json()["run_id"]
+    rid_b = rb.json()["run_id"]
+
+    headers_a = {"Authorization": f"Bearer {room_a['token']}"}
+    own = client.get(f"/v1/agent-runs/{rid_a}", headers=headers_a)
+    assert own.status_code == 200, own.text
+
+    other = client.get(f"/v1/agent-runs/{rid_b}", headers=headers_a)
+    assert other.status_code == 404, other.text
+
+
+def test_query_token_cannot_fetch_other_token_artifact(env_factory):
+    client, owner_key, make_room = env_factory
+    room_a = make_room("full")
+    room_b = make_room("full")
+
+    rb = _submit(client, room_b["token"])
+    assert rb.status_code == 200, rb.text
+    rid_b = rb.json()["run_id"]
+    room_b["hive"].artifact_store.put(
+        rid_b,
+        "report.txt",
+        b"token-b secret artifact",
+        "text/plain",
+    )
+
+    other = client.get(
+        f"/v1/query/runs/{rid_b}/artifacts/report.txt",
+        headers={"Authorization": f"Bearer {room_a['token']}"},
+    )
+    assert other.status_code == 404, other.text
+
+    owner = client.get(
+        f"/v1/query/runs/{rid_b}/artifacts/report.txt",
+        headers={"Authorization": f"Bearer {owner_key}"},
+    )
+    assert owner.status_code == 200, owner.text
+    assert owner.content == b"token-b secret artifact"
+
+
 def test_query_token_cannot_filter_by_token_id(env_factory):
     """Audit filter is owner-only. A query token holder asking for
     `?token_id=` is 403'd."""
