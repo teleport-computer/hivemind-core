@@ -533,10 +533,10 @@ def ask(
     # Surface the bound scope agent's inspection_mode before any prompt
     # leaves the box, regardless of whether B is uploading their own
     # query agent or using the owner's qa= template. ``sealed`` means
-    # scope/qa source is encrypted under an enclave-only KMS key (owner
-    # can't read it back); ``full`` means owner can fetch the source via
-    # /v1/agents/{id}/files. Either way image_digest + attested files
-    # still bind the workload.
+    # scope/qa source is encrypted for runtime-only use (room uploads use
+    # the room key; non-room legacy uploads use the enclave KMS key).
+    # ``full`` means owner can fetch the source via /v1/agents/{id}/files.
+    # Either way image_digest + attested files still bind the workload.
     if not as_json:
         room_mode = _fetch_scope_inspection_mode(
             service=service, headers=headers,
@@ -549,8 +549,8 @@ def ask(
             )
             click.echo(
                 "Room mode: sealed — bound agents' source is encrypted "
-                "under an enclave-only KMS key. Even the room owner "
-                "cannot read it; only the running CVM can decrypt." + extra
+                "for runtime-only use. The owner cannot read it through "
+                "the files API; only the running CVM can decrypt." + extra
             )
         else:
             extra = (

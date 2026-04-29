@@ -167,10 +167,10 @@ def init(service: str, api_key: str):
         "  full   — anyone holding an owner token can read source via "
         "/v1/agents/{id}/files. Image digest + attested file list bind "
         "the workload, but plaintext is owner-readable.\n"
-        "  sealed — bytes encrypted under an enclave-only KMS key bound "
-        "to this CVM's compose_hash. Even the owner can't read the "
-        "plaintext; only the running enclave can decrypt. Image digest "
-        "+ attested file list still bind the workload."
+        "  sealed — bytes encrypted for runtime-only use. Non-room uploads "
+        "use the enclave KMS key; room-uploaded query agents use the room "
+        "key. Even the owner can't read plaintext through the files API. "
+        "Image digest + attested file list still bind the workload."
     ),
 )
 def scope(

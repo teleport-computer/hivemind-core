@@ -81,6 +81,8 @@ _INTERNAL_DDL: tuple[str, ...] = (
         file_path TEXT NOT NULL,
         content TEXT,
         ciphertext TEXT,
+        seal_mode TEXT NOT NULL DEFAULT '',
+        room_id TEXT,
         size_bytes INTEGER NOT NULL,
         attestable BOOLEAN NOT NULL DEFAULT TRUE,
         PRIMARY KEY (agent_id, file_path)
@@ -219,6 +221,10 @@ _INTERNAL_MIGRATIONS: tuple[str, ...] = (
     "ALTER TABLE _hivemind_query_runs "
     "ADD COLUMN IF NOT EXISTS artifacts_enabled BOOLEAN "
     "NOT NULL DEFAULT TRUE",
+    "ALTER TABLE _hivemind_agent_files "
+    "ADD COLUMN IF NOT EXISTS seal_mode TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE _hivemind_agent_files "
+    "ADD COLUMN IF NOT EXISTS room_id TEXT",
 )
 
 

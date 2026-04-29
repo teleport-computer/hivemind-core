@@ -80,8 +80,9 @@ class AgentConfig(BaseModel):
     # Per-agent inspection contract. Picked once at upload; query
     # agents inherit from their bound scope agent.
     #   "full"   — owner token can read source via files endpoint.
-    #   "sealed" — bytes encrypted under enclave-only KMS key; files
-    #              endpoint refuses plaintext to anyone. Image digest
+    #   "sealed" — bytes encrypted for runtime-only use; room uploads use
+    #              the room key, non-room legacy uploads use enclave KMS.
+    #              Files endpoint refuses plaintext to anyone. Image digest
     #              + attested file list still bind the workload.
     inspection_mode: str = "full"
 

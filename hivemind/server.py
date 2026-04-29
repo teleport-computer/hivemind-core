@@ -196,7 +196,7 @@ def _safe_extract_tar(
             os.chmod(target, file_mode or 0o644)
 
 
-def _validate_inspection_mode(mode: str) -> str:
+def _validate_inspection_mode(mode: str, *, require_kms: bool = True) -> str:
     """Coerce/validate an owner-side ``inspection_mode`` form field.
 
     Inspection policy is per-agent: A picks ``full`` or ``sealed`` once,
@@ -204,8 +204,10 @@ def _validate_inspection_mode(mode: str) -> str:
     inherit the bound scope agent's mode — they don't get to pick.
 
     Returns the normalized mode. Raises HTTPException(400) on unknown
-    value, or HTTPException(503) when ``sealed`` is requested but the
-    enclave-only KMS key isn't available.
+    value, or HTTPException(503) when ``sealed`` needs the legacy
+    enclave-only KMS key and that key is unavailable. Room-uploaded sealed
+    query agents pass ``require_kms=False`` because they are encrypted
+    under the room vault key instead.
     """
     from . import agent_seal as _aseal
 
@@ -218,7 +220,7 @@ def _validate_inspection_mode(mode: str) -> str:
                 f"(got {mode!r})"
             ),
         )
-    if m == "sealed" and not _aseal.is_available():
+    if m == "sealed" and require_kms and not _aseal.is_available():
         raise HTTPException(
             status_code=503,
             detail=(
@@ -1739,10 +1741,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 status_code=403,
                 detail=(
                     "agent is sealed (inspection_mode=sealed); source "
-                    "files are encrypted under the enclave-only KMS key "
-                    "and cannot be read through this endpoint by anyone, "
-                    "including the room owner. Image digest, attested "
-                    "files digest, and file path list remain inspectable."
+                    "files are encrypted for runtime-only use and cannot "
+                    "be read through this endpoint by anyone, including "
+                    "the room owner. Image digest, attested files digest, "
+                    "and file path list remain inspectable."
                 ),
             )
         if content is None:
@@ -1851,7 +1853,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # secret prompts, .env). Excluded from attested_files_digest;
         # still bound by image_digest. Defaults to []  (all attestable).
         private_paths: str = Form("[]"),
-        # 'full' (legacy) or 'sealed'. Sealed needs KMS available.
+        # 'full' (legacy) or 'sealed'. Non-room sealed uploads need KMS.
         inspection_mode: str = Form("full"),
         hm: Hivemind = Depends(get_tenant_hive),
     ):
@@ -2318,6 +2320,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.post("/v1/query-agents/submit")
     async def submit_query_agent(
+        request: Request,
         name: str = Form(...),
         archive: UploadFile = File(...),
         prompt: str = Form(""),
@@ -2344,6 +2347,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         in a full room, full. B doesn't pick — A's scope-agent policy
         is the contract.
         """
+        hm = caller.hive
         room: dict | None = None
         if caller.role == "query" and caller.constraints.get("room_id"):
             room = await _load_room_for_caller(caller, room_id)
@@ -2377,7 +2381,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             policy = room_policy
             _validate_room_provider(provider, room)
             validated_mode = _validate_inspection_mode(
-                _room_query_inspection_mode(room)
+                _room_query_inspection_mode(room),
+                require_kms=False,
             )
         elif caller.role == "query":
             # Phase 4: query tokens must opt-in to code execution.
@@ -2395,7 +2400,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     ),
                 )
             scope_agent_id = caller.constraints.get("scope_agent_id") or ""
-        hm = caller.hive
         scope_agent_id = _require_scope_agent_id(hm, scope_agent_id)
 
         if room is None:
@@ -2413,6 +2417,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             validated_mode = _validate_inspection_mode(inherited_mode)
         else:
             await _ensure_scope_agent_exists(hm, scope_agent_id)
+
+        room_vault_items: list[dict] = []
+        if room is not None:
+            bearer = _bearer(request)
+            await asyncio.to_thread(
+                hm.room_vault.open,
+                room["room_id"],
+                _room_wrap_id(caller),
+                bearer,
+            )
+            room_vault_items = await asyncio.to_thread(
+                hm.room_vault.list_items,
+                room["room_id"],
+            )
 
         try:
             content = await _read_upload_bytes_limited(
@@ -2467,6 +2485,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 policy=policy,
                 inspection_mode=validated_mode,
                 room=room,
+                room_vault_items=room_vault_items,
             ),
         )
 
@@ -2499,6 +2518,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         policy: str | None = None,
         inspection_mode: str = "full",
         room: dict | None = None,
+        room_vault_items: list[dict] | None = None,
     ) -> None:
         """Background task: build image, register agent, run pipeline."""
         from .sandbox.backend import _create_runner
@@ -2567,6 +2587,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         captured_files,
                         None,
                         inspection_mode,
+                        (room or {}).get("room_id"),
                     )
                 except Exception as e:
                     logger.warning(
@@ -2594,6 +2615,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 ),
                 allowed_llm_providers=(room or {}).get("allowed_llm_providers"),
                 artifacts_enabled=bool((room or {}).get("allow_artifacts", True)),
+                room_vault_items=room_vault_items or [],
             )
 
         except Exception as e:

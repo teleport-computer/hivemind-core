@@ -268,13 +268,16 @@ Enforcement is server-side and applies even if the client ignores the CLI:
   trust settings, so existing `hmroom://` links keep working while B still
   verifies the new manifest against the original owner pubkey.
 
-Room vault data is the storage path for the stronger "malicious approved
-update cannot read old room data unless a participant interacts" property.
-Rows in `_hivemind_room_vault_items` contain AEAD ciphertext only. The
-per-room DEK is cached in process memory after `POST /v1/rooms/{id}/open`,
-`room add-data`, or a room run that presents a wrapped participant bearer.
-After a restart, `hmk_` and `hmq_` participants can each re-open the same
-room through their own wrap row in `_hivemind_room_key_wraps`.
+Room vault data and room-uploaded sealed query-agent files are the storage
+paths for the stronger "malicious approved update cannot read old room
+private material unless a participant interacts" property. Rows in
+`_hivemind_room_vault_items` contain AEAD ciphertext only. Room-uploaded
+sealed query-agent files are stored in `_hivemind_agent_files.ciphertext`
+with `seal_mode='room'` and the room id. The per-room DEK is cached in
+process memory after `POST /v1/rooms/{id}/open`, `room add-data`, or a
+room run/upload that presents a wrapped participant bearer. After a restart,
+`hmk_` and `hmq_` participants can each re-open the same room through their
+own wrap row in `_hivemind_room_key_wraps`.
 
 Agents see vault data through the `get_room_vault_items` tool. Scope agents
 get full vault rows so they can write the room scope function. Query agents
@@ -557,12 +560,11 @@ Caveats:
   ACLs, and egress rules are application-level controls. App-defined tables
   written through `/v1/store` remain plaintext inside the CVM/Postgres
   boundary.
-- `inspection_mode=sealed` agent files are encrypted from HTTP inspection,
-  but the internal rebuild path can decrypt them inside any KMS-approved
-  compose. For the stricter "malicious approved update cannot read old
-  private agent parts until a participant interacts" property, sealed agent
-  parts still need room participant-presented key release; room vault data
-  already uses that pattern.
+- `inspection_mode=sealed` has two backends: room-uploaded query agents
+  use `seal_mode='room'` and the participant-presented room key; non-room
+  legacy sealed agents use `seal_mode='kms'` and can be decrypted inside
+  any KMS-approved compose for rebuild/digest. Use uploadable room agents
+  when private query-agent parts need the participant-interaction property.
 - The seal does not protect against an attacker who can induce the
   owner to make an HTTP request after they've compromised the CVM
   process — process memory is the trust boundary above LUKS2/TDX.

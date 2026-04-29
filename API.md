@@ -264,6 +264,11 @@ cannot fetch plaintext through this endpoint; during a room run, agents see
 vault rows through `get_room_vault_items`, with query-agent rows filtered by
 the room scope function.
 
+For uploadable rooms whose query visibility is `sealed`, query-agent source
+uploaded via `/v1/query-agents/submit` is also encrypted under the room DEK
+(`_hivemind_agent_files.seal_mode = "room"`). It can be rebuilt or digested
+only after a room participant opens the room vault after restart.
+
 #### `GET /v1/rooms/{room_id}/vault/items`
 
 Owner-only plaintext listing for auditing/debugging. The CLI hides item text

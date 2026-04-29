@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import io
 import os
 import secrets
+import tarfile
 
 import psycopg
 import pytest
@@ -11,6 +13,7 @@ from fastapi.testclient import TestClient
 from hivemind.config import Settings
 from hivemind.room_vault import RoomVaultSealed
 from hivemind.rooms import verify_room_envelope
+from hivemind.sandbox.agents import AgentSealedReadError
 from hivemind.sandbox.models import AgentConfig
 from hivemind.server import create_app
 from hivemind.tenants import TenantRegistry
@@ -52,6 +55,20 @@ def _drop_db(dsn: str, db_name: str) -> None:
 
 def _headers(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
+
+
+def _tiny_tar() -> bytes:
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        for name, body in (
+            ("Dockerfile", "FROM python:3.12-slim\n"),
+            ("agent.py", "print('room query')\n"),
+        ):
+            data = body.encode()
+            info = tarfile.TarInfo(name=name)
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+    return buf.getvalue()
 
 
 @pytest.fixture
@@ -239,6 +256,105 @@ def test_room_vault_encrypts_data_and_reopens_with_participant_bearer(room_env):
     assert opened.status_code == 200, opened.text
     assert opened.json()["open"] is True
     assert hive.room_vault.list_items(room_id)[0]["text"] == secret
+
+
+def test_room_sealed_agent_files_use_room_key_not_kms(room_env, monkeypatch):
+    from hivemind import agent_seal
+
+    client, tenant, hive = room_env
+    out = _create_fixed_room(
+        client,
+        tenant["api_key"],
+        query_mode="uploadable",
+        query_agent_id=None,
+    )
+    room_id = out["room_id"]
+    agent_id = f"room_agent_{secrets.token_hex(3)}"
+    secret = "PRIVATE QUERY SOURCE"
+
+    agent_seal.reset_for_tests()
+    monkeypatch.setattr(agent_seal, "is_available", lambda: False)
+    hive.agent_store.create(
+        AgentConfig(
+            agent_id=agent_id,
+            name="room-agent",
+            description="fixture",
+            agent_type="query",
+            image="hivemind-test:latest",
+            entrypoint=None,
+            memory_mb=256,
+            max_llm_calls=10,
+            max_tokens=10_000,
+            timeout_seconds=60,
+            inspection_mode="sealed",
+        )
+    )
+    hive.agent_store.save_files(
+        agent_id,
+        {"agent.py": f"print({secret!r})\n"},
+        inspection_mode="sealed",
+        room_id=room_id,
+    )
+
+    rows = hive.db.execute(
+        "SELECT content, ciphertext, seal_mode, room_id "
+        "FROM _hivemind_agent_files WHERE agent_id = %s",
+        [agent_id],
+    )
+    assert rows[0]["content"] is None
+    assert rows[0]["ciphertext"]
+    assert secret not in rows[0]["ciphertext"]
+    assert rows[0]["seal_mode"] == "room"
+    assert rows[0]["room_id"] == room_id
+
+    with pytest.raises(AgentSealedReadError):
+        hive.agent_store.read_file(agent_id, "agent.py")
+    assert secret in hive.agent_store.read_file(
+        agent_id,
+        "agent.py",
+        allow_sealed=True,
+    )
+
+    hive.room_vault.evict(room_id)
+    with pytest.raises(RoomVaultSealed):
+        hive.agent_store.get_files(agent_id, allow_sealed=True)
+
+    opened = client.post(
+        f"/v1/rooms/{room_id}/open",
+        headers=_headers(out["token"]),
+    )
+    assert opened.status_code == 200, opened.text
+    assert secret in hive.agent_store.get_files(
+        agent_id,
+        allow_sealed=True,
+    )["agent.py"]
+
+
+def test_room_query_agent_upload_sealed_mode_does_not_require_kms(
+    room_env,
+    monkeypatch,
+):
+    from hivemind import agent_seal
+
+    client, tenant, _hive = room_env
+    out = _create_fixed_room(
+        client,
+        tenant["api_key"],
+        query_mode="uploadable",
+        query_agent_id=None,
+    )
+    agent_seal.reset_for_tests()
+    monkeypatch.setattr(agent_seal, "is_available", lambda: False)
+
+    resp = client.post(
+        "/v1/query-agents/submit",
+        headers=_headers(out["token"]),
+        files={"archive": ("agent.tar.gz", _tiny_tar(), "application/gzip")},
+        data={"name": "room-query", "prompt": "hello", "room_id": out["room_id"]},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["inspection_mode"] == "sealed"
+    assert resp.json()["room_id"] == out["room_id"]
 
 
 def test_room_vault_tool_applies_scope_function():

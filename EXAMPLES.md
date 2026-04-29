@@ -439,4 +439,6 @@ hivemind room ask 'hmroom://...' "What changed this month?" --agent ./my-agent
 
 Room vault rows are stored as ciphertext in `_hivemind_room_vault_items`.
 Agents access them through `get_room_vault_items`; query-agent access is
-filtered by the room scope function.
+filtered by the room scope function. In an uploadable room with sealed query
+visibility, the uploaded query agent source is also sealed under the room key,
+not the legacy KMS-only sealed-agent key.

@@ -68,6 +68,12 @@ class RoomVault:
             f"room-vault-item|{self.tenant_id}|{room_id}|{item_id}"
         ).encode("utf-8")
 
+    def _agent_file_aad(self, room_id: str, agent_id: str, file_path: str) -> bytes:
+        return (
+            f"room-vault-agent-file|{self.tenant_id}|{room_id}|"
+            f"{agent_id}|{file_path}"
+        ).encode("utf-8")
+
     def _cached_dek(self, room_id: str) -> bytes | None:
         with self._lock:
             return self._cache.get(self._cache_key(room_id))
@@ -273,6 +279,44 @@ class RoomVault:
                 }
             )
         return out
+
+    def encrypt_agent_file_b64(
+        self,
+        room_id: str,
+        agent_id: str,
+        file_path: str,
+        plaintext: str | bytes,
+    ) -> str:
+        dek = self._cached_dek(room_id)
+        if dek is None:
+            raise RoomVaultSealed(
+                f"room {room_id!r} is sealed; open it before sealing agent files"
+            )
+        ciphertext = encrypt_file(
+            dek,
+            plaintext,
+            self._agent_file_aad(room_id, agent_id, file_path),
+        )
+        return _b64e(ciphertext)
+
+    def decrypt_agent_file_b64(
+        self,
+        room_id: str,
+        agent_id: str,
+        file_path: str,
+        ciphertext_b64: str,
+    ) -> str:
+        dek = self._cached_dek(room_id)
+        if dek is None:
+            raise RoomVaultSealed(
+                f"room {room_id!r} is sealed; present a participant bearer "
+                "before reading sealed room agent files"
+            )
+        return decrypt_file(
+            dek,
+            _b64d(ciphertext_b64),
+            self._agent_file_aad(room_id, agent_id, file_path),
+        )
 
     def list_items_for_bearer(
         self,

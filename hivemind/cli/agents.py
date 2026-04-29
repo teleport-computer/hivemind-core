@@ -143,11 +143,11 @@ def agents_rm(agent_id: str, as_json: bool):
     help=(
         "Privacy contract for the uploaded agent. 'full' (legacy) — owner "
         "can read source via /v1/agents/{id}/files. 'sealed' — bytes "
-        "encrypted under an enclave-only KMS key; only the running CVM "
-        "can decrypt. Image digest + attested file list still bind the "
-        "workload either way. Query agents uploaded via "
-        "/v1/query-agents/submit inherit the bound scope agent's mode "
-        "and cannot override here."
+        "encrypted for runtime-only use; non-room uploads use the enclave "
+        "KMS key and room uploads use the room key. Image digest + "
+        "attested file list still bind the workload either way. Query "
+        "agents uploaded via /v1/query-agents/submit inherit the bound "
+        "scope agent or room mode and cannot override here."
     ),
 )
 @click.option("--json", "as_json", is_flag=True, help="Emit JSON on stdout")

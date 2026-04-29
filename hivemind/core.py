@@ -44,11 +44,16 @@ class Hivemind:
             proxy_key=settings.sql_proxy_key,
             tenant_db=tenant_db,
         )
-        self.agent_store = AgentStore(self.db, sealer=sealer, tenant_id=tenant_id)
         self.run_store = RunStore(self.db)
         self.artifact_store = ArtifactStore(self.db)
         self.room_store = RoomStore(self.db)
         self.room_vault = RoomVault(self.db, tenant_id=tenant_id)
+        self.agent_store = AgentStore(
+            self.db,
+            sealer=sealer,
+            tenant_id=tenant_id,
+            room_vault=self.room_vault,
+        )
         self.pipeline: Pipeline | None = None
         self._retention_task: asyncio.Task | None = None
         try:

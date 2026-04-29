@@ -9,6 +9,7 @@ from .models import AgentConfig
 
 if TYPE_CHECKING:
     from ..db import Database
+    from ..room_vault import RoomVault
     from ..seal import TenantSealer
 
 logger = logging.getLogger(__name__)
@@ -17,10 +18,10 @@ logger = logging.getLogger(__name__)
 class AgentSealedReadError(Exception):
     """Raised when a plaintext read is attempted on a sealed-mode agent.
 
-    Sealed agents have ``inspection_mode='sealed'`` — their source
-    bytes are encrypted under an enclave-only KMS key, and no token
-    (incl. the owner's ``hmk_``) can release them. Server endpoints
-    catch this and translate to HTTP 403.
+    Sealed agents have ``inspection_mode='sealed'``. Their source bytes
+    are encrypted for runtime-only use (KMS for legacy/non-room agents,
+    room-vault DEK for room-uploaded agents), and HTTP endpoints catch
+    this and translate it to HTTP 403.
     """
 
     def __init__(self, agent_id: str):
@@ -52,10 +53,12 @@ class AgentStore:
         db: Database,
         sealer: TenantSealer | None = None,
         tenant_id: str | None = None,
+        room_vault: RoomVault | None = None,
     ):
         self.db = db
         self.sealer = sealer
         self.tenant_id = tenant_id
+        self.room_vault = room_vault
 
     # ── helpers ────────────────────────────────────────────────────
 
@@ -219,15 +222,19 @@ class AgentStore:
         files: dict[str, str],
         private_paths: list[str] | None = None,
         inspection_mode: str | None = None,
+        room_id: str | None = None,
     ) -> int:
         """Store extracted source files for an agent. Returns file count.
 
         Encryption routing:
-          • ``inspection_mode='sealed'``  → ChaCha20 under the
-            enclave-only KMS key (``agent_seal.encrypt_b64``). Bytes are
-            unreadable to A's tenant role and to A's ``hmk_`` token —
-            only the running CVM can decrypt. The files HTTP endpoint
-            refuses to serve them.
+          • ``inspection_mode='sealed'`` with ``room_id`` → ChaCha20
+            under that room's participant-presented DEK. After restart,
+            internal rebuild/digest paths can decrypt only after a room
+            participant opens the room vault.
+          • ``inspection_mode='sealed'`` without ``room_id`` → legacy
+            ChaCha20 under the enclave-only KMS key
+            (``agent_seal.encrypt_b64``). The files HTTP endpoint
+            refuses to serve plaintext in either sealed case.
           • ``inspection_mode='full'`` (default) → encrypt under the
             tenant DEK if a sealer is bound, else store plaintext.
             Owner endpoint can decrypt, matching legacy behaviour.
@@ -245,7 +252,33 @@ class AgentStore:
         mode = (inspection_mode or self._agent_inspection_mode(agent_id)
                 or "full").strip() or "full"
         private = set(private_paths or [])
+        room_id = (room_id or "").strip() or None
         if mode == "sealed":
+            if room_id:
+                if self.room_vault is None:
+                    raise RuntimeError(
+                        "room-sealed agent requested but no RoomVault is bound"
+                    )
+                for path, content in files.items():
+                    size = len(content.encode())
+                    attestable = path not in private
+                    ct = self.room_vault.encrypt_agent_file_b64(
+                        room_id, agent_id, path, content,
+                    )
+                    self.db.execute_commit(
+                        "INSERT INTO _hivemind_agent_files "
+                        "(agent_id, file_path, content, ciphertext, "
+                        "seal_mode, room_id, size_bytes, attestable) "
+                        "VALUES (%s, %s, NULL, %s, %s, %s, %s, %s) "
+                        "ON CONFLICT (agent_id, file_path) DO UPDATE SET "
+                        "content=NULL, ciphertext=EXCLUDED.ciphertext, "
+                        "seal_mode=EXCLUDED.seal_mode, "
+                        "room_id=EXCLUDED.room_id, "
+                        "size_bytes=EXCLUDED.size_bytes, "
+                        "attestable=EXCLUDED.attestable",
+                        [agent_id, path, ct, "room", room_id, size, attestable],
+                    )
+                return len(files)
             from .. import agent_seal as _aseal
 
             if not _aseal.is_available():
@@ -260,13 +293,15 @@ class AgentStore:
                 self.db.execute_commit(
                     "INSERT INTO _hivemind_agent_files "
                     "(agent_id, file_path, content, ciphertext, "
-                    "size_bytes, attestable) "
-                    "VALUES (%s, %s, NULL, %s, %s, %s) "
+                    "seal_mode, room_id, size_bytes, attestable) "
+                    "VALUES (%s, %s, NULL, %s, %s, NULL, %s, %s) "
                     "ON CONFLICT (agent_id, file_path) DO UPDATE SET "
                     "content=NULL, ciphertext=EXCLUDED.ciphertext, "
+                    "seal_mode=EXCLUDED.seal_mode, "
+                    "room_id=EXCLUDED.room_id, "
                     "size_bytes=EXCLUDED.size_bytes, "
                     "attestable=EXCLUDED.attestable",
-                    [agent_id, path, ct, size, attestable],
+                    [agent_id, path, ct, "kms", size, attestable],
                 )
             return len(files)
         encrypt = self._seal_active()
@@ -278,22 +313,26 @@ class AgentStore:
                 self.db.execute_commit(
                     "INSERT INTO _hivemind_agent_files "
                     "(agent_id, file_path, content, ciphertext, "
-                    "size_bytes, attestable) "
-                    "VALUES (%s, %s, NULL, %s, %s, %s) "
+                    "seal_mode, room_id, size_bytes, attestable) "
+                    "VALUES (%s, %s, NULL, %s, %s, NULL, %s, %s) "
                     "ON CONFLICT (agent_id, file_path) DO UPDATE SET "
                     "content=NULL, ciphertext=EXCLUDED.ciphertext, "
+                    "seal_mode=EXCLUDED.seal_mode, "
+                    "room_id=EXCLUDED.room_id, "
                     "size_bytes=EXCLUDED.size_bytes, "
                     "attestable=EXCLUDED.attestable",
-                    [agent_id, path, ct, size, attestable],
+                    [agent_id, path, ct, "tenant", size, attestable],
                 )
             else:
                 self.db.execute_commit(
                     "INSERT INTO _hivemind_agent_files "
                     "(agent_id, file_path, content, ciphertext, "
-                    "size_bytes, attestable) "
-                    "VALUES (%s, %s, %s, NULL, %s, %s) "
+                    "seal_mode, room_id, size_bytes, attestable) "
+                    "VALUES (%s, %s, %s, NULL, '', NULL, %s, %s) "
                     "ON CONFLICT (agent_id, file_path) DO UPDATE SET "
                     "content=EXCLUDED.content, ciphertext=NULL, "
+                    "seal_mode=EXCLUDED.seal_mode, "
+                    "room_id=EXCLUDED.room_id, "
                     "size_bytes=EXCLUDED.size_bytes, "
                     "attestable=EXCLUDED.attestable",
                     [agent_id, path, content, size, attestable],
@@ -306,16 +345,37 @@ class AgentStore:
         files: dict[str, str],
         private_paths: list[str] | None = None,
         inspection_mode: str | None = None,
+        room_id: str | None = None,
     ) -> int:
         """Replace all extracted files for an agent."""
         mode = (inspection_mode or self._agent_inspection_mode(agent_id)
                 or "full").strip() or "full"
         private = set(private_paths or [])
+        room_id = (room_id or "").strip() or None
         self.db.execute_commit(
             "DELETE FROM _hivemind_agent_files WHERE agent_id = %s",
             [agent_id],
         )
         if mode == "sealed":
+            if room_id:
+                if self.room_vault is None:
+                    raise RuntimeError(
+                        "room-sealed agent requested but no RoomVault is bound"
+                    )
+                for path, content in files.items():
+                    size = len(content.encode())
+                    attestable = path not in private
+                    ct = self.room_vault.encrypt_agent_file_b64(
+                        room_id, agent_id, path, content,
+                    )
+                    self.db.execute_commit(
+                        "INSERT INTO _hivemind_agent_files "
+                        "(agent_id, file_path, content, ciphertext, "
+                        "seal_mode, room_id, size_bytes, attestable) "
+                        "VALUES (%s, %s, NULL, %s, %s, %s, %s, %s)",
+                        [agent_id, path, ct, "room", room_id, size, attestable],
+                    )
+                return len(files)
             from .. import agent_seal as _aseal
 
             if not _aseal.is_available():
@@ -330,9 +390,9 @@ class AgentStore:
                 self.db.execute_commit(
                     "INSERT INTO _hivemind_agent_files "
                     "(agent_id, file_path, content, ciphertext, "
-                    "size_bytes, attestable) "
-                    "VALUES (%s, %s, NULL, %s, %s, %s)",
-                    [agent_id, path, ct, size, attestable],
+                    "seal_mode, room_id, size_bytes, attestable) "
+                    "VALUES (%s, %s, NULL, %s, %s, NULL, %s, %s)",
+                    [agent_id, path, ct, "kms", size, attestable],
                 )
             return len(files)
         encrypt = self._seal_active()
@@ -344,16 +404,16 @@ class AgentStore:
                 self.db.execute_commit(
                     "INSERT INTO _hivemind_agent_files "
                     "(agent_id, file_path, content, ciphertext, "
-                    "size_bytes, attestable) "
-                    "VALUES (%s, %s, NULL, %s, %s, %s)",
-                    [agent_id, path, ct, size, attestable],
+                    "seal_mode, room_id, size_bytes, attestable) "
+                    "VALUES (%s, %s, NULL, %s, %s, NULL, %s, %s)",
+                    [agent_id, path, ct, "tenant", size, attestable],
                 )
             else:
                 self.db.execute_commit(
                     "INSERT INTO _hivemind_agent_files "
                     "(agent_id, file_path, content, ciphertext, "
-                    "size_bytes, attestable) "
-                    "VALUES (%s, %s, %s, NULL, %s, %s)",
+                    "seal_mode, room_id, size_bytes, attestable) "
+                    "VALUES (%s, %s, %s, NULL, '', NULL, %s, %s)",
                     [agent_id, path, content, size, attestable],
                 )
         return len(files)
@@ -423,13 +483,38 @@ class AgentStore:
             "attested_files_count": att_count,
         }
 
-    def _decrypt_row(self, agent_id: str, file_path: str, ct_b64: str) -> str:
+    def _decrypt_row(
+        self,
+        agent_id: str,
+        file_path: str,
+        ct_b64: str,
+        seal_mode: str | None = None,
+        room_id: str | None = None,
+    ) -> str:
         """Decrypt a ciphertext row regardless of which key wraps it.
 
-        Sealed agents use ``agent_seal`` (enclave-only KMS key); legacy
-        rows use the tenant DEK. Try sealed first when the agent is
-        registered as sealed; fall back to tenant DEK otherwise.
+        ``seal_mode`` is explicit for new rows:
+          - ``room``: room-vault DEK, participant-presented
+          - ``kms``: legacy sealed-agent KMS key
+          - ``tenant``: tenant DEK
+
+        Empty legacy rows infer from agent inspection mode.
         """
+        seal_mode = (seal_mode or "").strip()
+        if seal_mode == "room":
+            if self.room_vault is None or not room_id:
+                raise RuntimeError(
+                    "room-sealed agent row is missing RoomVault or room_id"
+                )
+            return self.room_vault.decrypt_agent_file_b64(
+                room_id, agent_id, file_path, ct_b64,
+            )
+        if seal_mode == "kms":
+            from .. import agent_seal as _aseal
+            return _aseal.decrypt_b64(agent_id, file_path, ct_b64)
+        if seal_mode == "tenant":
+            return self._decode_ct(ct_b64, agent_id, file_path)
+
         mode = self._agent_inspection_mode(agent_id)
         if mode == "sealed":
             from .. import agent_seal as _aseal
@@ -454,7 +539,8 @@ class AgentStore:
         running inside the enclave that legitimately need plaintext.
         """
         rows = self.db.execute(
-            "SELECT content, ciphertext FROM _hivemind_agent_files "
+            "SELECT content, ciphertext, seal_mode, room_id "
+            "FROM _hivemind_agent_files "
             "WHERE agent_id = %s AND file_path = %s",
             [agent_id, file_path],
         )
@@ -464,7 +550,13 @@ class AgentStore:
             raise AgentSealedReadError(agent_id)
         r = rows[0]
         if r.get("ciphertext"):
-            return self._decrypt_row(agent_id, file_path, r["ciphertext"])
+            return self._decrypt_row(
+                agent_id,
+                file_path,
+                r["ciphertext"],
+                r.get("seal_mode"),
+                r.get("room_id"),
+            )
         return r["content"]
 
     def get_files(
@@ -477,7 +569,8 @@ class AgentStore:
         decrypted bytes.
         """
         rows = self.db.execute(
-            "SELECT file_path, content, ciphertext FROM _hivemind_agent_files "
+            "SELECT file_path, content, ciphertext, seal_mode, room_id "
+            "FROM _hivemind_agent_files "
             "WHERE agent_id = %s ORDER BY file_path",
             [agent_id],
         )
@@ -489,7 +582,11 @@ class AgentStore:
         for r in rows:
             if r.get("ciphertext"):
                 out[r["file_path"]] = self._decrypt_row(
-                    agent_id, r["file_path"], r["ciphertext"],
+                    agent_id,
+                    r["file_path"],
+                    r["ciphertext"],
+                    r.get("seal_mode"),
+                    r.get("room_id"),
                 )
             else:
                 out[r["file_path"]] = r["content"] or ""

@@ -159,9 +159,11 @@ manifest and bind the final run attestation to the accepted manifest hash.
 Room vault data is the stronger storage path for private room documents:
 it is encrypted under a random room DEK wrapped to the owner `hmk_` and
 the invite `hmq_`. After a restart or backend update, the vault stays
-sealed until one of those participants interacts again. Legacy app tables
-written through `/v1/store` are still plaintext inside the CVM/Postgres
-boundary and rely on LUKS2/TDX plus the room scope rules.
+sealed until one of those participants interacts again. Sealed query agents
+uploaded through an uploadable room use the same participant-presented room
+key, so their private source parts have the same interaction gate. Legacy
+app tables written through `/v1/store` are still plaintext inside the
+CVM/Postgres boundary and rely on LUKS2/TDX plus the room scope rules.
 
 ### Operator commands (`hivemind admin …`)
 

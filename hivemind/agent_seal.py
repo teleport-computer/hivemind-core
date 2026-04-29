@@ -1,7 +1,7 @@
-"""Phase 6: KMS-derived enclave key for sealed agent files.
+"""Phase 6: KMS-derived enclave key for legacy sealed agent files.
 
-Sealed-mode agents (B uploads with ``inspection_mode=sealed``) have
-their source bytes encrypted under a key derived from
+Non-room sealed-mode agents (``inspection_mode=sealed`` without a room id)
+have their source bytes encrypted under a key derived from
 ``dstack.get_key("hivemind-agent-private-v1", "")``. The key is:
 
   • deterministic per CVM (same compose_hash → same key on every restart)
@@ -18,6 +18,11 @@ The runtime difference vs. ``seal.py`` (tenant DEK):
   - agent seal: derived from KMS once at boot. No bearer. Used only
     by build/rebuild paths. The ``files/{path}`` HTTP endpoint
     refuses to serve plaintext for sealed agents — defense in depth.
+
+Room-uploaded sealed query agents do not use this module. Their source bytes
+are sealed under the participant-presented room vault key instead, so a
+backend restart/update needs a room participant to interact before rebuild
+or digest paths can decrypt them.
 
 Threat model: A's tenant role can SELECT ciphertext rows but cannot
 decrypt them. Only the running CVM (this compose_hash) can. To add a

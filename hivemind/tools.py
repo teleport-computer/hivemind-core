@@ -479,9 +479,9 @@ def build_agent_file_tools(agent_store, query_agent_id: str) -> list[Tool]:
         except AgentSealedReadError:
             return (
                 "This query agent is sealed (inspection_mode=sealed). "
-                "Source files are encrypted under the enclave-only key and "
-                "cannot be inspected. Reason about the agent from its image "
-                "digest, attested file list, and runtime SQL only."
+                "Source files are encrypted for runtime-only use and cannot "
+                "be inspected. Reason about the agent from its image digest, "
+                "attested file list, and runtime SQL only."
             )
         if content is None:
             return "File not found. Use list_query_agent_files to see available files."
