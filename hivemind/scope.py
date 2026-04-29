@@ -17,6 +17,16 @@ from typing import Callable
 
 logger = logging.getLogger(__name__)
 
+# Use the "spawn" start method explicitly. On Linux (production Phala CVMs)
+# multiprocessing defaults to "fork", which inherits the parent's open fds,
+# psycopg connection state, threading.RLocks held by other threads, and the
+# asyncio event loop at the moment of fork. That can deadlock the child on
+# any lock that wasn't released, or corrupt the shared psycopg connection.
+# "spawn" launches a fresh interpreter that re-imports modules from scratch,
+# eliminating the entire class of fork-from-asyncio hazards. macOS already
+# defaults to "spawn", so this is a no-op there.
+_MP_CONTEXT = multiprocessing.get_context("spawn")
+
 # Safe builtins — no IO, no imports, no code generation
 _SCOPE_BUILTINS: dict = {
     "True": True,
@@ -351,8 +361,8 @@ def apply_scope_fn(
       {"allow": False, "error": "..."} on denial or error
     """
     if _source:
-        q: multiprocessing.Queue = multiprocessing.Queue()
-        p = multiprocessing.Process(
+        q: multiprocessing.Queue = _MP_CONTEXT.Queue()
+        p = _MP_CONTEXT.Process(
             target=_run_scope_in_process,
             args=(_source, sql, params, rows, q),
             daemon=True,
