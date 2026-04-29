@@ -204,6 +204,8 @@ _INTERNAL_MIGRATIONS: tuple[str, ...] = (
     "ALTER TABLE _hivemind_query_runs "
     "ADD COLUMN IF NOT EXISTS prompt TEXT",
     "ALTER TABLE _hivemind_query_runs "
+    "ADD COLUMN IF NOT EXISTS issuer_token_id TEXT",
+    "ALTER TABLE _hivemind_query_runs "
     "ADD COLUMN IF NOT EXISTS output_visibility TEXT "
     "NOT NULL DEFAULT 'owner_and_querier'",
     "ALTER TABLE _hivemind_query_runs "

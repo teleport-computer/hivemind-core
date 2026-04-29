@@ -6,6 +6,60 @@ data plus a scope agent; a participant verifies those rules and the running
 enclave before asking through a fixed query agent or bringing their own. Only
 the room-approved output leaves the enclave.
 
+## Install
+
+Requires Python 3.11+, `uv`, Docker for agent builds/runs, and Postgres for
+local development.
+
+```bash
+uv tool install --editable .
+hivemind --help
+```
+
+## Quick Use
+
+Join an existing room:
+
+```bash
+ROOM='hmroom://...'
+
+hivemind room inspect "$ROOM"
+hivemind -y room ask "$ROOM" "What changed this month?"
+```
+
+Create a fixed-query room and share the printed invite:
+
+```bash
+hivemind room create ./scope-agent \
+  --name example-room \
+  --query-agent ./query-agent \
+  --scope-visibility inspectable \
+  --query-visibility inspectable \
+  --rules-file rules.md \
+  --trust-mode owner_approved
+```
+
+The rules file is plain text; Markdown is conventional because humans read
+and sign it. Use YAML only if your own agents are written to interpret YAML.
+
+Connect a local profile to a deployed service:
+
+```bash
+hivemind init --service https://hivemind.example --api-key hmk_...
+hivemind trust attest --reproduce
+```
+
+For local development:
+
+```bash
+./scripts/quickstart.sh
+hivemind init --service http://localhost:8100 --api-key hmk_...
+```
+
+For copy-paste room setups, see the [room cookbook](docs/room-cookbook.md).
+
+## Room Data Flow
+
 ```text
 owner data + scope agent         participant question or query agent
           \                     /
@@ -65,8 +119,7 @@ The design follows the conditional-recall framing from
 let an AI system use private context for a bounded purpose, then constrain what
 can be recalled outside that purpose. See the
 [mental model](docs/conditional-recall.md) for the room data flow and the
-scope/query agent relationship. For copy-paste room setups, see the
-[room cookbook](docs/room-cookbook.md).
+scope/query agent relationship.
 
 ## What An Agent Is
 
@@ -86,37 +139,6 @@ participant's task through scoped tools. Examples live in:
 - `agents/default-query/`
 - `agents/examples/simple-query/`
 - `agents/examples/tiktok-analytics/`
-
-## Install
-
-Requires Python 3.11+, `uv`, Docker for agent builds/runs, and Postgres for
-local development.
-
-```bash
-uv tool install --editable .
-hivemind --help
-```
-
-## Connect
-
-```bash
-hivemind init --service https://hivemind.example --api-key hmk_...
-hivemind trust attest
-hivemind trust attest --reproduce
-```
-
-For non-local services, the CLI fails closed unless it can verify the CVM's
-TDX quote and enclave TLS binding. Use `--allow-degraded-attestation` only for
-debugging a known service without full proof. Use
-`--dangerously-skip-attestations` when you explicitly choose to skip all
-client-side attestation checks.
-
-For local development:
-
-```bash
-./scripts/quickstart.sh
-hivemind init --service http://localhost:8100 --api-key hmk_...
-```
 
 ## Owner Flow
 

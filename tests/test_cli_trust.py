@@ -13,6 +13,7 @@ from click.testing import CliRunner
 
 from hivemind import cli as _cli_mod
 from hivemind import trust as _trust
+from hivemind.cli import rooms as _rooms_cli
 
 _ROOM_LINK = (
     "hmroom://invite/room_test?"
@@ -81,6 +82,76 @@ def test_remote_https_requires_full_attestation_by_default(
     result = runner.invoke(_cli_mod.cli, ["room", "inspect", _ROOM_LINK])
     assert result.exit_code == 4
     assert "TDX quote" in result.output
+
+
+def test_room_ask_omits_room_id_from_path_scoped_run_body(
+    _sandbox, monkeypatch
+):
+    captured: dict = {}
+
+    monkeypatch.setattr(
+        _rooms_cli,
+        "_fetch_verified_room",
+        lambda *a, **kw: {
+            "room": {
+                "manifest_hash": "mh",
+                "manifest": {
+                    "trust": {
+                        "mode": "operator_updates",
+                        "allowed_composes": [],
+                    }
+                },
+            },
+            "attestation": {"attestation": {"compose_hash": "0xabc"}},
+        },
+    )
+    monkeypatch.setattr(_rooms_cli, "_enforce_room_trust", lambda data: None)
+    monkeypatch.setattr(
+        _rooms_cli,
+        "_hget",
+        lambda *a, **kw: type(
+            "Resp",
+            (),
+            {
+                "status_code": 200,
+                "json": lambda self: {
+                    "attestation": {
+                        "run_signer_pubkey_b64": "pub",
+                        "compose_hash": "0xabc",
+                    }
+                },
+            },
+        )(),
+    )
+
+    def fake_query_tracked(service, headers, payload, **kwargs):
+        captured["service"] = service
+        captured["headers"] = headers
+        captured["payload"] = payload
+        captured["kwargs"] = kwargs
+
+    monkeypatch.setattr(_rooms_cli, "_query_tracked", fake_query_tracked)
+
+    result = CliRunner().invoke(
+        _cli_mod.cli,
+        [
+            "room",
+            "ask",
+            _ROOM_LINK,
+            "--provider",
+            "tinfoil",
+            "--model",
+            "kimi-k2-6",
+            "Show me top hashtags.",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["payload"]["query"] == "Show me top hashtags."
+    assert captured["payload"]["provider"] == "tinfoil"
+    assert captured["payload"]["model"] == "kimi-k2-6"
+    assert "room_id" not in captured["payload"]
+    assert captured["kwargs"]["submit_path"] == "/v1/rooms/room_test/runs"
 
 
 def test_trust_check_aborts_on_tofu_when_user_declines(_sandbox, monkeypatch):

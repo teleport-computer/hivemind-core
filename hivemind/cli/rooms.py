@@ -668,7 +668,7 @@ def ask_room(
     )
     _enforce_room_trust(room_data)
     manifest_hash = room_data["room"]["manifest_hash"]
-    payload = {"query": question, "room_id": room_id}
+    payload = {"query": question}
     if query_agent:
         payload["query_agent_id"] = query_agent
     if max_tokens:
