@@ -48,20 +48,19 @@ the uploaded source is stored.
 For the current live watch-history tenant:
 
 ```bash
-hivemind --profile watch-history room create fae0070e6f1f \
+hivemind --profile watch-history room create agents/examples/watch-history-scope \
   --name watch-history-hashtags \
-  --query-agent 730f2d35c608 \
+  --query-agent agents/examples/watch-history-hashtag-query \
   --scope-visibility inspectable \
   --query-visibility inspectable \
   --rules-file rules.md \
   --trust-mode owner_approved \
-  --llm-provider tinfoil \
-  --llm-provider openrouter
+  --no-llm
 ```
 
-That command creates a fixed-query room using the existing inspectable scope
-and query agents, permits either Tinfoil or OpenRouter LLM egress, and prints
-the `hmroom://...` invite link to share. Because query visibility is
+That command creates a fixed-query room with deterministic watch-history scope
+and hashtag query agents, disables external LLM egress, and prints the
+`hmroom://...` invite link to share. Because query visibility is
 `inspectable`, prompts for room runs are stored in run history.
 
 Ask through the invite:
@@ -69,24 +68,11 @@ Ask through the invite:
 ```bash
 hivemind -y room ask 'hmroom://...' \
   --timeout 900 \
-  --max-tokens 300000 \
-  --max-llm-calls 50 \
-  --provider openrouter \
-  --model moonshotai/kimi-k2.6 \
   "Show me my top 30 hashtags by watch count as a markdown table with columns: rank, hashtag, watches. Just the table, no explanation."
 ```
 
-Use Tinfoil instead when upstream inference should be TEE-attested:
-
-```bash
-hivemind -y room ask 'hmroom://...' \
-  --timeout 900 \
-  --max-tokens 300000 \
-  --max-llm-calls 50 \
-  --provider tinfoil \
-  --model kimi-k2-6 \
-  "Show me my top 30 hashtags by watch count as a markdown table with columns: rank, hashtag, watches. Just the table, no explanation."
-```
+Provider/model flags matter only for LLM-backed query agents. This fixed
+hashtag query agent does not call an LLM.
 
 ## Participant Uploads Query Agent
 

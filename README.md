@@ -139,6 +139,8 @@ participant's task through scoped tools. Examples live in:
 - `agents/default-query/`
 - `agents/examples/simple-query/`
 - `agents/examples/tiktok-analytics/`
+- `agents/examples/watch-history-hashtag-query/`
+- `agents/examples/watch-history-scope/`
 
 ## Owner Flow
 
