@@ -23,6 +23,19 @@ def _make_pipeline(db: Database) -> Pipeline:
     return Pipeline(settings, db, agent_store)
 
 
+def _mock_default_scope(pipeline: Pipeline) -> None:
+    """Give run_query tests the required scope stage without spending Docker/LLM."""
+    pipeline.settings.default_scope_agent = "scope-default"
+    scope_fn = lambda sql, params, rows: {"allow": True, "rows": rows}
+    pipeline._run_scope_agent = AsyncMock(
+        return_value=(
+            scope_fn,
+            "def scope(sql, params, rows): return {'allow': True, 'rows': rows}",
+            {"total_tokens": 0},
+        )
+    )
+
+
 @pytest.fixture
 def pg_db(tmp_path):
     """Create a test Postgres Database.
@@ -84,8 +97,16 @@ class TestRunQuery:
     @pytest.mark.asyncio
     async def test_query_agent_not_found(self, pg_db):
         pipeline = _make_pipeline(pg_db)
+        _mock_default_scope(pipeline)
         req = QueryRequest(query="What?", query_agent_id="nonexistent")
         with pytest.raises(ValueError, match="not found"):
+            await pipeline.run_query(req)
+
+    @pytest.mark.asyncio
+    async def test_query_requires_scope_agent(self, pg_db):
+        pipeline = _make_pipeline(pg_db)
+        req = QueryRequest(query="What?", query_agent_id="q1")
+        with pytest.raises(ValueError, match="scope_agent_id is required"):
             await pipeline.run_query(req)
 
     @pytest.mark.asyncio
@@ -196,6 +217,7 @@ class TestRunQuery:
     @pytest.mark.asyncio
     async def test_mediator_budget_is_reserved_for_query_agent(self, pg_db):
         pipeline = _make_pipeline(pg_db)
+        _mock_default_scope(pipeline)
         pipeline._run_query_agent = AsyncMock(
             return_value=("output", {"total_tokens": 0})
         )
@@ -218,6 +240,7 @@ class TestRunQuery:
     @pytest.mark.asyncio
     async def test_mediator_failure_does_not_fail_query(self, pg_db):
         pipeline = _make_pipeline(pg_db)
+        _mock_default_scope(pipeline)
         pipeline._run_query_agent = AsyncMock(
             return_value=("raw output", {"total_tokens": 42})
         )
@@ -238,6 +261,7 @@ class TestRunQuery:
     @pytest.mark.asyncio
     async def test_mediator_agent_not_found_still_raises(self, pg_db):
         pipeline = _make_pipeline(pg_db)
+        _mock_default_scope(pipeline)
         pipeline._run_query_agent = AsyncMock(
             return_value=("raw output", {"total_tokens": 0})
         )
@@ -252,6 +276,7 @@ class TestRunQuery:
     @pytest.mark.asyncio
     async def test_mediator_is_skipped_when_remaining_budget_is_too_low(self, pg_db):
         pipeline = _make_pipeline(pg_db)
+        _mock_default_scope(pipeline)
         pipeline._run_query_agent = AsyncMock(
             return_value=("raw output", {"total_tokens": 49})
         )
