@@ -52,9 +52,10 @@ def _dsn_with_statement_timeout(dsn: str) -> str:
 
 
 # Single source of truth for hivemind's internal schema. Both Database and
-# HttpDatabase iterate this list at bootstrap. Keep DDL idempotent
-# (CREATE TABLE/INDEX IF NOT EXISTS) so reboots and HTTP-proxy bootstraps
-# are safe to retry.
+# HttpDatabase iterate these lists at bootstrap. Tables are created first,
+# legacy columns are migrated second, and indexes are created last so an
+# existing table missing a newly indexed column can still migrate in place.
+# Keep DDL idempotent so reboots and HTTP-proxy bootstraps are safe to retry.
 _INTERNAL_DDL: tuple[str, ...] = (
     """
     CREATE TABLE IF NOT EXISTS _hivemind_agents (
@@ -140,10 +141,6 @@ _INTERNAL_DDL: tuple[str, ...] = (
     )
     """,
     """
-    CREATE INDEX IF NOT EXISTS _hivemind_query_runs_room_idx
-    ON _hivemind_query_runs (room_id, created_at DESC)
-    """,
-    """
     CREATE TABLE IF NOT EXISTS _hivemind_query_artifacts (
         run_id TEXT NOT NULL,
         filename TEXT NOT NULL,
@@ -153,10 +150,6 @@ _INTERNAL_DDL: tuple[str, ...] = (
         created_at DOUBLE PRECISION NOT NULL,
         PRIMARY KEY (run_id, filename)
     )
-    """,
-    """
-    CREATE INDEX IF NOT EXISTS _hivemind_query_artifacts_created_idx
-    ON _hivemind_query_artifacts (created_at)
     """,
     """
     CREATE TABLE IF NOT EXISTS _hivemind_rooms (
@@ -175,11 +168,7 @@ _INTERNAL_DDL: tuple[str, ...] = (
         revoked_at DOUBLE PRECISION
     )
     """,
-    """
-    CREATE INDEX IF NOT EXISTS _hivemind_rooms_created_idx
-    ON _hivemind_rooms (created_at DESC)
-    """,
-        # Room data: persistent room items encrypted under a per-room DEK.
+    # Room data: persistent room items encrypted under a per-room DEK.
     # The DEK is not KMS-derived. Each participant gets a separate wrap
     # row derived from their bearer token, so data stays sealed after a
     # restart until a participant interacts with the room again.
@@ -204,10 +193,6 @@ _INTERNAL_DDL: tuple[str, ...] = (
         PRIMARY KEY (room_id, item_id)
     )
     """,
-    """
-    CREATE INDEX IF NOT EXISTS _hivemind_room_vault_items_room_idx
-    ON _hivemind_room_vault_items (room_id, created_at)
-    """,
 )
 
 _INTERNAL_MIGRATIONS: tuple[str, ...] = (
@@ -225,6 +210,25 @@ _INTERNAL_MIGRATIONS: tuple[str, ...] = (
     "ADD COLUMN IF NOT EXISTS seal_mode TEXT NOT NULL DEFAULT ''",
     "ALTER TABLE _hivemind_agent_files "
     "ADD COLUMN IF NOT EXISTS room_id TEXT",
+)
+
+_INTERNAL_INDEX_DDL: tuple[str, ...] = (
+    """
+    CREATE INDEX IF NOT EXISTS _hivemind_query_runs_room_idx
+    ON _hivemind_query_runs (room_id, created_at DESC)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS _hivemind_query_artifacts_created_idx
+    ON _hivemind_query_artifacts (created_at)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS _hivemind_rooms_created_idx
+    ON _hivemind_rooms (created_at DESC)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS _hivemind_room_vault_items_room_idx
+    ON _hivemind_room_vault_items (room_id, created_at)
+    """,
 )
 
 
@@ -275,6 +279,8 @@ class Database:
                 for ddl in _INTERNAL_DDL:
                     cur.execute(ddl)
                 for ddl in _INTERNAL_MIGRATIONS:
+                    cur.execute(ddl)
+                for ddl in _INTERNAL_INDEX_DDL:
                     cur.execute(ddl)
             self._conn.commit()
 
@@ -352,6 +358,8 @@ class HttpDatabase:
         for ddl in _INTERNAL_DDL:
             self.execute_commit(ddl)
         for ddl in _INTERNAL_MIGRATIONS:
+            self.execute_commit(ddl)
+        for ddl in _INTERNAL_INDEX_DDL:
             self.execute_commit(ddl)
 
     def _check(self, resp) -> dict:

@@ -101,6 +101,27 @@ def _token_id(token_hash_hex: str) -> str:
     return token_hash_hex[:12]
 
 
+def _is_missing_database_error(exc: Exception, db_name: str) -> bool:
+    """Return true only for a missing database, not any missing object.
+
+    The HTTP SQL proxy returns database errors as plain text. A previous
+    broad check for ``"does not exist"`` also matched schema failures like
+    ``column "room_id" does not exist`` and incorrectly tried to create an
+    already-existing control DB.
+    """
+    msg = str(exc).lower()
+    db = (db_name or "").strip().lower()
+    if "3d000" in msg:
+        return True
+    if not db or "database" not in msg or "does not exist" not in msg:
+        return False
+    return (
+        f'database "{db}" does not exist' in msg
+        or f"database '{db}' does not exist" in msg
+        or f"database {db} does not exist" in msg
+    )
+
+
 class TenantRegistry:
     """Bearer-token → Hivemind resolver with LRU cache."""
 
@@ -137,8 +158,9 @@ class TenantRegistry:
             # have admin privileges, create it and retry once.
             if self._pg_admin is None:
                 raise
-            msg = str(e).lower()
-            if "does not exist" not in msg and "3d000" not in msg:
+            if not _is_missing_database_error(
+                e, self.settings.control_database
+            ):
                 raise
             logger.info(
                 "Control DB '%s' not found — creating it now",

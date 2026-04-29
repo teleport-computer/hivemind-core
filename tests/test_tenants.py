@@ -20,7 +20,11 @@ import psycopg
 import pytest
 
 from hivemind.config import Settings
-from hivemind.tenants import TenantRegistry, _hash_api_key
+from hivemind.tenants import (
+    TenantRegistry,
+    _hash_api_key,
+    _is_missing_database_error,
+)
 
 
 TEST_DSN = os.environ.get(
@@ -390,6 +394,17 @@ def test_migration_repairs_double_encoded_hashes(registry):
     )[0]["api_key_hash"]
     assert after == good
     assert registry.resolve(t["api_key"]) is not None
+
+
+def test_missing_database_detection_does_not_mask_schema_errors():
+    assert _is_missing_database_error(
+        RuntimeError('SQL proxy error (400): database "hivemind_control" does not exist'),
+        "hivemind_control",
+    )
+    assert not _is_missing_database_error(
+        RuntimeError('SQL proxy error (400): column "room_id" does not exist'),
+        "hivemind_control",
+    )
 
 
 def test_docker_image_tag_scoping():

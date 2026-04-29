@@ -1,8 +1,11 @@
 """Tests for Hivemind core integration with Database and pipeline."""
 import os
+import secrets
 from unittest.mock import AsyncMock, MagicMock
 
+import psycopg
 import pytest
+from psycopg import conninfo as pg_conninfo
 
 from hivemind.config import Settings
 from hivemind.core import Hivemind
@@ -16,6 +19,20 @@ DEFAULT_AGENT_IDS = (
     "default-query",
     "default-mediator",
 )
+
+
+def _dsn_for_db(dsn: str, db_name: str) -> str:
+    parsed = pg_conninfo.conninfo_to_dict(dsn)
+    parsed["dbname"] = db_name
+    return pg_conninfo.make_conninfo(**parsed)
+
+
+def _drop_db(dsn: str, db_name: str) -> None:
+    try:
+        with psycopg.connect(dsn, autocommit=True) as conn:
+            conn.execute(f'DROP DATABASE IF EXISTS "{db_name}" WITH (FORCE)')
+    except Exception:
+        pass
 
 
 def _clear_default_agents(dsn: str) -> None:
@@ -71,6 +88,57 @@ class TestDatabaseInit:
         table_names = {r["table_name"] for r in rows}
         assert "_hivemind_agents" in table_names
         assert "_hivemind_agent_files" in table_names
+
+    def test_bootstrap_migrates_legacy_query_runs_before_indexes(self):
+        test_dsn = os.environ.get("HIVEMIND_TEST_DATABASE_URL", "")
+        if not test_dsn:
+            pytest.skip("HIVEMIND_TEST_DATABASE_URL not set")
+
+        db_name = f"hm_legacy_{secrets.token_hex(4)}"
+        with psycopg.connect(test_dsn, autocommit=True) as conn:
+            conn.execute(f'CREATE DATABASE "{db_name}"')
+
+        legacy_dsn = _dsn_for_db(test_dsn, db_name)
+        try:
+            with psycopg.connect(legacy_dsn, autocommit=True) as conn:
+                conn.execute(
+                    """
+                    CREATE TABLE _hivemind_query_runs (
+                        run_id TEXT PRIMARY KEY,
+                        agent_id TEXT NOT NULL,
+                        status TEXT NOT NULL DEFAULT 'pending',
+                        created_at DOUBLE PRECISION NOT NULL,
+                        updated_at DOUBLE PRECISION NOT NULL
+                    )
+                    """
+                )
+
+            db = Database(legacy_dsn)
+            try:
+                columns = {
+                    row["column_name"]
+                    for row in db.execute(
+                        "SELECT column_name FROM information_schema.columns "
+                        "WHERE table_name = '_hivemind_query_runs'"
+                    )
+                }
+                assert "room_id" in columns
+                assert "room_manifest_hash" in columns
+                assert "output_visibility" in columns
+                assert "artifacts_enabled" in columns
+
+                indexes = {
+                    row["indexname"]
+                    for row in db.execute(
+                        "SELECT indexname FROM pg_indexes "
+                        "WHERE tablename = '_hivemind_query_runs'"
+                    )
+                }
+                assert "_hivemind_query_runs_room_idx" in indexes
+            finally:
+                db.close()
+        finally:
+            _drop_db(test_dsn, db_name)
 
     def test_get_schema_excludes_internal(self, pg_db):
         schema = pg_db.get_schema(exclude_internal=True)
