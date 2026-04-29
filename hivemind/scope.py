@@ -130,6 +130,21 @@ _DANGEROUS_ATTRS = frozenset({
     "tb_frame", "tb_next",
 })
 
+# AST node types that are never legitimate inside a scope function. Yield/Await
+# turn `scope` into a generator/coroutine so it returns a generator object
+# instead of a dict; Global/Nonlocal would let one scope_fn rebind names that
+# survive across calls within the same compiled namespace.
+_FORBIDDEN_NODE_TYPES: tuple[type[ast.AST], ...] = (
+    ast.Yield,
+    ast.YieldFrom,
+    ast.AsyncFunctionDef,
+    ast.AsyncFor,
+    ast.AsyncWith,
+    ast.Await,
+    ast.Global,
+    ast.Nonlocal,
+)
+
 
 def compile_scope_fn(source: str) -> Callable[[str, list, list[dict]], dict]:
     """Compile a scope function source string into a callable.
@@ -157,7 +172,31 @@ def compile_scope_fn(source: str) -> Callable[[str, list, list[dict]], dict]:
     try:
         tree = ast.parse(source, mode="exec")
     except SyntaxError as e:
-        raise ValueError(f"Scope function syntax error: {e}")
+        raise ValueError(f"Scope function syntax error: {e}") from e
+
+    # Module body must contain only function defs (and optionally a leading
+    # docstring). No top-level assignments, classes, expressions — they would
+    # execute at compile-time inside our restricted namespace and surprise
+    # the reader. Helper FunctionDefs alongside `scope` are allowed.
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef):
+            continue
+        if (
+            isinstance(node, ast.Expr)
+            and isinstance(node.value, ast.Constant)
+            and isinstance(node.value.value, str)
+        ):
+            # Module docstring — harmless.
+            continue
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            # Surface the specific reason instead of the generic "module scope"
+            # error — imports get checked again in the ast.walk loop below
+            # for nested cases (e.g. inside a helper FunctionDef).
+            raise ValueError("Scope functions cannot use imports")
+        raise ValueError(
+            "Scope function module may only contain function definitions; "
+            f"found {type(node).__name__} at module scope"
+        )
 
     # Must contain a top-level function def named 'scope'
     func_defs = [
@@ -170,31 +209,30 @@ def compile_scope_fn(source: str) -> Callable[[str, list, list[dict]], dict]:
             "Scope function must define 'def scope(sql, params, rows): ...'"
         )
 
-    # Validate / fix signature to exactly 3 parameters (sql, params, rows)
+    # Signature must be exactly (sql, params, rows). Earlier versions auto-
+    # fixed wrong-arity by renaming the params, but that silently corrupted
+    # the function body (variables in the body kept their original names
+    # while the signature changed). Hard-fail instead.
     scope_def = func_defs[0]
-    args = scope_def.args
-    n_params = len(args.args)
+    n_params = len(scope_def.args.args)
     if n_params != 3:
-        # Auto-fix: pad missing params or trim extras so the function is callable
-        desired = ["sql", "params", "rows"]
-        scope_def.args.args = [ast.arg(arg=name) for name in desired]
-        source = ast.unparse(tree)
-        logger.info(
-            "Auto-fixed scope function signature from %d to 3 params", n_params
+        raise ValueError(
+            f"Scope function 'scope' must take exactly 3 parameters "
+            f"(sql, params, rows); got {n_params}"
         )
-        # Re-parse to ensure the fix is valid
-        try:
-            tree = ast.parse(source)
-        except SyntaxError as e:
-            raise ValueError(f"Scope function syntax error after auto-fix: {e}")
-        func_defs = [
-            n for n in ast.iter_child_nodes(tree)
-            if isinstance(n, ast.FunctionDef) and n.name == "scope"
-        ]
-        scope_def = func_defs[0]
+    param_names = [a.arg for a in scope_def.args.args]
+    if param_names != ["sql", "params", "rows"]:
+        raise ValueError(
+            "Scope function 'scope' parameters must be named "
+            f"(sql, params, rows); got ({', '.join(param_names)})"
+        )
 
     # Safety checks
     for node in ast.walk(tree):
+        if isinstance(node, _FORBIDDEN_NODE_TYPES):
+            raise ValueError(
+                f"Scope functions cannot use {type(node).__name__}"
+            )
         if isinstance(node, (ast.Import, ast.ImportFrom)):
             raise ValueError("Scope functions cannot use imports")
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
@@ -255,7 +293,7 @@ def compile_scope_fn(source: str) -> Callable[[str, list, list[dict]], dict]:
         if isinstance(node, ast.Constant) and isinstance(node.value, str):
             if _DUNDER_RE.search(node.value):
                 raise ValueError(
-                    f"Scope functions cannot reference dunder names in strings"
+                    "Scope functions cannot reference dunder names in strings"
                 )
 
     namespace: dict = {"__builtins__": dict(_SCOPE_BUILTINS)}
@@ -263,7 +301,7 @@ def compile_scope_fn(source: str) -> Callable[[str, list, list[dict]], dict]:
         code = compile(tree, "<scope_fn>", "exec")
         exec(code, namespace)  # noqa: S102
     except Exception as e:
-        raise ValueError(f"Scope function compilation failed: {e}")
+        raise ValueError(f"Scope function compilation failed: {e}") from e
 
     fn = namespace.get("scope")
     if not callable(fn):

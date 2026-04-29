@@ -509,8 +509,15 @@ class Pipeline:
         if agent_config is None:
             raise ValueError(f"Query agent '{query_agent_id}' not found")
 
-        # Build scoped tools
-        tools = build_sql_tools(self.db, AccessLevel.SCOPED, scope_fn=scope_fn)
+        # Build scoped tools. Pass scope_fn_source so execute_sql routes the
+        # scope check through apply_scope_fn — gives the LLM-supplied function
+        # a multiprocessing isolation boundary with a hard timeout.
+        tools = build_sql_tools(
+            self.db,
+            AccessLevel.SCOPED,
+            scope_fn=scope_fn,
+            scope_fn_source=scope_fn_source or None,
+        )
         tool_handlers = {t.name: t.handler for t in tools}
 
         async def on_tool_call(name: str, args: dict) -> str:
@@ -897,7 +904,10 @@ class Pipeline:
                 query_max_tokens = max(1, remaining - _mediator_reserve(remaining))
 
             tools = build_sql_tools(
-                self.db, AccessLevel.SCOPED, scope_fn=scope_fn,
+                self.db,
+                AccessLevel.SCOPED,
+                scope_fn=scope_fn,
+                scope_fn_source=scope_fn_source or None,
             )
             tool_handlers = {t.name: t.handler for t in tools}
 
@@ -943,7 +953,6 @@ class Pipeline:
             )
 
             # -- Stage 2: Mediator --
-            mediator_ran = False
             if resolved_mediator_id and query_output:
                 if remaining < MEDIATOR_MIN_TOKENS:
                     logger.info(
@@ -958,7 +967,6 @@ class Pipeline:
                         run_store.update_stage, run_id, "mediator",
                         started_at=mediator_t0,
                     )
-                    mediator_ran = True
                     try:
                         query_output, _ = await self._run_mediator_agent(
                             mediator_agent_id=resolved_mediator_id,

@@ -118,18 +118,51 @@ def _references_internal_tables(sql: str) -> bool:
     return False
 
 
+MAX_RESULT_BYTES = 1_000_000  # cap serialized JSON output to ~1MB per call
+
+
 def build_sql_tools(
     db: Database,
     access: AccessLevel,
     scope_fn: Callable[[str, list, list[dict]], dict] | None = None,
+    scope_fn_source: str | None = None,
 ) -> list[Tool]:
     """Build SQL tools with the given access level.
 
     For SCOPED access, scope_fn is required — every query's results
     pass through it for filtering/transformation.
+
+    If ``scope_fn_source`` is provided alongside ``scope_fn`` (the typical
+    production path from ``Pipeline._run_query_agent``), the scope function
+    is executed via ``apply_scope_fn`` in a child process with the
+    ``SCOPE_FN_TIMEOUT`` hard kill. Without the source, we fall back to an
+    in-process invocation — used by tests that pass plain Python functions.
     """
     if access == AccessLevel.NONE:
         return []
+
+    def _serialize_rows(rows: list[dict]) -> str:
+        out = json.dumps(rows, default=str)
+        if len(out) <= MAX_RESULT_BYTES:
+            return out
+        # Drop rows from the tail until we fit. Tail-truncation keeps the
+        # earliest rows whole rather than clipping a JSON-mid-string.
+        keep = rows
+        while keep and len(json.dumps(keep, default=str)) > MAX_RESULT_BYTES:
+            keep = keep[: max(1, len(keep) // 2)]
+        return json.dumps(
+            {
+                "rows": keep,
+                "truncated": True,
+                "original_row_count": len(rows),
+                "returned_row_count": len(keep),
+                "note": (
+                    f"Output exceeded {MAX_RESULT_BYTES} bytes; truncated. "
+                    "Use COUNT/aggregate or LIMIT to keep responses small."
+                ),
+            },
+            default=str,
+        )
 
     def execute_sql(sql: str, params: list | None = None) -> str:
         safe_params = params or []
@@ -157,21 +190,32 @@ def build_sql_tools(
         except Exception as e:
             return json.dumps({"error": str(e)})
 
-        # Apply scope function for SCOPED access
+        # Apply scope function for SCOPED access. When we have the original
+        # source we route through apply_scope_fn for subprocess isolation +
+        # hard timeout — otherwise an LLM-supplied infinite loop or memory
+        # bomb would hang the bridge thread. Without a source (test path)
+        # we call directly; the caller's fn is trusted Python.
         if access == AccessLevel.SCOPED and scope_fn is not None:
+            from .scope import apply_scope_fn
+
             try:
-                result = scope_fn(sql, safe_params, rows)
-                if not isinstance(result, dict):
-                    return json.dumps({"error": "Scope function returned invalid result"})
-                if not result.get("allow", False):
-                    error_msg = result.get("error", "Query denied by scope function")
-                    return json.dumps({"error": error_msg})
-                rows = result.get("rows", [])
+                result = apply_scope_fn(
+                    scope_fn,
+                    sql,
+                    safe_params,
+                    rows,
+                    _source=scope_fn_source,
+                )
             except Exception as e:
                 logger.debug("Scope function error: %s", e)
                 return json.dumps({"error": "Query denied by scope function"})
+            if not result.get("allow", False):
+                return json.dumps(
+                    {"error": result.get("error", "Query denied by scope function")}
+                )
+            rows = result.get("rows") or []
 
-        return json.dumps(rows, default=str)
+        return _serialize_rows(rows)
 
     def get_schema() -> str:
         try:

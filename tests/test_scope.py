@@ -120,18 +120,61 @@ class TestCompileScopeFnRejections:
         with pytest.raises(ValueError, match="must define"):
             compile_scope_fn("def other(sql, params, rows):\n    return True")
 
-    def test_wrong_number_of_args_auto_fixed(self):
-        """Scope functions with wrong param count are auto-fixed to (sql, params, rows)."""
-        # Common LLM mistake: def scope(sql, rows) — missing params
+    def test_wrong_number_of_args_rejected(self):
+        """Scope functions with wrong arity are rejected — earlier auto-fix
+        silently corrupted the body (params kept original names while signature
+        changed)."""
+        with pytest.raises(ValueError, match="exactly 3 parameters"):
+            compile_scope_fn(
+                "def scope(sql, rows):\n"
+                "    return {'allow': True, 'rows': rows}"
+            )
+
+    def test_wrong_param_names_rejected(self):
+        with pytest.raises(ValueError, match="must be named"):
+            compile_scope_fn(
+                "def scope(query, p, data):\n"
+                "    return {'allow': True, 'rows': data}"
+            )
+
+    def test_yield_rejected(self):
+        with pytest.raises(ValueError, match="Yield"):
+            compile_scope_fn(
+                "def scope(sql, params, rows):\n"
+                "    yield rows"
+            )
+
+    def test_async_def_rejected(self):
+        with pytest.raises(ValueError, match="AsyncFunctionDef"):
+            compile_scope_fn(
+                "async def scope(sql, params, rows):\n"
+                "    return {'allow': True, 'rows': rows}"
+            )
+
+    def test_global_rejected(self):
+        with pytest.raises(ValueError, match="Global"):
+            compile_scope_fn(
+                "def scope(sql, params, rows):\n"
+                "    global x\n"
+                "    return {'allow': True, 'rows': rows}"
+            )
+
+    def test_module_level_assignment_rejected(self):
+        with pytest.raises(ValueError, match="module scope"):
+            compile_scope_fn(
+                "X = 1\n"
+                "def scope(sql, params, rows):\n"
+                "    return {'allow': True, 'rows': rows}"
+            )
+
+    def test_module_docstring_allowed(self):
+        # Triple-quoted module docstring at the top is harmless.
         fn = compile_scope_fn(
-            "def scope(sql, rows):\n"
-            "    return {'allow': True, 'rows': rows}"
+            '"""Module docstring."""\n'
+            'def scope(sql, params, rows):\n'
+            '    return {"allow": True, "rows": rows}'
         )
-        # After auto-fix, the function accepts 3 args (sql, params, rows)
-        # Note: 'rows' in the body now refers to the 3rd param (correctly)
-        result = fn("SELECT 1", [], [{"id": 1}])
-        assert result["allow"] is True
-        assert result["rows"] == [{"id": 1}]
+        assert fn("SELECT 1", [], [{"a": 1}]) == {"allow": True, "rows": [{"a": 1}]}
 
     def test_import_rejected(self):
         with pytest.raises(ValueError, match="imports"):
