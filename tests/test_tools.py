@@ -244,8 +244,13 @@ class TestAccessLevelScoped:
         tools = build_sql_tools(pg_db, AccessLevel.SCOPED, scope_fn=self._error_scope)
         t = {t.name: t for t in tools}
         result = json.loads(t["execute_sql"].handler("SELECT * FROM test_tools_data"))
+        # Fail-closed: scope_fn raising must surface an error to the caller
+        # rather than letting the rows through. The message wording comes
+        # from apply_scope_fn ("Scope function error: ..."); we only assert
+        # the contract (error returned, no rows leaked).
         assert "error" in result
-        assert "denied" in result["error"].lower()
+        assert isinstance(result["error"], str) and result["error"]
+        assert "rows" not in result
 
     def test_insert_blocked(self, pg_db, test_table):
         tools = build_sql_tools(pg_db, AccessLevel.SCOPED, scope_fn=self._allow_all_scope)
