@@ -321,7 +321,11 @@ variation is in what `rows` becomes.
 
 ## Pattern A — pass through unchanged
 When rows are ALREADY safe (COUNT/SUM/AVG result, GROUP BY on
-non-identifying column, schema introspection).
+non-identifying column, schema introspection). If POLICY explicitly allows a
+GROUP BY dimension such as `hashtags`, `author`, `music`, or a time bucket,
+then rows shaped like `{allowed_dimension, count}` are aggregate rows, not raw
+individual records. Preserve the allowed dimension values and count-like fields,
+subject to any k-anonymity and top-N limits in POLICY.
 
     def scope(sql, params, rows):
         return {"allow": True, "rows": rows}
@@ -355,6 +359,34 @@ Or by category:
         return {"allow": True, "rows": [
             {"category": k, "count": v} for k, v in buckets.items()
         ]}
+
+## Pattern C2 — policy-allowed aggregate dimension table
+When POLICY explicitly allows a dimension to be grouped and shown (for example
+"ALLOW: GROUP BY hashtags, subject to k=5"), and rows are already aggregate
+rows, preserve the allowed dimension key plus count-like metrics. Do NOT replace
+an allowed top-N table with placeholder text or a single match_count row.
+
+    def scope(sql, params, rows):
+        allowed_dims = {"hashtag", "hashtags", "music", "author", "day", "week", "month"}
+        count_keys = {"count", "watch_count", "watches", "n", "total"}
+        out = []
+        for r in rows:
+            clean = {}
+            for k, v in r.items():
+                lk = str(k).lower()
+                if lk in allowed_dims or lk in count_keys:
+                    clean[k] = v
+            c = None
+            for ck in count_keys:
+                if ck in clean:
+                    c = clean.get(ck)
+            if c is not None and int(c) < 5:
+                continue
+            if clean:
+                out.append(clean)
+            if len(out) >= 50:
+                break
+        return {"allow": True, "rows": out}
 
 ## Pattern D — marker row for extraction attempts
 When the user is clearly trying to extract specific individuals (emails,
@@ -417,10 +449,14 @@ Pick one primary pattern; compose if needed.
   - Policy selects specific ROWS ("only X", "within window Y",
     "not about Z") → Pattern E (filter). Compose with B if values
     inside surviving rows also need redaction.
+  - Policy explicitly allows GROUP BY on a dimension and the user asks for
+    a top-N/count table for that dimension → Pattern A or C2. Preserve the
+    allowed group labels and count fields; enforce k/top-N/redaction limits.
   - User is clearly extracting individuals ("list the emails",
     "what names", "show messages matching @") → Pattern D (marker)
   - Pure aggregation-only policy ("summary only, no individual records")
-    → Pattern C regardless of question shape
+    → Pattern C unless POLICY also names allowed group dimensions, in which
+      case use C2 for those dimensions.
 
 When in doubt between B and C: prefer C (counts are always safe,
 partial redaction leaks if incomplete).

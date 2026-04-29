@@ -78,21 +78,21 @@ hivemind -y room ask 'hmroom://...' \
   --timeout 900 \
   --max-tokens 1000000 \
   --max-llm-calls 60 \
-  --provider tinfoil \
-  --model kimi-k2-6 \
+  --provider openrouter \
+  --model anthropic/claude-sonnet-4.5 \
   "Show me my top 30 hashtags by watch count as a markdown table with columns: rank, hashtag, watches. Just the table, no explanation."
 ```
 
-Use OpenRouter instead when you want the cheaper non-TEE upstream model:
+The room allows both Tinfoil and OpenRouter egress, but this watch-history
+example is currently verified with OpenRouter Claude. Use another provider or
+model only after checking that it can complete the scope stage within the room
+timeout.
+
+The copied room link can be shared as a shell variable:
 
 ```bash
-hivemind -y room ask 'hmroom://...' \
-  --timeout 900 \
-  --max-tokens 1000000 \
-  --max-llm-calls 60 \
-  --provider openrouter \
-  --model moonshotai/kimi-k2.6 \
-  "Show me my top 30 hashtags by watch count as a markdown table with columns: rank, hashtag, watches. Just the table, no explanation."
+ROOM='hmroom://hivemind.teleport.computer/room_...?service=https%3A%2F%2Fhivemind.teleport.computer&token=hmq_...&owner_pubkey=...'
+hivemind -y room ask "$ROOM" --provider openrouter --model anthropic/claude-sonnet-4.5 "..."
 ```
 
 ## Participant Uploads Query Agent

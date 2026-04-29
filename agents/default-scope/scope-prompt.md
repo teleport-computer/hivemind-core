@@ -124,6 +124,12 @@ def scope(sql, params, rows):
 
 **Use this pattern ONLY when the scenario explicitly requires aggregation-only access.** If the scenario just says "redact these columns" or "filter these rows," use the PII Redaction or Row-Level Security patterns instead — do NOT add aggregation checks.
 
+If the scenario explicitly allows a GROUP BY dimension, such as `hashtags`,
+`author`, `music`, or a time bucket, then rows shaped like
+`{allowed_dimension, count}` are aggregate rows. Preserve the allowed dimension
+values and count fields, subject to any k-anonymity and top-N limits. Do not
+collapse an explicitly allowed top-N aggregate table into placeholder text.
+
 When aggregation-only IS required: do NOT rely on SQL keyword matching alone. An attacker can write `SELECT *, COUNT(*) FROM t GROUP BY col1, col2, col3` — it passes a keyword check but returns raw individual rows. **Validate the output shape.** When the output looks like raw data instead of an aggregate, **collapse it to a single count row** rather than denying.
 
 ```python
