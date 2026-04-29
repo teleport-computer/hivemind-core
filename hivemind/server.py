@@ -232,12 +232,35 @@ def _read_extracted_files(tmpdir: str) -> dict[str, str]:
     return files
 
 
+def _spawn_bg(app: FastAPI, coro) -> asyncio.Task:
+    """Schedule a fire-and-forget coroutine and pin a strong ref.
+
+    Uses ``app.state.background_tasks`` (initialized in lifespan) so the
+    event loop won't GC the task mid-flight, and so lifespan teardown can
+    cancel-and-drain everything cleanly. Falls back to a bare
+    ``create_task`` when state isn't initialized (e.g. tests that call
+    handlers directly without going through lifespan).
+    """
+    task = asyncio.create_task(coro)
+    bg = getattr(app.state, "background_tasks", None)
+    if isinstance(bg, set):
+        bg.add(task)
+        task.add_done_callback(bg.discard)
+    return task
+
+
 def create_app(settings: Settings | None = None) -> FastAPI:
     if settings is None:
         settings = Settings()
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
+        # Strong-ref set for fire-and-forget tasks so the event loop can't
+        # GC them mid-flight (per asyncio docs) and so we can cancel them
+        # cleanly on shutdown. Spawning code uses _spawn_bg below.
+        background_tasks: set[asyncio.Task] = set()
+        app.state.background_tasks = background_tasks
+
         # Fetch TDX quote + measurements for /v1/attestation. Cheap,
         # cached for process lifetime; falls back to ready=false outside
         # a TEE so local dev boots normally.
@@ -263,15 +286,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             except Exception as e:
                 logger.warning("agent-base bootstrap raised: %s", e)
 
-        agent_base_task = asyncio.create_task(_bootstrap_agent_base())
+        agent_base_task = _spawn_bg(app, _bootstrap_agent_base())
 
         registry = TenantRegistry(settings)
         app.state.registry = registry
         app.state.agent_base_task = agent_base_task
         yield
+        # Cancel + drain any in-flight pipeline / upload runs before we
+        # shut down the registry, so they don't crash mid-DB-call writing
+        # against a closed connection.
+        if background_tasks:
+            for t in list(background_tasks):
+                t.cancel()
+            await asyncio.gather(*background_tasks, return_exceptions=True)
         # Close per-tenant Hivemind instances + control DB.
         await asyncio.to_thread(registry.close)
-        agent_base_task.cancel()
 
     app = FastAPI(title="Hivemind Core", version=APP_VERSION, lifespan=lifespan)
 
@@ -958,7 +987,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             issuer_token_id=(caller.token_id or None),
         )
 
-        asyncio.create_task(
+        _spawn_bg(
+            app,
             hm.pipeline.run_query_agent_tracked(
                 agent_id=query_agent_id,
                 run_id=run_id,
@@ -973,7 +1003,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 timeout_seconds=req.timeout_seconds,
                 model=req.model,
                 provider=req.provider,
-            )
+            ),
         )
 
         return {
@@ -1340,7 +1370,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             finally:
                 shutil.rmtree(tmpdir, ignore_errors=True)
 
-        asyncio.create_task(_build_upload_agent())
+        _spawn_bg(app, _build_upload_agent())
 
         return {"agent_id": agent_id, "run_id": run_id, "status": "pending"}
 
@@ -1439,7 +1469,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     ):
         """Upload query agent (required) + optional scope/index agents,
         build all, then run the full pipeline with tracking."""
-        from .sandbox.backend import _create_runner
 
         validated_query_mode = _validate_inspection_mode(query_inspection_mode)
 
@@ -1509,7 +1538,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
 
         # Run everything in background
-        asyncio.create_task(
+        _spawn_bg(
+            app,
             _build_and_run_all(
                 hm=hm,
                 settings=settings,
@@ -1543,7 +1573,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 provider=provider,
                 tmpdirs=tmpdirs,
                 query_inspection_mode=validated_query_mode,
-            )
+            ),
         )
 
         return {
@@ -1788,7 +1818,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
 
         # Everything else runs in background
-        asyncio.create_task(
+        _spawn_bg(
+            app,
             _build_and_run(
                 hm=hm,
                 settings=settings,
@@ -1808,7 +1839,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 model=model,
                 provider=provider,
                 inspection_mode=validated_mode,
-            )
+            ),
         )
 
         return {

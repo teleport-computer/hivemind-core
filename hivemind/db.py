@@ -22,6 +22,106 @@ logger = logging.getLogger(__name__)
 _INTERNAL_PREFIX = "_hivemind_"
 
 
+# Single source of truth for hivemind's internal schema. Both Database and
+# HttpDatabase iterate this list at bootstrap. Keep DDL idempotent
+# (CREATE TABLE/INDEX IF NOT EXISTS) so reboots and HTTP-proxy bootstraps
+# are safe to retry.
+_INTERNAL_DDL: tuple[str, ...] = (
+    """
+    CREATE TABLE IF NOT EXISTS _hivemind_agents (
+        agent_id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        description TEXT NOT NULL DEFAULT '',
+        agent_type TEXT NOT NULL DEFAULT 'query',
+        image TEXT NOT NULL,
+        entrypoint TEXT,
+        memory_mb INTEGER NOT NULL DEFAULT 256,
+        max_llm_calls INTEGER NOT NULL DEFAULT 20,
+        max_tokens INTEGER NOT NULL DEFAULT 100000,
+        timeout_seconds INTEGER NOT NULL DEFAULT 120,
+        inspection_mode TEXT NOT NULL DEFAULT 'full',
+        created_at DOUBLE PRECISION NOT NULL
+    )
+    """,
+    # `attestable=False` excludes a file from `attested_files_digest`
+    # (B's verification surface) while still binding it via image_digest.
+    # `ciphertext` carries sealed source when inspection_mode='sealed'.
+    """
+    CREATE TABLE IF NOT EXISTS _hivemind_agent_files (
+        agent_id TEXT NOT NULL,
+        file_path TEXT NOT NULL,
+        content TEXT,
+        ciphertext TEXT,
+        size_bytes INTEGER NOT NULL,
+        attestable BOOLEAN NOT NULL DEFAULT TRUE,
+        PRIMARY KEY (agent_id, file_path)
+    )
+    """,
+    # Tenant seal: per-tenant-DB DEK wrapped under a KEK derived from the
+    # owner's hmk_ key. Singleton row (tenant DB == one tenant). Empty
+    # until first owner interaction populates it. Binary fields stored as
+    # base64 TEXT so the values survive JSON transport over the SQL HTTP
+    # proxy without lossy UTF-8 coercion.
+    """
+    CREATE TABLE IF NOT EXISTS _hivemind_tenant_kek (
+        singleton BOOLEAN PRIMARY KEY DEFAULT TRUE
+            CHECK (singleton),
+        salt TEXT NOT NULL,
+        wrapped_dek TEXT NOT NULL,
+        kdf_params TEXT NOT NULL,
+        created_at DOUBLE PRECISION NOT NULL
+    )
+    """,
+    # `attestation` JSONB carries the CVM-signed run envelope
+    # ({body, signature_b64, signer_pubkey_b64}); base64 wrappers travel
+    # cleanly over the SQL HTTP proxy. `issuer_token_id` is the 12-hex
+    # prefix of the bearer that issued the run (NULL for owner-initiated
+    # runs).
+    """
+    CREATE TABLE IF NOT EXISTS _hivemind_query_runs (
+        run_id TEXT PRIMARY KEY,
+        agent_id TEXT NOT NULL,
+        scope_agent_id TEXT,
+        index_agent_id TEXT,
+        status TEXT NOT NULL DEFAULT 'pending',
+        s3_url TEXT,
+        error TEXT,
+        created_at DOUBLE PRECISION NOT NULL,
+        updated_at DOUBLE PRECISION NOT NULL,
+        build_started_at DOUBLE PRECISION,
+        build_ended_at DOUBLE PRECISION,
+        scope_started_at DOUBLE PRECISION,
+        scope_ended_at DOUBLE PRECISION,
+        query_started_at DOUBLE PRECISION,
+        query_ended_at DOUBLE PRECISION,
+        mediator_started_at DOUBLE PRECISION,
+        mediator_ended_at DOUBLE PRECISION,
+        index_started_at DOUBLE PRECISION,
+        index_ended_at DOUBLE PRECISION,
+        output TEXT,
+        index_output TEXT,
+        attestation JSONB,
+        issuer_token_id TEXT
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS _hivemind_query_artifacts (
+        run_id TEXT NOT NULL,
+        filename TEXT NOT NULL,
+        content BYTEA NOT NULL,
+        content_type TEXT NOT NULL DEFAULT 'application/octet-stream',
+        size_bytes BIGINT NOT NULL,
+        created_at DOUBLE PRECISION NOT NULL,
+        PRIMARY KEY (run_id, filename)
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS _hivemind_query_artifacts_created_idx
+    ON _hivemind_query_artifacts (created_at)
+    """,
+)
+
+
 def connect(
     dsn: str,
     proxy_key: str = "",
@@ -63,100 +163,8 @@ class Database:
         """Create internal tables if they don't exist."""
         with self._lock:
             with self._conn.cursor() as cur:
-                cur.execute("""
-                    CREATE TABLE IF NOT EXISTS _hivemind_agents (
-                        agent_id TEXT PRIMARY KEY,
-                        name TEXT NOT NULL,
-                        description TEXT NOT NULL DEFAULT '',
-                        agent_type TEXT NOT NULL DEFAULT 'query',
-                        image TEXT NOT NULL,
-                        entrypoint TEXT,
-                        memory_mb INTEGER NOT NULL DEFAULT 256,
-                        max_llm_calls INTEGER NOT NULL DEFAULT 20,
-                        max_tokens INTEGER NOT NULL DEFAULT 100000,
-                        timeout_seconds INTEGER NOT NULL DEFAULT 120,
-                        inspection_mode TEXT NOT NULL DEFAULT 'full',
-                        created_at DOUBLE PRECISION NOT NULL
-                    )
-                """)
-                # `attestable=False` excludes a file from
-                # `attested_files_digest` (B's verification surface) while
-                # still binding it via image_digest. `ciphertext` carries
-                # sealed source when inspection_mode='sealed'.
-                cur.execute("""
-                    CREATE TABLE IF NOT EXISTS _hivemind_agent_files (
-                        agent_id TEXT NOT NULL,
-                        file_path TEXT NOT NULL,
-                        content TEXT,
-                        ciphertext TEXT,
-                        size_bytes INTEGER NOT NULL,
-                        attestable BOOLEAN NOT NULL DEFAULT TRUE,
-                        PRIMARY KEY (agent_id, file_path)
-                    )
-                """)
-                # Tenant seal: per-tenant-DB DEK wrapped under a KEK
-                # derived from the owner's hmk_ key. Singleton row
-                # (tenant DB == one tenant). Empty until first owner
-                # interaction populates it. Binary fields stored as
-                # base64 TEXT so the values survive JSON transport over
-                # the SQL HTTP proxy without lossy UTF-8 coercion.
-                cur.execute("""
-                    CREATE TABLE IF NOT EXISTS _hivemind_tenant_kek (
-                        singleton BOOLEAN PRIMARY KEY DEFAULT TRUE
-                            CHECK (singleton),
-                        salt TEXT NOT NULL,
-                        wrapped_dek TEXT NOT NULL,
-                        kdf_params TEXT NOT NULL,
-                        created_at DOUBLE PRECISION NOT NULL
-                    )
-                """)
-                # `attestation` JSONB carries the CVM-signed run envelope
-                # ({body, signature_b64, signer_pubkey_b64}); base64
-                # wrappers travel cleanly over the SQL HTTP proxy.
-                # `issuer_token_id` is the 12-hex prefix of the bearer
-                # that issued the run (NULL for owner-initiated runs).
-                cur.execute("""
-                    CREATE TABLE IF NOT EXISTS _hivemind_query_runs (
-                        run_id TEXT PRIMARY KEY,
-                        agent_id TEXT NOT NULL,
-                        scope_agent_id TEXT,
-                        index_agent_id TEXT,
-                        status TEXT NOT NULL DEFAULT 'pending',
-                        s3_url TEXT,
-                        error TEXT,
-                        created_at DOUBLE PRECISION NOT NULL,
-                        updated_at DOUBLE PRECISION NOT NULL,
-                        build_started_at DOUBLE PRECISION,
-                        build_ended_at DOUBLE PRECISION,
-                        scope_started_at DOUBLE PRECISION,
-                        scope_ended_at DOUBLE PRECISION,
-                        query_started_at DOUBLE PRECISION,
-                        query_ended_at DOUBLE PRECISION,
-                        mediator_started_at DOUBLE PRECISION,
-                        mediator_ended_at DOUBLE PRECISION,
-                        index_started_at DOUBLE PRECISION,
-                        index_ended_at DOUBLE PRECISION,
-                        output TEXT,
-                        index_output TEXT,
-                        attestation JSONB,
-                        issuer_token_id TEXT
-                    )
-                """)
-                cur.execute("""
-                    CREATE TABLE IF NOT EXISTS _hivemind_query_artifacts (
-                        run_id TEXT NOT NULL,
-                        filename TEXT NOT NULL,
-                        content BYTEA NOT NULL,
-                        content_type TEXT NOT NULL DEFAULT 'application/octet-stream',
-                        size_bytes BIGINT NOT NULL,
-                        created_at DOUBLE PRECISION NOT NULL,
-                        PRIMARY KEY (run_id, filename)
-                    )
-                """)
-                cur.execute(
-                    "CREATE INDEX IF NOT EXISTS _hivemind_query_artifacts_created_idx "
-                    "ON _hivemind_query_artifacts (created_at)"
-                )
+                for ddl in _INTERNAL_DDL:
+                    cur.execute(ddl)
             self._conn.commit()
 
     def execute(self, sql: str, params: list | tuple | None = None) -> list[dict]:
@@ -230,87 +238,7 @@ class HttpDatabase:
 
     def _bootstrap(self) -> None:
         """Create internal tables via the proxy."""
-        for ddl in [
-            """
-            CREATE TABLE IF NOT EXISTS _hivemind_agents (
-                agent_id TEXT PRIMARY KEY,
-                name TEXT NOT NULL,
-                description TEXT NOT NULL DEFAULT '',
-                agent_type TEXT NOT NULL DEFAULT 'query',
-                image TEXT NOT NULL,
-                entrypoint TEXT,
-                memory_mb INTEGER NOT NULL DEFAULT 256,
-                max_llm_calls INTEGER NOT NULL DEFAULT 20,
-                max_tokens INTEGER NOT NULL DEFAULT 100000,
-                timeout_seconds INTEGER NOT NULL DEFAULT 120,
-                inspection_mode TEXT NOT NULL DEFAULT 'full',
-                created_at DOUBLE PRECISION NOT NULL
-            )
-            """,
-            """
-            CREATE TABLE IF NOT EXISTS _hivemind_agent_files (
-                agent_id TEXT NOT NULL,
-                file_path TEXT NOT NULL,
-                content TEXT,
-                ciphertext TEXT,
-                size_bytes INTEGER NOT NULL,
-                attestable BOOLEAN NOT NULL DEFAULT TRUE,
-                PRIMARY KEY (agent_id, file_path)
-            )
-            """,
-            """
-            CREATE TABLE IF NOT EXISTS _hivemind_tenant_kek (
-                singleton BOOLEAN PRIMARY KEY DEFAULT TRUE
-                    CHECK (singleton),
-                salt TEXT NOT NULL,
-                wrapped_dek TEXT NOT NULL,
-                kdf_params TEXT NOT NULL,
-                created_at DOUBLE PRECISION NOT NULL
-            )
-            """,
-            """
-            CREATE TABLE IF NOT EXISTS _hivemind_query_runs (
-                run_id TEXT PRIMARY KEY,
-                agent_id TEXT NOT NULL,
-                scope_agent_id TEXT,
-                index_agent_id TEXT,
-                status TEXT NOT NULL DEFAULT 'pending',
-                s3_url TEXT,
-                error TEXT,
-                created_at DOUBLE PRECISION NOT NULL,
-                updated_at DOUBLE PRECISION NOT NULL,
-                build_started_at DOUBLE PRECISION,
-                build_ended_at DOUBLE PRECISION,
-                scope_started_at DOUBLE PRECISION,
-                scope_ended_at DOUBLE PRECISION,
-                query_started_at DOUBLE PRECISION,
-                query_ended_at DOUBLE PRECISION,
-                mediator_started_at DOUBLE PRECISION,
-                mediator_ended_at DOUBLE PRECISION,
-                index_started_at DOUBLE PRECISION,
-                index_ended_at DOUBLE PRECISION,
-                output TEXT,
-                index_output TEXT,
-                attestation JSONB,
-                issuer_token_id TEXT
-            )
-            """,
-            """
-            CREATE TABLE IF NOT EXISTS _hivemind_query_artifacts (
-                run_id TEXT NOT NULL,
-                filename TEXT NOT NULL,
-                content BYTEA NOT NULL,
-                content_type TEXT NOT NULL DEFAULT 'application/octet-stream',
-                size_bytes BIGINT NOT NULL,
-                created_at DOUBLE PRECISION NOT NULL,
-                PRIMARY KEY (run_id, filename)
-            )
-            """,
-            """
-            CREATE INDEX IF NOT EXISTS _hivemind_query_artifacts_created_idx
-            ON _hivemind_query_artifacts (created_at)
-            """,
-        ]:
+        for ddl in _INTERNAL_DDL:
             self.execute_commit(ddl)
 
     def _check(self, resp) -> dict:
