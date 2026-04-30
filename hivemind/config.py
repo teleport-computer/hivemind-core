@@ -78,6 +78,12 @@ class Settings(BaseSettings):
     max_tokens: int = 1_000_000
     agent_timeout: int = 900
 
+    # Billing/metering. Usage is always recorded on run rows when available.
+    # Ledger charging happens when a payer tenant is known. Credit enforcement
+    # is opt-in so existing deployments can turn metering on before requiring
+    # tenant balances.
+    billing_enforce_credits: bool = False
+
     # Artifact retention — how long query-agent artifact uploads and run
     # output/error text are kept before the periodic sweeper purges them.
     # Artifacts and run output live in Postgres inside the TEE; there is

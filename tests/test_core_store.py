@@ -126,6 +126,9 @@ class TestDatabaseInit:
                 assert "room_manifest_hash" in columns
                 assert "prompt" in columns
                 assert "issuer_token_id" in columns
+                assert "payer_tenant_id" in columns
+                assert "billing_cost_micro_usd" in columns
+                assert "usage_json" in columns
                 assert "output_visibility" in columns
                 assert "artifacts_enabled" in columns
 

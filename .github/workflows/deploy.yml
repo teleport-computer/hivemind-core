@@ -47,10 +47,11 @@ name: Deploy to Phala CVM (via EC2 relay)
 # Inputs:
 #   target     — core | postgres | all (which CVM(s) to redeploy)
 #   ref        — git ref to deploy (default: main). Research branches OK.
-#   image_sha  — optional; if set, the compose file's image pin is
-#                rewritten to ghcr.io/account-link/hivemind-core:<sha>
-#                for this run only (not committed back). Leave empty to
-#                use whatever pin is on the checked-out ref.
+#   image_sha  — optional; if set, compose image pins are rewritten to
+#                the short-SHA tags produced by build-images for this
+#                run only (not committed back). Core deploys rewrite
+#                hivemind-core; postgres deploys rewrite hivemind-sql-proxy.
+#                Leave empty to use whatever pin is on the checked-out ref.
 
 on:
   workflow_run:
@@ -73,7 +74,7 @@ on:
         required: false
         default: "main"
       image_sha:
-        description: "Optional image SHA override for hivemind-core (e.g. fd87c82). Leave empty to use the ref's committed pin."
+        description: "Optional image SHA override for built images (e.g. fd87c82). Rewrites core and sql-proxy pins for this deploy."
         required: false
         default: ""
       node_id:
@@ -216,7 +217,10 @@ jobs:
             # Only rewrites in the running working tree — not committed.
             sed -i -E "s|(ghcr\.io/account-link/hivemind-core:)[A-Za-z0-9._-]+|\1${IMAGE_SHA}|" \
               deploy/phala/docker-compose.core.yaml
+            sed -i -E "s|(ghcr\.io/account-link/hivemind-sql-proxy:)[A-Za-z0-9._-]+|\1${IMAGE_SHA}|" \
+              deploy/phala/docker-compose.postgres.yaml
             grep "image:" deploy/phala/docker-compose.core.yaml
+            grep "image:" deploy/phala/docker-compose.postgres.yaml
           fi
 
           if [ -n "${CLOUDFLARE_API_TOKEN_OVERRIDE:-}" ]; then

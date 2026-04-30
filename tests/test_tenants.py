@@ -157,6 +157,76 @@ def test_api_key_stored_only_as_hash(registry):
     assert stored == _hash_api_key(result["api_key"])
 
 
+def test_billing_credit_hold_and_settlement(registry):
+    payer = registry.provision("payer-co")
+    registry._test_created_dbs.append(payer["db_name"])
+
+    resolved = registry.resolve_payer_key(payer["api_key"])
+    assert resolved["tenant_id"] == payer["tenant_id"]
+    assert resolved["payer_token_id"]
+
+    grant = registry.billing_grant_credit(
+        payer["tenant_id"],
+        "10.00",
+        note="test credit",
+    )
+    assert grant["amount_micro_usd"] == 10_000_000
+
+    hold = registry.billing_hold_for_run(
+        tenant_id=payer["tenant_id"],
+        payer_token_id=resolved["payer_token_id"],
+        run_id="run-billing-1",
+        provider="openrouter",
+        models=["openai/gpt-5-mini"],
+        max_tokens=1_000_000,
+        billable_role="query",
+        enforce=True,
+    )
+    assert hold["status"] == "held"
+    assert hold["hold_micro_usd"] == 2_000_000
+
+    settlement = registry.settle_run(
+        payer_tenant_id=payer["tenant_id"],
+        payer_token_id=resolved["payer_token_id"],
+        run_id="run-billing-1",
+        usage={
+            "stages": {
+                "query": {
+                    "provider": "openrouter",
+                    "model": "openai/gpt-5-mini",
+                    "prompt_tokens": 1000,
+                    "completion_tokens": 2000,
+                }
+            }
+        },
+        hold_micro_usd=hold["hold_micro_usd"],
+        billable_role="query",
+        default_provider="openrouter",
+        default_model="openai/gpt-5-mini",
+    )
+    assert settlement["billing_status"] == "settled"
+    assert settlement["cost_micro_usd"] == 4250
+    assert registry.billing_balance_micro_usd(payer["tenant_id"]) == 9_995_750
+
+
+def test_billing_enforced_hold_rejects_missing_price(registry):
+    payer = registry.provision("unknown-price-payer")
+    registry._test_created_dbs.append(payer["db_name"])
+    registry.billing_grant_credit(payer["tenant_id"], "10.00")
+
+    with pytest.raises(ValueError, match="billing price is not configured"):
+        registry.billing_hold_for_run(
+            tenant_id=payer["tenant_id"],
+            payer_token_id="owner",
+            run_id="run-missing-price",
+            provider="tinfoil",
+            models=["kimi-k2-6"],
+            max_tokens=1000,
+            billable_role="query",
+            enforce=True,
+        )
+
+
 def test_resolve_invalid_key_returns_none(registry):
     assert registry.resolve("") is None
     assert registry.resolve("hmk_bogus_key_that_does_not_exist") is None

@@ -21,6 +21,9 @@ _COLUMNS = (
     "index_started_at, index_ended_at, index_output, "
     "room_id, room_manifest_hash, scope_agent_id, index_agent_id, "
     "prompt, output, attestation, issuer_token_id, "
+    "payer_tenant_id, payer_token_id, billable_role, "
+    "billing_provider, billing_model, billing_hold_micro_usd, "
+    "billing_cost_micro_usd, billing_status, billing_settled_at, usage_json, "
     "output_visibility, artifacts_enabled"
 )
 
@@ -42,6 +45,13 @@ class RunStore:
         room_id: str | None = None,
         room_manifest_hash: str | None = None,
         prompt: str | None = None,
+        payer_tenant_id: str | None = None,
+        payer_token_id: str | None = None,
+        billable_role: str | None = None,
+        billing_provider: str | None = None,
+        billing_model: str | None = None,
+        billing_hold_micro_usd: int = 0,
+        billing_status: str = "unbilled",
         output_visibility: str = "owner_and_querier",
         artifacts_enabled: bool = True,
     ) -> dict:
@@ -57,9 +67,12 @@ class RunStore:
             "INSERT INTO _hivemind_query_runs "
             "(run_id, agent_id, room_id, room_manifest_hash, "
             "scope_agent_id, index_agent_id, issuer_token_id, "
-            "prompt, output_visibility, artifacts_enabled, status, "
+            "prompt, payer_tenant_id, payer_token_id, billable_role, "
+            "billing_provider, billing_model, billing_hold_micro_usd, "
+            "billing_status, output_visibility, artifacts_enabled, status, "
             "created_at, updated_at) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, "
+            "%s, %s, %s, %s, %s, %s, %s)",
             [
                 run_id,
                 agent_id,
@@ -69,6 +82,13 @@ class RunStore:
                 index_agent_id,
                 issuer_token_id,
                 prompt,
+                payer_tenant_id,
+                payer_token_id,
+                billable_role,
+                billing_provider,
+                billing_model,
+                int(billing_hold_micro_usd or 0),
+                billing_status,
                 output_visibility,
                 bool(artifacts_enabled),
                 "pending",
@@ -85,6 +105,16 @@ class RunStore:
             "index_agent_id": index_agent_id,
             "issuer_token_id": issuer_token_id,
             "prompt": prompt,
+            "payer_tenant_id": payer_tenant_id,
+            "payer_token_id": payer_token_id,
+            "billable_role": billable_role,
+            "billing_provider": billing_provider,
+            "billing_model": billing_model,
+            "billing_hold_micro_usd": int(billing_hold_micro_usd or 0),
+            "billing_cost_micro_usd": 0,
+            "billing_status": billing_status,
+            "billing_settled_at": None,
+            "usage_json": None,
             "output_visibility": output_visibility,
             "artifacts_enabled": bool(artifacts_enabled),
             "status": "pending",
@@ -152,6 +182,74 @@ class RunStore:
             "OR index_output IS NOT NULL)",
             [cutoff],
         )
+
+    def update_usage(
+        self,
+        run_id: str,
+        usage: dict | None,
+        *,
+        billing_cost_micro_usd: int | None = None,
+        billing_status: str | None = None,
+        billing_settled_at: float | None = None,
+    ) -> bool:
+        """Persist usage and optional billing settlement metadata."""
+        now = time.time()
+        if usage is not None:
+            rows = self.db.execute(
+                "SELECT usage_json FROM _hivemind_query_runs WHERE run_id = %s",
+                [run_id],
+            )
+            existing = rows[0].get("usage_json") if rows else None
+            if isinstance(existing, str):
+                try:
+                    existing = json.loads(existing)
+                except ValueError:
+                    existing = None
+            if isinstance(existing, dict):
+                usage = self._merge_usage(existing, usage)
+        usage_json = (
+            json.dumps(usage, sort_keys=True, separators=(",", ":"))
+            if usage is not None
+            else None
+        )
+        rowcount = self.db.execute_commit(
+            "UPDATE _hivemind_query_runs "
+            "SET usage_json = COALESCE(%s::jsonb, usage_json), "
+            "billing_cost_micro_usd = COALESCE(%s, billing_cost_micro_usd), "
+            "billing_status = COALESCE(%s, billing_status), "
+            "billing_settled_at = COALESCE(%s, billing_settled_at), "
+            "updated_at = %s "
+            "WHERE run_id = %s",
+            [
+                usage_json,
+                billing_cost_micro_usd,
+                billing_status,
+                billing_settled_at,
+                now,
+                run_id,
+            ],
+        )
+        return rowcount > 0
+
+    @staticmethod
+    def _merge_usage(existing: dict, new: dict) -> dict:
+        stages: dict = {}
+        for src in (existing.get("stages"), new.get("stages")):
+            if isinstance(src, dict):
+                stages.update(
+                    {k: v for k, v in src.items() if isinstance(v, dict)}
+                )
+        if not stages:
+            return dict(new)
+        merged = dict(new)
+        merged["stages"] = stages
+        for key in ("calls", "prompt_tokens", "completion_tokens", "total_tokens"):
+            merged[key] = sum(int(s.get(key) or 0) for s in stages.values())
+        merged["max_tokens"] = max(
+            int(existing.get("max_tokens") or 0),
+            int(new.get("max_tokens") or 0),
+        )
+        return merged
 
     def update_stage(
         self,

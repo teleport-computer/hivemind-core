@@ -194,7 +194,27 @@ def _query_tracked(
             if sr.status_code == 404:
                 time.sleep(2)
                 continue
-            data = sr.json()
+            if sr.status_code >= 500:
+                time.sleep(2)
+                continue
+            if sr.status_code >= 400:
+                click.echo(
+                    f"Error: {sr.status_code}: {_api_error(sr)}",
+                    err=True,
+                )
+                raise SystemExit(1)
+            try:
+                data = sr.json()
+            except ValueError:
+                if not (sr.text or "").strip():
+                    time.sleep(2)
+                    continue
+                click.echo(
+                    "Error: run status endpoint returned non-JSON response: "
+                    f"{sr.text[:200]}",
+                    err=True,
+                )
+                raise SystemExit(1)
         except httpx.RequestError:
             time.sleep(2)
             continue

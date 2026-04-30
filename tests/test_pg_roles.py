@@ -118,6 +118,47 @@ def test_sql_proxy_connection_locks_use_pool_keys():
     assert list(mod._db_locks) == [mod._dsn_for_db("tenant_t_abc123")]
 
 
+def test_sql_proxy_execute_enforces_result_row_cap(monkeypatch):
+    mod = _load_sql_proxy_module()
+    mod._MAX_RESULT_ROWS = 2
+    mod._MAX_RESULT_BYTES = 1_000_000
+
+    class DummyLock:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    class DummyCursor:
+        description = [("n",)]
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def execute(self, sql, params):
+            pass
+
+        def __iter__(self):
+            return iter([{"n": 1}, {"n": 2}, {"n": 3}])
+
+    class DummyConn:
+        def cursor(self):
+            return DummyCursor()
+
+        def rollback(self):
+            pass
+
+    monkeypatch.setattr(mod, "_lock_for_db", lambda db_name: DummyLock())
+    monkeypatch.setattr(mod, "_get_conn", lambda db_name: DummyConn())
+
+    with pytest.raises(ValueError, match="row cap exceeded"):
+        mod.db_execute("SELECT n FROM big_table", None, None)
+
+
 def test_role_password_is_urlsafe_base64_no_padding():
     pw = derive_tenant_role_password(b"seed", "t_abc123")
     assert "=" not in pw

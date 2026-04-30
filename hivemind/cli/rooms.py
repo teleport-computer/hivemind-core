@@ -9,8 +9,9 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 import click
 import httpx
+import yaml
 
-from ._config import _headers, _load_config
+from ._config import _config_path, _headers, _load_config
 from ._http import _api_error, _tarball_from_dir
 from ._shared import _emit_run_result, _query_tracked
 from ._trust import _require_trust
@@ -47,6 +48,37 @@ def _parse_room_ref(
 
     cfg = config or _load_config()
     return cfg["service"], ref.strip(), _headers(cfg), None
+
+
+def _payer_key_from_options(
+    payer_profile: str | None,
+    payer_api_key: str | None,
+) -> str | None:
+    if payer_profile and payer_api_key:
+        raise click.ClickException("use either --payer-profile or --payer-api-key")
+    if payer_api_key:
+        key = payer_api_key.strip()
+        if not key.startswith("hmk_"):
+            raise click.ClickException("--payer-api-key must be an hmk_ tenant key")
+        return key
+    if not payer_profile:
+        return None
+    path = _config_path(payer_profile)
+    if not path.exists():
+        raise click.ClickException(
+            f"payer profile '{payer_profile}' not found at {path}"
+        )
+    try:
+        with open(path) as f:
+            config = yaml.safe_load(f) or {}
+    except yaml.YAMLError as e:
+        raise click.ClickException(f"corrupt payer profile {path}: {e}")
+    key = str(config.get("api_key") or "").strip()
+    if not key.startswith("hmk_"):
+        raise click.ClickException(
+            f"payer profile '{payer_profile}' does not contain an hmk_ api_key"
+        )
+    return key
 
 
 def _fetch_verified_room(
@@ -241,7 +273,21 @@ def _upload_room_query_agent_and_poll(
         if sr.status_code == 404:
             time.sleep(2)
             continue
-        data = sr.json()
+        if sr.status_code >= 500:
+            time.sleep(2)
+            continue
+        if sr.status_code >= 400:
+            raise click.ClickException(f"{sr.status_code}: {_api_error(sr)}")
+        try:
+            data = sr.json()
+        except ValueError:
+            if not (sr.text or "").strip():
+                time.sleep(2)
+                continue
+            raise click.ClickException(
+                "run status endpoint returned non-JSON response: "
+                f"{sr.text[:200]}"
+            )
         status = data.get("status", "")
         if status != last_status and not as_json:
             click.echo(f"  status: {status}")
@@ -712,6 +758,17 @@ def trust_room(
 )
 @click.option("--model", type=str, default=None, help="LLM model override.")
 @click.option("--provider", type=str, default=None, help="LLM provider override.")
+@click.option(
+    "--payer-profile",
+    default=None,
+    help="Tenant profile whose hmk_ key pays for this query-token run.",
+)
+@click.option(
+    "--payer-api-key",
+    envvar="HIVEMIND_PAYER_API_KEY",
+    default=None,
+    help="hmk_ tenant key used only for run billing.",
+)
 @click.option("--json", "as_json", is_flag=True, help="Emit JSON on stdout.")
 @click.option("--fetch", is_flag=True, help="Download visible artifacts.")
 @click.option(
@@ -731,6 +788,8 @@ def ask_room(
     max_tokens: int,
     model: str | None,
     provider: str | None,
+    payer_profile: str | None,
+    payer_api_key: str | None,
     as_json: bool,
     fetch: bool,
     no_strict_attestation: bool,
@@ -744,6 +803,10 @@ def ask_room(
     if query_agent and agent_path:
         raise click.ClickException("use either --query-agent id or --agent path, not both")
     service, room_id, headers, owner_pubkey = _parse_room_ref(room)
+    payer_key = _payer_key_from_options(payer_profile, payer_api_key)
+    if payer_key:
+        headers = dict(headers)
+        headers["X-Hivemind-Payer-Key"] = payer_key
     room_data = _fetch_verified_room(
         service,
         room_id,

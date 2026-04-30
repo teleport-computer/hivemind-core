@@ -34,11 +34,13 @@ class Hivemind:
         tenant_db: str | None = None,
         tenant_id: str | None = None,
         sealer=None,
+        billing_meter=None,
     ):
         self.settings = settings
         self.tenant_id = tenant_id
         self.tenant_db = tenant_db
         self.sealer = sealer
+        self.billing_meter = billing_meter
         self.db = connect(
             settings.database_url,
             proxy_key=settings.sql_proxy_key,
@@ -58,7 +60,12 @@ class Hivemind:
         self._retention_task: asyncio.Task | None = None
         try:
             self._bootstrap_default_agents()
-            self.pipeline = Pipeline(settings, self.db, self.agent_store)
+            self.pipeline = Pipeline(
+                settings,
+                self.db,
+                self.agent_store,
+                billing_meter=billing_meter,
+            )
 
             # Cleanup stale containers from previous crashes
             try:

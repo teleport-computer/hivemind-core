@@ -65,13 +65,59 @@ def _mediator_reserve(remaining: int) -> int:
     return min(desired, max(0, remaining - MEDIATOR_MIN_TOKENS))
 
 
+def _new_usage_summary(max_tokens: int = 0) -> dict:
+    return {
+        "calls": 0,
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "total_tokens": 0,
+        "max_tokens": int(max_tokens or 0),
+        "stages": {},
+    }
+
+
+def _add_stage_usage(
+    summary: dict,
+    stage: str,
+    usage: dict | None,
+    *,
+    provider: str | None,
+    model: str | None,
+) -> None:
+    if not isinstance(usage, dict):
+        usage = {}
+    item = {
+        "calls": int(usage.get("calls") or 0),
+        "prompt_tokens": int(usage.get("prompt_tokens") or 0),
+        "completion_tokens": int(usage.get("completion_tokens") or 0),
+        "total_tokens": int(usage.get("total_tokens") or 0),
+        "max_calls": int(usage.get("max_calls") or 0),
+        "max_tokens": int(usage.get("max_tokens") or 0),
+        "provider": (provider or "").strip().lower(),
+        "model": (model or "").strip(),
+    }
+    summary["calls"] += item["calls"]
+    summary["prompt_tokens"] += item["prompt_tokens"]
+    summary["completion_tokens"] += item["completion_tokens"]
+    summary["total_tokens"] += item["total_tokens"]
+    summary.setdefault("stages", {})[stage] = item
+
+
 class Pipeline:
     """Orchestrates store and query pipelines using Docker agent sandboxes."""
 
-    def __init__(self, settings: Settings, db: Database, agent_store: AgentStore):
+    def __init__(
+        self,
+        settings: Settings,
+        db: Database,
+        agent_store: AgentStore,
+        *,
+        billing_meter=None,
+    ):
         self.settings = settings
         self.db = db
         self.agent_store = agent_store
+        self.billing_meter = billing_meter
         timeout = httpx.Timeout(
             connect=5.0,
             read=float(settings.llm_timeout_seconds),
@@ -141,6 +187,55 @@ class Pipeline:
     def _provider_key(self, provider: str | None) -> str:
         key = (provider or "").strip().lower()
         return key or "openrouter"
+
+    async def _record_run_usage(
+        self,
+        run_store,
+        run_id: str,
+        usage: dict,
+        *,
+        payer_tenant_id: str | None = None,
+        payer_token_id: str | None = None,
+        billable_role: str = "query",
+        billing_hold_micro_usd: int = 0,
+        default_provider: str | None = None,
+        default_model: str | None = None,
+    ) -> None:
+        """Persist usage and settle ledger charges when a payer is known."""
+        if not hasattr(run_store, "update_usage"):
+            return
+        billing_status = "unbilled"
+        cost_micro_usd = 0
+        settled_at = None
+        if payer_tenant_id and self.billing_meter is not None:
+            try:
+                settlement = await asyncio.to_thread(
+                    self.billing_meter.settle_run,
+                    payer_tenant_id=payer_tenant_id,
+                    payer_token_id=payer_token_id,
+                    run_id=run_id,
+                    usage=usage,
+                    hold_micro_usd=billing_hold_micro_usd,
+                    billable_role=billable_role,
+                    default_provider=default_provider,
+                    default_model=default_model,
+                )
+                billing_status = settlement.get("billing_status", "settled")
+                cost_micro_usd = int(settlement.get("cost_micro_usd") or 0)
+                settled_at = settlement.get("settled_at")
+            except Exception as e:
+                logger.warning("billing settlement failed for run %s: %s", run_id, e)
+                billing_status = "billing_error"
+        elif payer_tenant_id:
+            billing_status = "metered"
+        await asyncio.to_thread(
+            run_store.update_usage,
+            run_id,
+            usage,
+            billing_cost_micro_usd=cost_micro_usd,
+            billing_status=billing_status,
+            billing_settled_at=settled_at,
+        )
 
     def _resolve_provider_for_egress(
         self,
@@ -904,6 +999,12 @@ class Pipeline:
         allowed_llm_providers: list[str] | None = None,
         artifacts_enabled: bool = True,
         room_vault_items: list[dict] | None = None,
+        payer_tenant_id: str | None = None,
+        payer_token_id: str | None = None,
+        billable_role: str = "query",
+        billing_provider: str | None = None,
+        billing_model: str | None = None,
+        billing_hold_micro_usd: int = 0,
     ) -> None:
         """Run the full 3-stage pipeline with run tracking and artifact upload.
 
@@ -916,6 +1017,9 @@ class Pipeline:
         Updates run_store status through the lifecycle:
           pending → running → completed/failed
         """
+        usage_total = _new_usage_summary()
+        provider_for_billing = billing_provider or provider
+        model_for_billing = billing_model or model or self.llm_model
         try:
             await asyncio.to_thread(
                 run_store.update_status, run_id, "running"
@@ -929,11 +1033,13 @@ class Pipeline:
                 provider,
                 allowed_llm_providers,
             )
+            provider_for_billing = billing_provider or provider
             room_vault_items = list(room_vault_items or [])
 
             global_max = self._sandbox_settings.global_max_tokens
             effective_max = min(max_tokens or global_max, global_max)
             remaining = effective_max
+            usage_total = _new_usage_summary(effective_max)
 
             # -- Stage 0: Scope resolution --
             scope_fn = None
@@ -957,6 +1063,7 @@ class Pipeline:
                 )
                 try:
                     scope_budget = max(1, int(remaining * SCOPE_BUDGET_FRACTION))
+                    scope_model = self._model_for("scope", model)
                     scope_fn, scope_fn_source, scope_usage = await self._run_scope_agent(
                         req_for_scope, max_tokens=scope_budget,
                         max_calls=max_calls, timeout_seconds=timeout_seconds,
@@ -966,6 +1073,13 @@ class Pipeline:
                     )
                     used = scope_usage.get("total_tokens", 0)
                     remaining = max(1, remaining - used)
+                    _add_stage_usage(
+                        usage_total,
+                        "scope",
+                        scope_usage,
+                        provider=provider,
+                        model=scope_model,
+                    )
                 finally:
                     await asyncio.to_thread(
                         run_store.update_stage, run_id, "scope",
@@ -1057,6 +1171,13 @@ class Pipeline:
             )
             used = query_usage.get("total_tokens", 0)
             remaining = max(1, remaining - used)
+            _add_stage_usage(
+                usage_total,
+                "query",
+                query_usage,
+                provider=provider,
+                model=self._model_for("query", model),
+            )
             await asyncio.to_thread(
                 run_store.update_stage, run_id, "query",
                 ended_at=time.time(),
@@ -1077,7 +1198,8 @@ class Pipeline:
                     started_at=mediator_t0,
                 )
                 try:
-                    query_output, _ = await self._run_mediator_agent(
+                    mediator_model = self._model_for("mediator", model)
+                    query_output, mediator_usage = await self._run_mediator_agent(
                         mediator_agent_id=resolved_mediator_id,
                         raw_output=query_output,
                         prompt=prompt,
@@ -1088,6 +1210,13 @@ class Pipeline:
                         model=model,
                         provider=provider,
                         llm_egress_enabled=llm_egress_enabled,
+                    )
+                    _add_stage_usage(
+                        usage_total,
+                        "mediator",
+                        mediator_usage,
+                        provider=provider,
+                        model=mediator_model,
                     )
                 except ValueError as e:
                     if "not found" in str(e).lower():
@@ -1123,6 +1252,17 @@ class Pipeline:
                 artifacts_enabled=artifacts_enabled,
                 room_vault_item_count=len(room_vault_items),
             )
+            await self._record_run_usage(
+                run_store,
+                run_id,
+                usage_total,
+                payer_tenant_id=payer_tenant_id,
+                payer_token_id=payer_token_id,
+                billable_role=billable_role,
+                billing_hold_micro_usd=billing_hold_micro_usd,
+                default_provider=provider_for_billing,
+                default_model=model_for_billing,
+            )
             await asyncio.to_thread(
                 run_store.update_status, run_id, "completed",
                 output=final_output,
@@ -1155,6 +1295,17 @@ class Pipeline:
                     error=err_str,
                     attestation=attestation_envelope,
                 )
+                await self._record_run_usage(
+                    run_store,
+                    run_id,
+                    usage_total,
+                    payer_tenant_id=payer_tenant_id,
+                    payer_token_id=payer_token_id,
+                    billable_role=billable_role,
+                    billing_hold_micro_usd=billing_hold_micro_usd,
+                    default_provider=provider_for_billing,
+                    default_model=model_for_billing,
+                )
             except Exception:
                 logger.warning("Failed to update run %s to failed", run_id)
 
@@ -1172,8 +1323,15 @@ class Pipeline:
         timeout_seconds: int | None = None,
         model: str | None = None,
         provider: str | None = None,
+        payer_tenant_id: str | None = None,
+        payer_token_id: str | None = None,
+        billable_role: str = "index",
+        billing_provider: str | None = None,
+        billing_model: str | None = None,
+        billing_hold_micro_usd: int = 0,
     ) -> None:
         """Run index agent with tracking. Updates run_store through lifecycle."""
+        usage_total = _new_usage_summary(max_tokens or 0)
         try:
             index_t0 = time.time()
             await asyncio.to_thread(
@@ -1192,14 +1350,33 @@ class Pipeline:
             )
             # Eager validation so an unknown provider fails before container start.
             self._client_for(provider)
+            index_model = self._model_for("index", model)
             index_text, metadata, usage = await self._run_index_agent(
                 req=req, max_tokens=max_tokens,
                 max_calls=max_calls, timeout_seconds=timeout_seconds,
                 model=model, provider=provider,
             )
+            _add_stage_usage(
+                usage_total,
+                "index",
+                usage,
+                provider=provider,
+                model=index_model,
+            )
 
             await asyncio.to_thread(
                 run_store.update_stage, run_id, "index", ended_at=time.time(),
+            )
+            await self._record_run_usage(
+                run_store,
+                run_id,
+                usage_total,
+                payer_tenant_id=payer_tenant_id,
+                payer_token_id=payer_token_id,
+                billable_role=billable_role,
+                billing_hold_micro_usd=billing_hold_micro_usd,
+                default_provider=billing_provider or provider,
+                default_model=billing_model or model or self.llm_model,
             )
             await asyncio.to_thread(
                 run_store.update_index_output, run_id,

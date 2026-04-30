@@ -70,6 +70,8 @@ ADMIN_KEY = os.environ.get("SQL_PROXY_ADMIN_KEY", "")
 # value in hivemind/db.py — both connections live behind the same trust
 # boundary and there is no reason for them to drift.
 _STATEMENT_TIMEOUT_MS = int(os.environ.get("SQL_PROXY_STATEMENT_TIMEOUT_MS", "30000"))
+_MAX_RESULT_ROWS = int(os.environ.get("SQL_PROXY_MAX_RESULT_ROWS", "10000"))
+_MAX_RESULT_BYTES = int(os.environ.get("SQL_PROXY_MAX_RESULT_BYTES", str(16 * 1024 * 1024)))
 
 
 def _dsn_with_statement_timeout(dsn: str) -> str:
@@ -249,7 +251,26 @@ def db_execute(sql: str, params: list | None, db_name: str | None) -> list[dict]
                 if cur.description is None:
                     conn.rollback()
                     return []
-                rows = [dict(row) for row in cur.fetchall()]
+                rows = []
+                approx_bytes = 2  # []
+                for idx, row in enumerate(cur, start=1):
+                    if idx > _MAX_RESULT_ROWS:
+                        raise ValueError(
+                            "SQL result row cap exceeded "
+                            f"({_MAX_RESULT_ROWS}); add LIMIT, aggregate in "
+                            "SQL, or narrow the query"
+                        )
+                    item = dict(row)
+                    approx_bytes += (
+                        len(json.dumps(item, default=_default_json)) + 1
+                    )
+                    if approx_bytes > _MAX_RESULT_BYTES:
+                        raise ValueError(
+                            "SQL result response cap exceeded "
+                            f"({_MAX_RESULT_BYTES} bytes); select fewer "
+                            "columns, aggregate in SQL, or narrow the query"
+                        )
+                    rows.append(item)
             conn.rollback()  # read-only, no commit needed
             return rows
         except Exception:

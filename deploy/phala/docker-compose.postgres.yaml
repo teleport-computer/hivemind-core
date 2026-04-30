@@ -46,6 +46,8 @@ services:
       # disabled (proxy stays data-plane only, useful for read replicas).
       SQL_PROXY_ADMIN_KEY: ${SQL_PROXY_ADMIN_KEY:-}
       SQL_PROXY_PORT: "8080"
+      SQL_PROXY_MAX_RESULT_ROWS: ${SQL_PROXY_MAX_RESULT_ROWS:-10000}
+      SQL_PROXY_MAX_RESULT_BYTES: ${SQL_PROXY_MAX_RESULT_BYTES:-16777216}
     ports:
       - "8080:8080"
     depends_on:

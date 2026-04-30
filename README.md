@@ -25,7 +25,7 @@ ROOM='hmroom://...'
 
 hivemind room inspect "$ROOM"
 hivemind room inspect "$ROOM" --json | jq '.room.manifest'
-hivemind -y room ask "$ROOM" "What changed this month?"
+hivemind -y room ask "$ROOM" --payer-profile my-tenant "What changed this month?"
 ```
 
 `room inspect` shows the signed room spec and live attestation summary; use
@@ -33,6 +33,11 @@ hivemind -y room ask "$ROOM" "What changed this month?"
 `--max-llm-calls 20`, and `--max-tokens 100000`. Hosted deployments can clamp
 requests lower than what you ask for; the current Phala deployment caps runtime
 at 900s, LLM calls at 100, and tokens at 1000000.
+
+For invite-token room asks, `--payer-profile` or `--payer-api-key` attaches an
+`hmk_` tenant credential used only for billing. The room token still controls
+what data can be read; the payer credential controls whose credits pay for the
+scope/query/mediator run.
 
 Create a fixed-query room and share the printed invite:
 
@@ -225,6 +230,11 @@ Ask defaults are intentionally small: `--timeout 600`,
 For dynamic scope/query/mediator rooms, use larger explicit budgets when the
 scope agent needs to inspect, simulate, and verify the query agent.
 
+If the service has billing enabled, query-token callers should pass
+`--payer-profile <tenant-profile>` or set `HIVEMIND_PAYER_API_KEY=hmk_...`.
+The data owner does not pay for participant queries unless the owner is the
+caller.
+
 ## Trust Policy
 
 Rooms have one deployment trust policy:
@@ -282,6 +292,12 @@ GET /v1/runs
 GET /v1/runs/{run_id}
 GET /v1/runs/{run_id}/artifacts/{filename}
 GET /v1/attestation
+
+Billing/admin
+GET  /v1/admin/billing/{tenant_id}
+POST /v1/admin/billing/{tenant_id}/credits
+GET  /v1/admin/billing/prices
+POST /v1/admin/billing/prices
 ```
 
 Lower-level SQL, token, and generic agent endpoints are internal

@@ -69,6 +69,10 @@ state:
 - `_capability_tokens`: hashed `hmq_` query tokens plus their room constraint
   snapshot.
 - `_tenant_compose_pins`: owner-signed compose-hash allowlists.
+- `_billing_ledger`: tenant credit grants, run holds, hold releases, and usage
+  charges. Positive amounts add credit; negative amounts consume credit.
+- `_billing_model_prices`: provider/model pricing snapshots in micro-USD per
+  million prompt/completion tokens.
 
 Each tenant database stores that tenant's agents, rooms, runs, artifacts, and
 user data:
@@ -80,8 +84,8 @@ user data:
 - `_hivemind_agents`: registered agent config and image tags.
 - `_hivemind_agent_files`: saved build contexts/source files, plaintext or
   ciphertext depending on inspection and seal mode.
-- `_hivemind_query_runs`: async run lifecycle, room binding, visibility, and
-  signed run attestation.
+- `_hivemind_query_runs`: async run lifecycle, room binding, visibility, payer
+  attribution, metered usage, billing status, and signed run attestation.
 - `_hivemind_query_artifacts`: Postgres-backed run artifacts with TTL cleanup.
 
 Agent SQL tools hide `_hivemind_*` tables from room agents. Scope and query
@@ -100,6 +104,12 @@ There are two user-facing bearer types:
 The tenant seal is separate from the room vault. It protects reusable agent
 source/build context with a tenant DEK wrapped to the owner key. Room data uses
 a room DEK wrapped to the owner and room invite tokens.
+
+Billing identity is separate from room access identity. An `hmq_` room token
+authorizes a participant to use a room but is not a tenant billing credential.
+For participant-paid runs, the caller sends `X-Hivemind-Payer-Key: hmk_...`.
+The server resolves that owner key only to prove payer control; it does not
+change room authorization.
 
 ## Room Creation Flow
 
@@ -374,6 +384,7 @@ client submits query
   -> validate provider against room egress allowlist
   -> open room vault with caller bearer
   -> decrypt room vault snapshot into memory
+  -> resolve payer and reserve a billing hold when a payer is known
   -> create _hivemind_query_runs row
   -> background Pipeline.run_query_agent_tracked
 ```
@@ -466,6 +477,33 @@ Visibility is enforced when reading run rows:
 - for participant-initiated runs with `output.visibility=querier_only`, owners
   get output, error, index output, and artifacts redacted.
 
+## Billing Flow
+
+Billing is tenant-scoped and lives in the control database because the payer
+may be different from the data-owner tenant whose room is being queried.
+
+```text
+room ask with hmq_ invite + optional X-Hivemind-Payer-Key
+  -> room authorization uses hmq_
+  -> payer authorization uses hmk_
+  -> create _billing_ledger usage_hold for requested token budget
+  -> run scope, query, mediator, and optional index stages
+  -> collect per-stage calls, prompt tokens, completion tokens, provider, model
+  -> write usage_json and payer fields to _hivemind_query_runs
+  -> release hold and write exact usage_charge ledger entry
+```
+
+Run rows carry `payer_tenant_id`, `payer_token_id`, `billable_role`,
+`usage_json`, `billing_provider`, `billing_model`, hold amount, actual cost,
+and settlement status. The ledger is append-only. Current entry kinds are
+`credit_grant`, `usage_hold`, `usage_release`, and `usage_charge`.
+
+Credit enforcement is deployment-configurable with
+`HIVEMIND_BILLING_ENFORCE_CREDITS`. When false, the service meters and charges
+known payers but does not reject missing or negative balances. When true,
+query-token runs require a payer credential and enough available credit for the
+preflight hold.
+
 ## Egress Boundaries
 
 Room egress has only three intended exits:
@@ -530,6 +568,11 @@ GET  /v1/runs/{run_id}/artifacts/{filename}
 
 GET  /v1/attestation
 GET  /v1/whoami
+
+GET  /v1/admin/billing/{tenant_id}
+POST /v1/admin/billing/{tenant_id}/credits
+GET  /v1/admin/billing/prices
+POST /v1/admin/billing/prices
 ```
 
 Lower-level `_internal` routes exist for compatibility, tests, and maintenance.

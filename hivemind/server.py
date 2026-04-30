@@ -366,6 +366,158 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(status_code=401, detail="Unauthorized")
         return auth.removeprefix("Bearer ").strip()
 
+    async def _payer_for_request(
+        request: Request,
+        caller: Caller,
+        *,
+        billable_role: str,
+    ) -> dict:
+        """Resolve who pays for this run.
+
+        Query-token calls can attach ``X-Hivemind-Payer-Key: hmk_...`` so
+        the data owner is not charged for the participant's LLM spend. Owner
+        calls default to the owner tenant. When credit enforcement is enabled,
+        query-token calls without a payer key are rejected before work starts.
+        """
+        payer_key = (request.headers.get("X-Hivemind-Payer-Key") or "").strip()
+        if payer_key:
+            payer = await asyncio.to_thread(
+                _registry(request).resolve_payer_key,
+                payer_key,
+            )
+            if payer is None:
+                raise HTTPException(401, "invalid payer credential")
+            return {
+                "payer_tenant_id": payer["tenant_id"],
+                "payer_token_id": payer.get("payer_token_id") or "",
+                "billable_role": billable_role,
+            }
+        if caller.role == "owner":
+            return {
+                "payer_tenant_id": caller.tenant_id,
+                "payer_token_id": "",
+                "billable_role": billable_role,
+            }
+        if settings.billing_enforce_credits:
+            raise HTTPException(
+                402,
+                "query-token runs require X-Hivemind-Payer-Key when "
+                "HIVEMIND_BILLING_ENFORCE_CREDITS is enabled",
+            )
+        return {
+            "payer_tenant_id": None,
+            "payer_token_id": caller.token_id or "",
+            "billable_role": billable_role,
+        }
+
+    def _billing_provider_for_room(req_provider: str | None, room: dict | None) -> str:
+        if room is None:
+            return (req_provider or "openrouter").strip().lower()
+        allowed = [
+            p.strip().lower()
+            for p in room.get("allowed_llm_providers") or []
+            if p.strip()
+        ]
+        if not allowed:
+            return ""
+        return (req_provider or allowed[0]).strip().lower()
+
+    def _billing_models_for_query(hm: Hivemind, req: QueryRequest) -> list[str]:
+        roles = ["scope", "query"]
+        if req.mediator_agent_id or hm.settings.default_mediator_agent:
+            roles.append("mediator")
+        models: list[str] = []
+        for role in roles:
+            model = hm.pipeline._model_for(role, req.model)
+            if model and model not in models:
+                models.append(model)
+        return models
+
+    async def _prepare_billing_hold(
+        request: Request,
+        caller: Caller,
+        hm: Hivemind,
+        *,
+        run_id: str,
+        provider: str,
+        models: list[str],
+        max_tokens: int,
+        billable_role: str,
+    ) -> dict:
+        payer = await _payer_for_request(
+            request,
+            caller,
+            billable_role=billable_role,
+        )
+        hold = {"hold_micro_usd": 0, "status": "unbilled"}
+        if payer.get("payer_tenant_id"):
+            try:
+                hold = await asyncio.to_thread(
+                    _registry(request).billing_hold_for_run,
+                    tenant_id=payer["payer_tenant_id"],
+                    payer_token_id=payer.get("payer_token_id") or "",
+                    run_id=run_id,
+                    provider=provider,
+                    models=models,
+                    max_tokens=max_tokens,
+                    billable_role=billable_role,
+                    enforce=settings.billing_enforce_credits,
+                )
+            except ValueError as e:
+                detail = str(e)
+                status = 402 if "insufficient billing credit" in detail else 400
+                raise HTTPException(status, detail)
+        return {
+            **payer,
+            "billing_provider": provider,
+            "billing_model": ",".join(models),
+            "billing_hold_micro_usd": int(hold.get("hold_micro_usd") or 0),
+            "billing_status": hold.get("status") or "unbilled",
+        }
+
+    async def _settle_empty_billing(
+        hm: Hivemind,
+        run_id: str,
+        billing: dict,
+        *,
+        billable_role: str,
+    ) -> None:
+        if not billing.get("payer_tenant_id") or hm.billing_meter is None:
+            return
+        usage = {
+            "calls": 0,
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+            "max_tokens": 0,
+            "stages": {},
+        }
+        try:
+            settlement = await asyncio.to_thread(
+                hm.billing_meter.settle_run,
+                payer_tenant_id=billing.get("payer_tenant_id"),
+                payer_token_id=billing.get("payer_token_id") or "",
+                run_id=run_id,
+                usage=usage,
+                hold_micro_usd=int(billing.get("billing_hold_micro_usd") or 0),
+                billable_role=billable_role,
+                default_provider=billing.get("billing_provider"),
+                default_model=billing.get("billing_model"),
+            )
+            if hasattr(hm.run_store, "update_usage"):
+                await asyncio.to_thread(
+                    hm.run_store.update_usage,
+                    run_id,
+                    usage,
+                    billing_cost_micro_usd=int(
+                        settlement.get("cost_micro_usd") or 0
+                    ),
+                    billing_status=settlement.get("billing_status") or "settled",
+                    billing_settled_at=settlement.get("settled_at"),
+                )
+        except Exception as e:
+            logger.warning("empty billing settlement failed for %s: %s", run_id, e)
+
     async def get_caller(request: Request) -> Caller:
         """Auth + role resolution. Recognizes hmk_ (owner) and hmq_
         (query capability) tokens.
@@ -762,6 +914,74 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         registry = _registry(request)
         tenants = await asyncio.to_thread(registry.list_tenants)
         return {"tenants": tenants}
+
+    @app.get("/v1/admin/billing/{tenant_id}", dependencies=[Depends(check_admin)])
+    async def admin_billing_account(
+        tenant_id: str,
+        request: Request,
+        limit: int = 25,
+    ):
+        registry = _registry(request)
+        try:
+            return await asyncio.to_thread(
+                registry.billing_account,
+                tenant_id,
+                limit=limit,
+            )
+        except KeyError as e:
+            raise HTTPException(404, str(e))
+
+    @app.post(
+        "/v1/admin/billing/{tenant_id}/credits",
+        dependencies=[Depends(check_admin)],
+    )
+    async def admin_billing_grant_credit(
+        tenant_id: str,
+        payload: dict,
+        request: Request,
+    ):
+        amount = (payload or {}).get("amount_usd")
+        note = str((payload or {}).get("note") or "")
+        if amount is None:
+            raise HTTPException(400, "'amount_usd' required")
+        registry = _registry(request)
+        try:
+            return await asyncio.to_thread(
+                registry.billing_grant_credit,
+                tenant_id,
+                amount,
+                note=note,
+                actor="admin",
+            )
+        except KeyError as e:
+            raise HTTPException(404, str(e))
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+
+    @app.get("/v1/admin/billing/prices", dependencies=[Depends(check_admin)])
+    async def admin_billing_prices(request: Request):
+        registry = _registry(request)
+        prices = await asyncio.to_thread(registry.billing_list_prices)
+        return {"prices": prices}
+
+    @app.post("/v1/admin/billing/prices", dependencies=[Depends(check_admin)])
+    async def admin_billing_set_price(payload: dict, request: Request):
+        registry = _registry(request)
+        try:
+            return await asyncio.to_thread(
+                registry.billing_set_price,
+                str((payload or {}).get("provider") or ""),
+                str((payload or {}).get("model") or ""),
+                prompt_usd_per_million=(payload or {}).get(
+                    "prompt_usd_per_million"
+                ),
+                completion_usd_per_million=(payload or {}).get(
+                    "completion_usd_per_million"
+                ),
+                source=str((payload or {}).get("source") or "admin"),
+            )
+        except ValueError as e:
+            raise HTTPException(400, str(e))
 
     @app.post(
         "/v1/admin/migrate-to-roles",
@@ -1415,6 +1635,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             qreq,
             caller,
             room,
+            request=request,
             bearer=_bearer(request),
         )
 
@@ -1548,6 +1769,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         req: QueryRequest,
         caller: Caller,
         room: dict | None = None,
+        request: Request | None = None,
         bearer: str | None = None,
     ) -> dict:
         hm = caller.hive
@@ -1568,10 +1790,41 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             )
 
         run_id = uuid4().hex[:12]
+        effective_max_tokens = min(
+            req.max_tokens or hm.settings.max_tokens,
+            hm.settings.max_tokens,
+        )
+        billing = {
+            "payer_tenant_id": None,
+            "payer_token_id": caller.token_id or "",
+            "billable_role": "query",
+            "billing_provider": _billing_provider_for_room(req.provider, room),
+            "billing_model": ",".join(_billing_models_for_query(hm, req)),
+            "billing_hold_micro_usd": 0,
+            "billing_status": "unbilled",
+        }
+        if request is not None:
+            billing = await _prepare_billing_hold(
+                request,
+                caller,
+                hm,
+                run_id=run_id,
+                provider=_billing_provider_for_room(req.provider, room),
+                models=_billing_models_for_query(hm, req),
+                max_tokens=effective_max_tokens,
+                billable_role="query",
+            )
         await asyncio.to_thread(
             hm.run_store.create, run_id, query_agent_id,
             scope_agent_id=scope_agent_id,
             issuer_token_id=(caller.token_id or None),
+            payer_tenant_id=billing.get("payer_tenant_id"),
+            payer_token_id=billing.get("payer_token_id"),
+            billable_role=billing.get("billable_role"),
+            billing_provider=billing.get("billing_provider"),
+            billing_model=billing.get("billing_model"),
+            billing_hold_micro_usd=int(billing.get("billing_hold_micro_usd") or 0),
+            billing_status=billing.get("billing_status") or "unbilled",
             room_id=(room or {}).get("room_id"),
             room_manifest_hash=(room or {}).get("manifest_hash"),
             prompt=_room_prompt_for_run(room, req.query),
@@ -1606,6 +1859,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 allowed_llm_providers=(room or {}).get("allowed_llm_providers"),
                 artifacts_enabled=bool((room or {}).get("allow_artifacts", True)),
                 room_vault_items=room_vault_items,
+                payer_tenant_id=billing.get("payer_tenant_id"),
+                payer_token_id=billing.get("payer_token_id"),
+                billable_role=billing.get("billable_role") or "query",
+                billing_provider=billing.get("billing_provider"),
+                billing_model=billing.get("billing_model"),
+                billing_hold_micro_usd=int(
+                    billing.get("billing_hold_micro_usd") or 0
+                ),
             ),
         )
 
@@ -1643,6 +1904,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             req,
             caller,
             room,
+            request=request,
             bearer=_bearer(request),
         )
 
@@ -2082,6 +2344,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.post("/v1/_internal/agents/submit", include_in_schema=False)
     async def submit_agents(
+        request: Request,
         # Query agent (required)
         query_archive: UploadFile = File(...),
         query_name: str = Form(...),
@@ -2116,10 +2379,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # scope/index agents in this endpoint are A's own agents: their
         # source is owner-readable by design (default 'full').
         query_inspection_mode: str = Form("full"),
-        hm: Hivemind = Depends(get_tenant_hive),
+        caller: Caller = Depends(requires_role("owner")),
     ):
         """Upload query agent (required) + optional scope/index agents,
         build all, then run the full pipeline with tracking."""
+        hm = caller.hive
 
         validated_query_mode = _validate_inspection_mode(query_inspection_mode)
         has_scope_upload = bool(scope_archive and scope_archive.filename)
@@ -2191,11 +2455,47 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         effective_scope_agent_id = scope_agent_id or default_scope_id
         index_agent_id = uuid4().hex[:12] if index_tmpdir else None
         run_id = uuid4().hex[:12]
+        billing_req = QueryRequest(
+            query=prompt or "run uploaded query agent",
+            mediator_agent_id=mediator_agent_id,
+            max_tokens=max_tokens,
+            max_llm_calls=max_llm_calls,
+            timeout_seconds=timeout_seconds,
+            model=model,
+            provider=provider,
+            policy=policy,
+        )
+        billing_models = _billing_models_for_query(hm, billing_req)
+        if index_agent_id:
+            index_model = hm.pipeline._model_for("index", model)
+            if index_model not in billing_models:
+                billing_models.append(index_model)
+        effective_max_tokens = min(
+            max_tokens or hm.settings.max_tokens,
+            hm.settings.max_tokens,
+        )
+        billing = await _prepare_billing_hold(
+            request,
+            caller,
+            hm,
+            run_id=run_id,
+            provider=(provider or "openrouter").strip().lower(),
+            models=billing_models,
+            max_tokens=effective_max_tokens * (2 if index_agent_id else 1),
+            billable_role="query",
+        )
 
         await asyncio.to_thread(
             hm.run_store.create, run_id, query_agent_id,
             scope_agent_id=effective_scope_agent_id,
             index_agent_id=index_agent_id,
+            payer_tenant_id=billing.get("payer_tenant_id"),
+            payer_token_id=billing.get("payer_token_id"),
+            billable_role=billing.get("billable_role"),
+            billing_provider=billing.get("billing_provider"),
+            billing_model=billing.get("billing_model"),
+            billing_hold_micro_usd=int(billing.get("billing_hold_micro_usd") or 0),
+            billing_status=billing.get("billing_status") or "unbilled",
         )
 
         # Run everything in background
@@ -2235,6 +2535,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 policy=policy,
                 tmpdirs=tmpdirs,
                 query_inspection_mode=validated_query_mode,
+                payer_tenant_id=billing.get("payer_tenant_id"),
+                payer_token_id=billing.get("payer_token_id"),
+                billable_role=billing.get("billable_role") or "query",
+                billing_provider=billing.get("billing_provider"),
+                billing_model=billing.get("billing_model"),
+                billing_hold_micro_usd=int(
+                    billing.get("billing_hold_micro_usd") or 0
+                ),
             ),
         )
 
@@ -2281,12 +2589,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         policy: str | None,
         tmpdirs: list[str],
         query_inspection_mode: str = "full",
+        payer_tenant_id: str | None = None,
+        payer_token_id: str | None = None,
+        billable_role: str = "query",
+        billing_provider: str | None = None,
+        billing_model: str | None = None,
+        billing_hold_micro_usd: int = 0,
     ) -> None:
         """Background: build all agent images in parallel, then run pipeline."""
         import time as _time
 
         from .sandbox.backend import _create_runner
 
+        billing = {
+            "payer_tenant_id": payer_tenant_id,
+            "payer_token_id": payer_token_id,
+            "billing_provider": billing_provider,
+            "billing_model": billing_model,
+            "billing_hold_micro_usd": billing_hold_micro_usd,
+        }
         try:
             sandbox_settings = build_sandbox_settings(settings)
             runner = _create_runner(sandbox_settings)
@@ -2337,6 +2658,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     hm.run_store.update_status, run_id, "failed",
                     error=f"Image build failed: {e}",
                 )
+                await _settle_empty_billing(
+                    hm,
+                    run_id,
+                    billing,
+                    billable_role=billable_role,
+                )
                 return
             finally:
                 for d in tmpdirs:
@@ -2361,6 +2688,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         max_tokens=max_tokens,
                         model=model,
                         provider=provider,
+                        payer_tenant_id=payer_tenant_id,
+                        payer_token_id=payer_token_id,
+                        billable_role="index",
+                        billing_provider=billing_provider,
+                        billing_model=billing_model,
+                        billing_hold_micro_usd=0,
                     )
                 except Exception as e:
                     logger.warning(
@@ -2383,6 +2716,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 model=model,
                 provider=provider,
                 policy=policy,
+                payer_tenant_id=payer_tenant_id,
+                payer_token_id=payer_token_id,
+                billable_role=billable_role,
+                billing_provider=billing_provider,
+                billing_model=billing_model,
+                billing_hold_micro_usd=billing_hold_micro_usd,
             )
 
         except Exception as e:
@@ -2391,6 +2730,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 await asyncio.to_thread(
                     hm.run_store.update_status, run_id, "failed",
                     error=str(e)[:500],
+                )
+                await _settle_empty_billing(
+                    hm,
+                    run_id,
+                    billing,
+                    billable_role=billable_role,
                 )
             except Exception:
                 pass
@@ -2479,10 +2824,39 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # Create run record immediately, return fast
         agent_id = uuid4().hex[:12]
         run_id = uuid4().hex[:12]
+        billing_req = QueryRequest(
+            query=prompt or "run uploaded room query agent",
+            query_agent_id=agent_id,
+            scope_agent_id=scope_agent_id,
+            mediator_agent_id=mediator_agent_id,
+            max_tokens=max_tokens,
+            max_llm_calls=max_llm_calls,
+            timeout_seconds=timeout_seconds,
+            model=model,
+            provider=provider,
+            policy=policy,
+        )
+        billing = await _prepare_billing_hold(
+            request,
+            caller,
+            hm,
+            run_id=run_id,
+            provider=_billing_provider_for_room(provider, room),
+            models=_billing_models_for_query(hm, billing_req),
+            max_tokens=min(max_tokens or hm.settings.max_tokens, hm.settings.max_tokens),
+            billable_role="query",
+        )
         await asyncio.to_thread(
             hm.run_store.create, run_id, agent_id,
             scope_agent_id=scope_agent_id,
             issuer_token_id=(caller.token_id or None),
+            payer_tenant_id=billing.get("payer_tenant_id"),
+            payer_token_id=billing.get("payer_token_id"),
+            billable_role=billing.get("billable_role"),
+            billing_provider=billing.get("billing_provider"),
+            billing_model=billing.get("billing_model"),
+            billing_hold_micro_usd=int(billing.get("billing_hold_micro_usd") or 0),
+            billing_status=billing.get("billing_status") or "unbilled",
             room_id=(room or {}).get("room_id"),
             room_manifest_hash=(room or {}).get("manifest_hash"),
             prompt=_room_prompt_for_run(room, prompt),
@@ -2517,6 +2891,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 inspection_mode=validated_mode,
                 room=room,
                 room_vault_items=room_vault_items,
+                payer_tenant_id=billing.get("payer_tenant_id"),
+                payer_token_id=billing.get("payer_token_id"),
+                billable_role=billing.get("billable_role") or "query",
+                billing_provider=billing.get("billing_provider"),
+                billing_model=billing.get("billing_model"),
+                billing_hold_micro_usd=int(
+                    billing.get("billing_hold_micro_usd") or 0
+                ),
             ),
         )
 
@@ -2550,10 +2932,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         inspection_mode: str = "full",
         room: dict | None = None,
         room_vault_items: list[dict] | None = None,
+        payer_tenant_id: str | None = None,
+        payer_token_id: str | None = None,
+        billable_role: str = "query",
+        billing_provider: str | None = None,
+        billing_model: str | None = None,
+        billing_hold_micro_usd: int = 0,
     ) -> None:
         """Background task: build image, register agent, run pipeline."""
         from .sandbox.backend import _create_runner
 
+        billing = {
+            "payer_tenant_id": payer_tenant_id,
+            "payer_token_id": payer_token_id,
+            "billing_provider": billing_provider,
+            "billing_model": billing_model,
+            "billing_hold_micro_usd": billing_hold_micro_usd,
+        }
         try:
             # -- Build Docker image --
             import time as _time
@@ -2585,6 +2980,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 await asyncio.to_thread(
                     hm.run_store.update_status, run_id, "failed",
                     error=f"Image build failed: {e}",
+                )
+                await _settle_empty_billing(
+                    hm,
+                    run_id,
+                    billing,
+                    billable_role=billable_role,
                 )
                 return
             finally:
@@ -2647,6 +3048,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 allowed_llm_providers=(room or {}).get("allowed_llm_providers"),
                 artifacts_enabled=bool((room or {}).get("allow_artifacts", True)),
                 room_vault_items=room_vault_items or [],
+                payer_tenant_id=payer_tenant_id,
+                payer_token_id=payer_token_id,
+                billable_role=billable_role,
+                billing_provider=billing_provider,
+                billing_model=billing_model,
+                billing_hold_micro_usd=billing_hold_micro_usd,
             )
 
         except Exception as e:
@@ -2655,6 +3062,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 await asyncio.to_thread(
                     hm.run_store.update_status, run_id, "failed",
                     error=str(e)[:500],
+                )
+                await _settle_empty_billing(
+                    hm,
+                    run_id,
+                    billing,
+                    billable_role=billable_role,
                 )
             except Exception:
                 pass

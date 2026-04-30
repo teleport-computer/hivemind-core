@@ -137,6 +137,16 @@ _INTERNAL_DDL: tuple[str, ...] = (
         index_output TEXT,
         attestation JSONB,
         issuer_token_id TEXT,
+        payer_tenant_id TEXT,
+        payer_token_id TEXT,
+        billable_role TEXT,
+        billing_provider TEXT,
+        billing_model TEXT,
+        billing_hold_micro_usd BIGINT NOT NULL DEFAULT 0,
+        billing_cost_micro_usd BIGINT NOT NULL DEFAULT 0,
+        billing_status TEXT NOT NULL DEFAULT 'unbilled',
+        billing_settled_at DOUBLE PRECISION,
+        usage_json JSONB,
         output_visibility TEXT NOT NULL DEFAULT 'owner_and_querier',
         artifacts_enabled BOOLEAN NOT NULL DEFAULT TRUE
     )
@@ -205,6 +215,29 @@ _INTERNAL_MIGRATIONS: tuple[str, ...] = (
     "ADD COLUMN IF NOT EXISTS prompt TEXT",
     "ALTER TABLE _hivemind_query_runs "
     "ADD COLUMN IF NOT EXISTS issuer_token_id TEXT",
+    "ALTER TABLE _hivemind_query_runs "
+    "ADD COLUMN IF NOT EXISTS payer_tenant_id TEXT",
+    "ALTER TABLE _hivemind_query_runs "
+    "ADD COLUMN IF NOT EXISTS payer_token_id TEXT",
+    "ALTER TABLE _hivemind_query_runs "
+    "ADD COLUMN IF NOT EXISTS billable_role TEXT",
+    "ALTER TABLE _hivemind_query_runs "
+    "ADD COLUMN IF NOT EXISTS billing_provider TEXT",
+    "ALTER TABLE _hivemind_query_runs "
+    "ADD COLUMN IF NOT EXISTS billing_model TEXT",
+    "ALTER TABLE _hivemind_query_runs "
+    "ADD COLUMN IF NOT EXISTS billing_hold_micro_usd BIGINT "
+    "NOT NULL DEFAULT 0",
+    "ALTER TABLE _hivemind_query_runs "
+    "ADD COLUMN IF NOT EXISTS billing_cost_micro_usd BIGINT "
+    "NOT NULL DEFAULT 0",
+    "ALTER TABLE _hivemind_query_runs "
+    "ADD COLUMN IF NOT EXISTS billing_status TEXT "
+    "NOT NULL DEFAULT 'unbilled'",
+    "ALTER TABLE _hivemind_query_runs "
+    "ADD COLUMN IF NOT EXISTS billing_settled_at DOUBLE PRECISION",
+    "ALTER TABLE _hivemind_query_runs "
+    "ADD COLUMN IF NOT EXISTS usage_json JSONB",
     "ALTER TABLE _hivemind_query_runs "
     "ADD COLUMN IF NOT EXISTS output_visibility TEXT "
     "NOT NULL DEFAULT 'owner_and_querier'",

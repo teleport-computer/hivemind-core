@@ -83,6 +83,7 @@ Ask through the invite:
 
 ```bash
 hivemind -y room ask 'hmroom://...' \
+  --payer-profile liz \
   --timeout 900 \
   --max-tokens 1000000 \
   --max-llm-calls 60 \
@@ -96,11 +97,18 @@ example is currently verified with OpenRouter Claude. Use another provider or
 model only after checking that it can complete the scope stage within the room
 timeout.
 
+The default agents use `claude_agent_sdk`, so models that are weak at
+Claude/Anthropic-style tool loops can submit successfully and then fail or
+produce unhelpful scoped queries. For this watch-history room, use Sonnet when
+you need the table to work. `anthropic/claude-haiku-4.5` is the cheaper
+candidate to try next; generic OpenAI/Gemini models are not currently the
+reliable path for these agents.
+
 The copied room link can be shared as a shell variable:
 
 ```bash
 ROOM='hmroom://hivemind.teleport.computer/room_...?service=https%3A%2F%2Fhivemind.teleport.computer&token=hmq_...&owner_pubkey=...'
-hivemind -y room ask "$ROOM" --provider openrouter --model anthropic/claude-sonnet-4.5 "..."
+hivemind -y room ask "$ROOM" --payer-profile liz --provider openrouter --model anthropic/claude-sonnet-4.5 "..."
 ```
 
 `room ask` defaults to `--timeout 600`, `--max-llm-calls 20`,
@@ -125,6 +133,31 @@ Then the participant asks with:
 ```bash
 hivemind room ask 'hmroom://...' "What changed this month?" \
   --agent ./participant-query-agent
+```
+
+## Billing And Payer Credentials
+
+Room invite tokens (`hmq_...`) authorize access to one room, but they are not
+tenant billing credentials. To make the querying tenant pay, attach a payer
+owner key:
+
+```bash
+hivemind room ask "$ROOM" --payer-profile liz "What changed this month?"
+```
+
+or:
+
+```bash
+HIVEMIND_PAYER_API_KEY=hmk_... hivemind room ask "$ROOM" "What changed this month?"
+```
+
+The payer key is sent as `X-Hivemind-Payer-Key`; it does not change the room
+authorization. Admin billing commands:
+
+```bash
+hivemind admin billing grant t_... 25.00 --note "initial credit"
+hivemind admin billing balance t_...
+hivemind admin billing prices
 ```
 
 ## Visibility Choices
