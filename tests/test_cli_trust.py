@@ -92,6 +92,9 @@ def test_room_ask_omits_room_id_from_path_scoped_run_body(
     _sandbox, monkeypatch
 ):
     captured: dict = {}
+    (_cli_mod._PROFILES_DIR / "default.yaml").write_text(
+        "service: https://cvm.example\napi_key: hmk_test\n"
+    )
 
     monkeypatch.setattr(
         _rooms_cli,
@@ -154,8 +157,21 @@ def test_room_ask_omits_room_id_from_path_scoped_run_body(
     assert captured["payload"]["query"] == "Show me top hashtags."
     assert captured["payload"]["provider"] == "tinfoil"
     assert captured["payload"]["model"] == "kimi-k2-6"
+    assert captured["headers"]["Authorization"] == "Bearer hmq_test"
+    assert captured["headers"]["X-Hivemind-Payer-Key"] == "hmk_test"
     assert "room_id" not in captured["payload"]
     assert captured["kwargs"]["submit_path"] == "/v1/rooms/room_test/runs"
+
+
+def test_room_ask_requires_billable_profile_for_invite_links(_sandbox):
+    result = CliRunner().invoke(
+        _cli_mod.cli,
+        ["room", "ask", _ROOM_LINK, "Show me top hashtags."],
+    )
+
+    assert result.exit_code != 0
+    assert "billed to the querying tenant" in result.output
+    assert "hivemind --profile NAME init --api-key hmk_" in result.output
 
 
 def test_room_help_documents_spec_and_budget_defaults():
@@ -171,6 +187,7 @@ def test_room_help_documents_spec_and_budget_defaults():
     assert "--max-llm-calls 20" in ask.output
     assert "--max-tokens 100000" in ask.output
     assert "hosted cap" in ask.output
+    assert "active hmk_" in ask.output
 
 
 def test_admin_create_uses_admin_profile_without_trust_check(

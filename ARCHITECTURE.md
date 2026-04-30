@@ -107,9 +107,10 @@ a room DEK wrapped to the owner and room invite tokens.
 
 Billing identity is separate from room access identity. An `hmq_` room token
 authorizes a participant to use a room but is not a tenant billing credential.
-For participant-paid runs, the caller sends `X-Hivemind-Payer-Key: hmk_...`.
-The server resolves that owner key only to prove payer control; it does not
-change room authorization.
+For participant-paid runs, the CLI sends `X-Hivemind-Payer-Key: hmk_...` from
+the active tenant profile automatically. Raw API callers must send the same
+header. The server resolves that owner key only to prove payer control; it does
+not change room authorization.
 
 ## Room Creation Flow
 
@@ -483,7 +484,7 @@ Billing is tenant-scoped and lives in the control database because the payer
 may be different from the data-owner tenant whose room is being queried.
 
 ```text
-room ask with hmq_ invite + optional X-Hivemind-Payer-Key
+room ask with hmq_ invite + active-profile X-Hivemind-Payer-Key
   -> room authorization uses hmq_
   -> payer authorization uses hmk_
   -> create _billing_ledger usage_hold for requested token budget

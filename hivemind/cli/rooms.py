@@ -81,6 +81,19 @@ def _payer_key_from_options(
     return key
 
 
+def _active_profile_payer_key() -> str | None:
+    path = _config_path()
+    if not path.exists():
+        return None
+    try:
+        with open(path) as f:
+            config = yaml.safe_load(f) or {}
+    except yaml.YAMLError as e:
+        raise click.ClickException(f"corrupt active profile {path}: {e}")
+    key = str(config.get("api_key") or "").strip()
+    return key if key.startswith("hmk_") else None
+
+
 def _fetch_verified_room(
     service: str,
     room_id: str,
@@ -761,13 +774,13 @@ def trust_room(
 @click.option(
     "--payer-profile",
     default=None,
-    help="Tenant profile whose hmk_ key pays for this query-token run.",
+    help="Tenant profile to charge instead of the active hmk_ profile.",
 )
 @click.option(
     "--payer-api-key",
     envvar="HIVEMIND_PAYER_API_KEY",
     default=None,
-    help="hmk_ tenant key used only for run billing.",
+    help="hmk_ tenant key to charge instead of the active profile.",
 )
 @click.option("--json", "as_json", is_flag=True, help="Emit JSON on stdout.")
 @click.option("--fetch", is_flag=True, help="Download visible artifacts.")
@@ -799,11 +812,23 @@ def ask_room(
     Defaults are tuned for short runs: --timeout 600, --max-llm-calls 20,
     --max-tokens 100000. Dynamic scope/query/mediator rooms may need larger
     budgets such as --timeout 900 --max-tokens 1000000 --max-llm-calls 60.
+    Invite-token room asks are billed to the active hmk_ tenant profile unless
+    --payer-profile or --payer-api-key is supplied.
     """
     if query_agent and agent_path:
         raise click.ClickException("use either --query-agent id or --agent path, not both")
     service, room_id, headers, owner_pubkey = _parse_room_ref(room)
     payer_key = _payer_key_from_options(payer_profile, payer_api_key)
+    if not payer_key and owner_pubkey is not None:
+        payer_key = _active_profile_payer_key()
+        if not payer_key:
+            raise click.ClickException(
+                "room invite asks are billed to the querying tenant. "
+                "Use an active tenant profile with an hmk_ api_key "
+                "(`hivemind --profile NAME init --api-key hmk_...` and "
+                "`hivemind profile use NAME`), or pass --payer-profile/"
+                "--payer-api-key."
+            )
     if payer_key:
         headers = dict(headers)
         headers["X-Hivemind-Payer-Key"] = payer_key

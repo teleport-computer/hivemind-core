@@ -21,11 +21,12 @@ hivemind --help
 Join an existing room:
 
 ```bash
+hivemind profile use my-tenant
 ROOM='hmroom://...'
 
 hivemind room inspect "$ROOM"
 hivemind room inspect "$ROOM" --json | jq '.room.manifest'
-hivemind -y room ask "$ROOM" --payer-profile my-tenant "What changed this month?"
+hivemind -y room ask "$ROOM" "What changed this month?"
 ```
 
 `room inspect` shows the signed room spec and live attestation summary; use
@@ -34,10 +35,10 @@ hivemind -y room ask "$ROOM" --payer-profile my-tenant "What changed this month?
 requests lower than what you ask for; the current Phala deployment caps runtime
 at 900s, LLM calls at 100, and tokens at 1000000.
 
-For invite-token room asks, `--payer-profile` or `--payer-api-key` attaches an
-`hmk_` tenant credential used only for billing. The room token still controls
-what data can be read; the payer credential controls whose credits pay for the
-scope/query/mediator run.
+For invite-token room asks, the CLI bills the active `hmk_` tenant profile
+automatically. The room token still controls what data can be read; the active
+tenant credential controls whose credits pay for the scope/query/mediator run.
+Use `--payer-profile` or `--payer-api-key` only to charge a different tenant.
 
 Create a fixed-query room and share the printed invite:
 
@@ -230,10 +231,10 @@ Ask defaults are intentionally small: `--timeout 600`,
 For dynamic scope/query/mediator rooms, use larger explicit budgets when the
 scope agent needs to inspect, simulate, and verify the query agent.
 
-If the service has billing enabled, query-token callers should pass
-`--payer-profile <tenant-profile>` or set `HIVEMIND_PAYER_API_KEY=hmk_...`.
-The data owner does not pay for participant queries unless the owner is the
-caller.
+If the service has billing enabled, invite-token room asks are charged to the
+active `hmk_` tenant profile. Pass `--payer-profile <tenant-profile>` or set
+`HIVEMIND_PAYER_API_KEY=hmk_...` only when a different tenant should pay. The
+data owner does not pay for participant queries unless the owner is the caller.
 
 ## Trust Policy
 

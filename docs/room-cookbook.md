@@ -82,8 +82,8 @@ hivemind room inspect "$ROOM" --json | jq '.room.manifest'
 Ask through the invite:
 
 ```bash
+hivemind profile use liz
 hivemind -y room ask 'hmroom://...' \
-  --payer-profile liz \
   --timeout 900 \
   --max-tokens 1000000 \
   --max-llm-calls 60 \
@@ -108,7 +108,8 @@ The copied room link can be shared as a shell variable:
 
 ```bash
 ROOM='hmroom://hivemind.teleport.computer/room_...?service=https%3A%2F%2Fhivemind.teleport.computer&token=hmq_...&owner_pubkey=...'
-hivemind -y room ask "$ROOM" --payer-profile liz --provider openrouter --model anthropic/claude-sonnet-4.5 "..."
+hivemind profile use liz
+hivemind -y room ask "$ROOM" --provider openrouter --model anthropic/claude-sonnet-4.5 "..."
 ```
 
 `room ask` defaults to `--timeout 600`, `--max-llm-calls 20`,
@@ -138,21 +139,24 @@ hivemind room ask 'hmroom://...' "What changed this month?" \
 ## Billing And Payer Credentials
 
 Room invite tokens (`hmq_...`) authorize access to one room, but they are not
-tenant billing credentials. To make the querying tenant pay, attach a payer
-owner key:
+tenant billing credentials. When you query with the CLI, it attaches the
+active tenant profile's `hmk_` key as the payer automatically:
 
 ```bash
-hivemind room ask "$ROOM" --payer-profile liz "What changed this month?"
+hivemind profile use liz
+hivemind room ask "$ROOM" "What changed this month?"
 ```
 
-or:
+Use an explicit payer only when a different tenant should pay:
 
 ```bash
+hivemind room ask "$ROOM" --payer-profile liz-billing "What changed this month?"
 HIVEMIND_PAYER_API_KEY=hmk_... hivemind room ask "$ROOM" "What changed this month?"
 ```
 
 The payer key is sent as `X-Hivemind-Payer-Key`; it does not change the room
-authorization. Admin billing commands:
+authorization. Raw API clients using `hmq_` invite tokens must send the same
+header so the service knows which tenant to charge. Admin billing commands:
 
 ```bash
 hivemind admin billing grant t_... 25.00 --note "initial credit"
