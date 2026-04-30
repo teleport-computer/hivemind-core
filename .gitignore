@@ -26,7 +26,9 @@ tests/artifacts/
 
 hivemind-core-amiller-cvm-deploy-demo
 
-bench/results/
+eval/results/
+eval/traces/
+autoresearch/legacy_bench/results/
 autoresearch/experiments/
 /tmp/iter*_*.txt
 *_bench.log
@@ -36,11 +38,12 @@ agents/default-scope-claw/claw
 agents/default-scope-claw/mcp_stdio_proxy.py
 agents/default-scope-claw/default-scope-agent.py
 
-# Research phase — raw third-party datasets (not committed; see bench/sources/README.md)
-bench/sources/opp115/
-bench/sources/privaci_bench/
-bench/sources/confaide/
-bench/sources/__pycache__/
+# Research phase — raw third-party datasets (not committed; see
+# autoresearch/legacy_bench/sources/README.md)
+autoresearch/legacy_bench/sources/opp115/
+autoresearch/legacy_bench/sources/privaci_bench/
+autoresearch/legacy_bench/sources/confaide/
+autoresearch/legacy_bench/sources/__pycache__/
 
 # Agent backup files (kept in git history, not in working tree)
 agents/*/*.py.bak

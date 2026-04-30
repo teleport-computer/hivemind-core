@@ -79,6 +79,14 @@ hivemind init --service http://localhost:8100 --api-key hmk_...
 
 For copy-paste room setups, see the [room cookbook](docs/room-cookbook.md).
 
+## Evaluation
+
+Active agent evaluation lives in [`eval/`](eval/). It is room-native and
+starts with deterministic checks for leakage, output shape, latency, tool
+calls, tokens, and cost. The old GAN-style benchmark is archived under
+[`autoresearch/legacy_bench/`](autoresearch/legacy_bench/) for historical
+context only; do not use it as the optimization target for new agents.
+
 ## Room Data Flow
 
 ```text

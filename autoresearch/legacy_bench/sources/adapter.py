@@ -27,7 +27,7 @@ from pathlib import Path
 import pandas as pd
 
 ROOT = Path(__file__).resolve().parent
-SRC = ROOT  # bench/sources/
+SRC = ROOT  # autoresearch/legacy_bench/sources/
 OUT = ROOT.parent / "scenarios_real.json"
 
 SEED = 20260421

@@ -13,7 +13,7 @@ from dataclasses import dataclass
 
 import httpx
 
-from bench.scenarios import Scenario
+from autoresearch.legacy_bench.scenarios import Scenario
 
 
 @dataclass

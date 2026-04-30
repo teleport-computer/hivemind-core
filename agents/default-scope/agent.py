@@ -1,7 +1,7 @@
 """Default scope agent — SDK-based build.
 
 Uses claude_agent_sdk.query() with MCP tools (Claude Code agent loop).
-max_turns=20, with bench-measured turn-10 emit deadline in the prompt.
+max_turns=20, with an autoresearch-measured turn-10 emit deadline in the prompt.
 Captures Node CLI stderr and always dumps it at end (success or failure)
 because the base SDK surfaces only the opaque "Check stderr output for
 details" message without forwarding the actual stderr.
@@ -623,7 +623,7 @@ if _ENABLE_MULTI:
         SYSTEM_PROMPT = SYSTEM_PROMPT.replace(_old_step5, _new_step5)
 
     # 3) Strategy-ambiguity guidance — a short, generic rubric near the
-    #    NPC section. Not a 4-type classifier (that overfits the bench);
+    #    NPC section. Not a 4-type classifier (that overfits the archived eval);
     #    just a prompt to notice when multiple strategies are plausible.
     _anchor = "Typical loop — use this when unsure what the query agent will do:"
     _preamble = (

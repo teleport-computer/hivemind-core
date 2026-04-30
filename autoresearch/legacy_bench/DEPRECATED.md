@@ -1,6 +1,8 @@
-# bench/ — retired
+# autoresearch/legacy_bench/ — retired
 
 The GAN-style adversarial benchmark is retired as of 2026-04-23.
+It was moved out of the repository root so new work does not accidentally
+treat it as the active eval harness.
 
 ## Why
 
@@ -14,12 +16,13 @@ LEARNINGS next-step #2 is the pair-generation harness: `POST /v1/query/pair` run
 
 ## Code here is stale
 
-`bench/runner.py` calls the synchronous `POST /v1/query` endpoint, which
-was removed in `3443e5e` (Phase 5.1) — every endpoint now goes through
-the tracked-async path `POST /v1/query/run/submit` + poll
-`GET /v1/agent-runs/{id}`. Anyone reviving this harness must port
-`runner.py:50` to the new flow. The GAN loop, scenario definitions,
-red-team evolver, and LLM judge are otherwise intact.
+`autoresearch/legacy_bench/runner.py` calls the synchronous `POST /v1/query`
+endpoint, which was removed in `3443e5e` (Phase 5.1) — every endpoint now
+goes through tracked async run submission and polling. Anyone reviving this
+harness must port the runner to the current room/run flow. The GAN loop,
+scenario definitions, red-team evolver, and LLM judge are otherwise intact.
+
+New work belongs in `eval/`, not here.
 
 ## Canonical results
 

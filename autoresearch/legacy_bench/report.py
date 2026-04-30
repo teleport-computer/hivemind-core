@@ -6,7 +6,7 @@ import json
 import os
 from datetime import datetime, timezone
 
-from bench.judge import compute_scores, Judgment
+from autoresearch.legacy_bench.judge import compute_scores, Judgment
 
 
 # ANSI color codes
@@ -115,7 +115,7 @@ def print_summary(results: list[dict]) -> None:
     print()
 
 
-def export_json(results: list[dict], output_dir: str = "bench/results") -> str:
+def export_json(results: list[dict], output_dir: str = "autoresearch/legacy_bench/results") -> str:
     """Export results to a timestamped JSON file. Returns the file path."""
     os.makedirs(output_dir, exist_ok=True)
 

@@ -527,7 +527,7 @@ class BridgeServer:
         ) -> BridgeToolResponse:
             # Telemetry: per-tool usage count + approx arg-size for this
             # scope/query/mediator invocation. Grep logs for TOOL_CALL
-            # after a bench run to see how scope actually exercises its
+            # after an eval run to see how scope actually exercises its
             # capabilities.
             import json as _json
             args_size = len(_json.dumps(req.arguments, default=str))

@@ -256,7 +256,7 @@ port to whatever model we eventually fine-tune (Kimi K2 preferred).
 
 ## Benchmark critique
 
-The 6-scenario GAN benchmark (`bench/scenarios.py`) served its
+The 6-scenario GAN benchmark (`autoresearch/legacy_bench/scenarios.py`) served its
 purpose and is now misleading us:
 
 - Scenarios were hand-picked from a small category list (PII,
@@ -271,10 +271,10 @@ purpose and is now misleading us:
   principled policy doesn't mention, even when that's the correct
   behavior.
 
-We built `bench/sources/adapter.py` to sample from real-authored
+We built `autoresearch/legacy_bench/sources/adapter.py` to sample from real-authored
 policy data (PrivaCI-Bench HIPAA/ACLU, ConfAIde Tier 2a with human
 scores) as a harder generalization test. 35 scenarios in
-`bench/scenarios_real.json`. This is useful as a **held-out
+`autoresearch/legacy_bench/scenarios_real.json`. This is useful as a **held-out
 generalization canary**, not as a new training target. The underlying
 shared-prior problem doesn't disappear just because the scenarios are
 human-sourced — the judge and defender are still the same LLM.
@@ -313,8 +313,8 @@ Code:
   baked-in fallback (iter57)
 - `hivemind/pipeline.py` — MEDIATION_POLICY plumbing in sync path
 - `hivemind/scope.py` — AST validator + extractor rescue path
-- `bench/scenarios.py` — 6-scenario GAN (regression canary from here)
-- `bench/sources/adapter.py` — real-sourced benchmark (35 scenarios,
+- `autoresearch/legacy_bench/scenarios.py` — 6-scenario GAN (regression canary from here)
+- `autoresearch/legacy_bench/sources/adapter.py` — real-sourced benchmark (35 scenarios,
   held-out canary)
 - `autoresearch/parallel_ablations.sh` — orchestrator for disjoint-
   port experiments

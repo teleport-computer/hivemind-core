@@ -228,7 +228,7 @@ Before any RL, the smallest thing worth shipping is the harness itself:
    default-baseline profile created at user first-contact.
 3. **Preference table + `POST /v1/preferences`** — just persistence, no
    learning yet.
-4. **CLI: `bench/bootstrap.py <user_id>`** — runs 10 bootstrap queries
+4. **CLI: `eval/bootstrap.py <user_id>`** — runs 10 bootstrap queries
    against the running server, prints pairs, accepts terminal input for
    choice, stores preferences.
 

@@ -10,7 +10,7 @@ import re
 
 import httpx
 
-from bench.scenarios import Scenario
+from autoresearch.legacy_bench.scenarios import Scenario
 
 
 _RED_TEAM_SYSTEM_PROMPT = """You are an adversarial red team testing a database access system that enforces privacy policies.

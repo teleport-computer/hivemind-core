@@ -1,6 +1,6 @@
 # Hivemind 评测框架（Harness）需求文档
 
-_2026-04-24，由对话整理。本文档是**需求**而非解决方案。下一个负责架构设计的 agent 应基于这些需求重新设计，不必受限于现有 `bench/` 目录的实现。_
+_2026-04-24，由对话整理。本文档是**需求**而非解决方案。下一个负责架构设计的 agent 应基于这些需求重新设计，不必受限于已归档的 `autoresearch/legacy_bench/` 实现。新的活动实现入口是 `eval/`。_
 
 ---
 
@@ -26,7 +26,7 @@ Hivemind 是一个跑在 TEE（dstack CVM，Intel TDX）里的隐私保护数据
 
 1. **回答超能力是不是真的有用**：现有 51 轮迭代收敛在 B 91，scope agent 的 simulation/源码读取/迭代验证等超能力**几乎没被使用**（详见 `autoresearch/LEARNINGS.md`）。我需要 harness 能区分"超能力被实际用上了"和"超能力是装饰"。
 2. **支持架构迭代**：需要能对比静态规则、单次 LLM、迭代 LLM、完整超能力 agent 这几种 scope 实现，以及不同能力等级的 query agent。架构不是固定的——harness 要支持 swap 各种实现。
-3. **不被 shared-prior 坑住**：现有 bench 用 LLM judge 评分，导致 iter54（硬编码 PII 列表的 mediator）拿 A 95，而 iter57b（policy-aware 原则化设计）反而退到 C 80。判官跟生成端共享训练分布，benchmark 奖励的是"跟 judge 偶然对齐"而不是"原则上正确"。任何新 harness 必须**绝对避免** LLM judge 作为主要评分依据。
+3. **不被 shared-prior 坑住**：已归档的 GAN benchmark 用 LLM judge 评分，导致 iter54（硬编码 PII 列表的 mediator）拿 A 95，而 iter57b（policy-aware 原则化设计）反而退到 C 80。判官跟生成端共享训练分布，benchmark 奖励的是"跟 judge 偶然对齐"而不是"原则上正确"。任何新 harness 必须**绝对避免** LLM judge 作为主要评分依据。
 4. **生成可发表的科学结果**：我希望最终能写一篇短论文 / 技术博客，所以 harness 输出的指标要有学术公信力（最好接近 empirical DP audit 那种量化）。
 5. **作为偏好对收集的底层基础设施**：长期方向是 personalization——用户在 onboarding 时回答 ~10 个偏好对，系统据此调整 scope/mediator 行为（详见 `autoresearch/pivot_design.md`）。harness 要能产生这些偏好对，并能用偏好数据回测系统。
 
@@ -75,7 +75,7 @@ Hivemind 是一个跑在 TEE（dstack CVM，Intel TDX）里的隐私保护数据
 
 ### 4.4 场景必须能 stress 出超能力
 
-现有 bench 跑出来超能力没被用——因为场景不需要它们。新 harness 的场景必须**按超能力的 demand 标注**，并且包含**只有用上对应超能力才能解的场景**：
+旧 benchmark 跑出来超能力没被用——因为场景不需要它们。新 harness 的场景必须**按超能力的 demand 标注**，并且包含**只有用上对应超能力才能解的场景**：
 
 - 慢速多轮推断（slow-drip inference）：单条查询都安全，序列拼起来识别个体——只有 simulation 能解
 - 代码内嵌数据（data-in-code）：访客把记录值写进 Python 常量——只有读 trajectory 才能解
@@ -122,10 +122,11 @@ Hivemind 是一个跑在 TEE（dstack CVM，Intel TDX）里的隐私保护数据
 
 ## 7. 已经做过的工作（可参考但不要被绑定）
 
-- `bench/` 目录：现有 GAN 风格 harness，已被 `bench/DEPRECATED.md` 标记为退役（shared-prior 问题）。代码可以参考，**架构不要被绑定**。
+- `autoresearch/legacy_bench/` 目录：现有 GAN 风格 harness，已被 `autoresearch/legacy_bench/DEPRECATED.md` 标记为退役（shared-prior 问题）。代码可以参考，**架构不要被绑定**。
 - `autoresearch/LEARNINGS.md` + `CONCLUSIONS.md`：51 轮迭代的发现总结。**强烈推荐先读**。
 - `autoresearch/pivot_design.md`：偏好对收集的初步设计。下一轮架构设计可以纳入或重新设计。
-- `bench/scenarios_real.json`：35 个真实来源场景（PrivaCI + ConfAIde）。可以作为种子，但不应作为唯一来源。
+- `autoresearch/legacy_bench/scenarios_real.json`：35 个真实来源场景（PrivaCI + ConfAIde）。可以作为种子，但不应作为唯一来源。
+- `eval/`：当前活动 harness 入口。新 runner、deterministic grader、room telemetry 都应该放这里。
 - `hivemind/sandbox/tape.py` + `bridge.py`：LLM 调用的 tape 录制/回放已经实现，是 trajectory 持久化的良好起点。
 - `docs/conditional-recall.md`：系统的核心理念阐述（"用知识做决策、然后可证地遗忘"）。
 
@@ -135,14 +136,14 @@ Hivemind 是一个跑在 TEE（dstack CVM，Intel TDX）里的隐私保护数据
 - **不需要 RL / DPO 训练**：harness 产出偏好数据，但训练是下游决策。
 - **不需要严格的差分隐私保证**：经验 ε（distinguishability audit）就够，不要求形式化证明。
 - **不需要完整的对抗性防御**：scope 自身的 prompt 被恶意构造（malicious data owner）这种威胁可以放第二阶段。
-- **不需要兼容现有 `bench/` 的接口**：可以推倒重来。
+- **不需要兼容现有 `autoresearch/legacy_bench/` 的接口**：可以推倒重来。
 
 ## 9. 给下一个架构设计 agent 的提示
 
 读这份需求时建议按这个顺序：
 
 1. 先读 `autoresearch/LEARNINGS.md` 和 `CONCLUSIONS.md`——理解 51 轮迭代踩过的坑
-2. 再读 `bench/DEPRECATED.md`——理解为什么现有 bench 退役
+2. 再读 `autoresearch/legacy_bench/DEPRECATED.md`——理解为什么现有 bench 退役
 3. 然后读 `ARCHITECTURE.md` 和 `docs/conditional-recall.md`——理解系统设计意图
 4. 最后读 `autoresearch/pivot_design.md`——理解长期方向
 

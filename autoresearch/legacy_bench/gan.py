@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import time
 
-from bench import judge, red_team, runner
-from bench.scenarios import Scenario
+from autoresearch.legacy_bench import judge, red_team, runner
+from autoresearch.legacy_bench.scenarios import Scenario
 
 
 async def run_gan(

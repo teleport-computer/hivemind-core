@@ -517,7 +517,7 @@ prior that survives explicit contrary instruction.
   prompt injection block (prepends framing, replaces workflow).
 - `hivemind/pipeline.py` — added `HIVEMIND_SCOPE_CI` to forwarded env
   vars so the toggle propagates from server to scope container.
-- `bench/scenarios.py` — added `BEHAVIORAL_TOPIC_FILTERING` scenario
+- `autoresearch/legacy_bench/scenarios.py` — added `BEHAVIORAL_TOPIC_FILTERING` scenario
   (CI-phrased, denial-as-leak explicit).
 - `autoresearch/parallel_ablations.sh` — registered `iter59-ci-workflow-haiku`
   on port 8119.

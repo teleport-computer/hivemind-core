@@ -2,16 +2,16 @@
 
 Usage:
     # Load ChatGPT data into running server
-    python -m bench.cli load --file /path/to/all_conversations.txt --url http://localhost:8100
+    python -m autoresearch.legacy_bench.cli load --file /path/to/all_conversations.txt --url http://localhost:8100
 
     # Run full GAN benchmark (all scenarios, 3 rounds each)
-    python -m bench.cli run --url http://localhost:8100 --rounds 3
+    python -m autoresearch.legacy_bench.cli run --url http://localhost:8100 --rounds 3
 
     # Run single scenario
-    python -m bench.cli run --url http://localhost:8100 --scenario pii_redaction
+    python -m autoresearch.legacy_bench.cli run --url http://localhost:8100 --scenario pii_redaction
 
     # View results
-    python -m bench.cli report --file bench/results/gan-latest.json
+    python -m autoresearch.legacy_bench.cli report --file autoresearch/legacy_bench/results/gan-latest.json
 """
 
 from __future__ import annotations
@@ -38,8 +38,8 @@ def _load_env() -> dict:
 
 async def cmd_load(args: argparse.Namespace) -> None:
     """Load ChatGPT data into the server."""
-    from bench.loader import parse_conversations, create_tables, load_conversations
-    from bench.runner import health_check
+    from autoresearch.legacy_bench.loader import parse_conversations, create_tables, load_conversations
+    from autoresearch.legacy_bench.runner import health_check
 
     env = _load_env()
 
@@ -75,10 +75,10 @@ async def cmd_load(args: argparse.Namespace) -> None:
 
 async def cmd_run(args: argparse.Namespace) -> None:
     """Run the GAN adversarial benchmark."""
-    from bench.scenarios import ALL_SCENARIOS, get_scenario
-    from bench.gan import run_all_scenarios
-    from bench.report import print_scenario_report, print_summary, export_json
-    from bench.runner import health_check
+    from autoresearch.legacy_bench.scenarios import ALL_SCENARIOS, get_scenario
+    from autoresearch.legacy_bench.gan import run_all_scenarios
+    from autoresearch.legacy_bench.report import print_scenario_report, print_summary, export_json
+    from autoresearch.legacy_bench.runner import health_check
 
     env = _load_env()
 
@@ -130,7 +130,7 @@ async def cmd_run(args: argparse.Namespace) -> None:
 
 async def cmd_report(args: argparse.Namespace) -> None:
     """View results from a previous run."""
-    from bench.report import print_report_from_file
+    from autoresearch.legacy_bench.report import print_report_from_file
 
     if not os.path.exists(args.file):
         print(f"File not found: {args.file}")
@@ -141,7 +141,7 @@ async def cmd_report(args: argparse.Namespace) -> None:
 
 def main():
     parser = argparse.ArgumentParser(
-        prog="bench",
+        prog="legacy-bench",
         description="GAN-style adversarial benchmark for Hivemind scope/mediator pipeline",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -174,7 +174,7 @@ def main():
 
     # ── report ──
     report_parser = subparsers.add_parser("report", help="View results from a previous run")
-    report_parser.add_argument("--file", default="bench/results/gan-latest.json",
+    report_parser.add_argument("--file", default="autoresearch/legacy_bench/results/gan-latest.json",
                                help="Path to results JSON")
 
     args = parser.parse_args()
