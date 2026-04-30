@@ -1,6 +1,7 @@
 """``admin`` command group: tenants, hashes, sweep."""
 
 import json as _json
+import shlex
 
 import click
 import httpx
@@ -38,6 +39,21 @@ def admin_hashes():
     pass
 
 
+def _tenant_init_command(*, service: str, profile: str, api_key: str) -> str:
+    parts = [
+        "hivemind",
+        "-y",
+        "--profile",
+        profile,
+        "init",
+        "--service",
+        service,
+        "--api-key",
+        api_key,
+    ]
+    return " ".join(shlex.quote(part) for part in parts)
+
+
 @admin_tenants.command("create")
 @click.argument("name")
 @click.option("--service", default=None, help="Hivemind service URL")
@@ -50,7 +66,7 @@ def admin_hashes():
 )
 @click.option("--json", "as_json", is_flag=True, help="Emit JSON only")
 def admin_create_tenant(name: str, service: str | None, admin_key: str, as_json: bool):
-    """Provision a new tenant. Prints the one-time API key."""
+    """Provision a new tenant. Prints the key and tenant setup command."""
     admin_key = _resolve_admin_key(admin_key)
     url = _resolve_admin_service(service)
     try:
@@ -67,6 +83,12 @@ def admin_create_tenant(name: str, service: str | None, admin_key: str, as_json:
         click.echo(f"Error {resp.status_code}: {_api_error(resp)}", err=True)
         raise SystemExit(3)
     data = resp.json()
+    tenant_setup = _tenant_init_command(
+        service=url,
+        profile=str(data.get("name") or name),
+        api_key=str(data["api_key"]),
+    )
+    data["tenant_setup_command"] = tenant_setup
     if as_json:
         click.echo(_json.dumps(data, indent=2))
         return
@@ -75,6 +97,9 @@ def admin_create_tenant(name: str, service: str | None, admin_key: str, as_json:
     click.echo("")
     click.echo("API key (store it now — we won't show it again):")
     click.echo(f"  {data['api_key']}")
+    click.echo("")
+    click.echo("Send this one-liner to the tenant:")
+    click.echo(f"  {tenant_setup}")
 
 
 @admin_tenants.command("list")

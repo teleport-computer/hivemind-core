@@ -7,6 +7,8 @@ mode, and the three env-var escape hatches.
 
 from __future__ import annotations
 
+import json
+
 
 import pytest
 from click.testing import CliRunner
@@ -218,6 +220,21 @@ def test_admin_create_uses_admin_profile_without_trust_check(
     assert captured["url"] == "https://cvm.example/v1/admin/tenants"
     assert captured["headers"]["Authorization"] == "Bearer admin-key"
     assert captured["json"] == {"name": "liz"}
+    assert (
+        "hivemind -y --profile liz init --service https://cvm.example "
+        "--api-key hmk_liz"
+    ) in result.output
+
+    result_json = CliRunner().invoke(
+        _cli_mod.cli,
+        ["admin", "tenants", "create", "liz", "--json"],
+    )
+    assert result_json.exit_code == 0, result_json.output
+    payload = json.loads(result_json.output)
+    assert payload["tenant_setup_command"] == (
+        "hivemind -y --profile liz init --service https://cvm.example "
+        "--api-key hmk_liz"
+    )
 
 
 def test_trust_check_aborts_on_tofu_when_user_declines(_sandbox, monkeypatch):
