@@ -268,6 +268,33 @@ sync_pinning_gateway() {
     fi
 }
 
+# Keep production env files aligned when the project default model changes.
+# We only rewrite values that were previous hivemind defaults. A different
+# value is treated as an intentional operator override and left alone.
+sync_default_llm_model() {
+    local env_file="$1"
+    local desired="z-ai/glm-5"
+    local current
+    current=$(grep -E '^HIVEMIND_LLM_MODEL=' "${env_file}" 2>/dev/null | head -1 | sed -E 's|^HIVEMIND_LLM_MODEL=||' || true)
+
+    case "${current}" in
+        "")
+            log "sync_default_llm_model: appending HIVEMIND_LLM_MODEL=${desired} (was unset)"
+            echo "HIVEMIND_LLM_MODEL=${desired}" >> "${env_file}"
+            ;;
+        "anthropic/claude-sonnet-4.5"|"moonshotai/kimi-k2.6")
+            warn "sync_default_llm_model: rewriting old default HIVEMIND_LLM_MODEL (${current} -> ${desired})"
+            sed -i -E "s|^HIVEMIND_LLM_MODEL=.*|HIVEMIND_LLM_MODEL=${desired}|" "${env_file}"
+            ;;
+        "${desired}")
+            log "sync_default_llm_model: env already uses ${desired}"
+            ;;
+        *)
+            log "sync_default_llm_model: preserving explicit operator model override (${current})"
+            ;;
+    esac
+}
+
 # Does this core compose have enclave TLS enabled (default or override)?
 core_tls_enabled() {
     local compose="$1"
@@ -321,6 +348,7 @@ wait_healthy() {
 
 deploy_core() {
     sync_pinning_gateway "${CORE_NAME}" "${ENV_FILE}"
+    sync_default_llm_model "${ENV_FILE}"
     precheck_env  "${CORE_COMPOSE}" "${ENV_FILE}"
     deploy_and_seal "${CORE_NAME}"  "${CORE_COMPOSE}" "${ENV_FILE}"
     local url tls=0
