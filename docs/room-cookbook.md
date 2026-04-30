@@ -88,28 +88,28 @@ hivemind -y room ask 'hmroom://...' \
   --max-tokens 1000000 \
   --max-llm-calls 60 \
   --provider openrouter \
-  --model anthropic/claude-sonnet-4.5 \
+  --model z-ai/glm-5 \
   "Show me my top 30 hashtags by watch count as a markdown table with columns: rank, hashtag, watches. Just the table, no explanation."
 ```
 
 The room allows both Tinfoil and OpenRouter egress, but this watch-history
-example is currently verified with OpenRouter Claude. Use another provider or
-model only after checking that it can complete the scope stage within the room
-timeout.
+example is currently verified with OpenRouter GLM-5. Use another provider or
+model only after checking that it can complete the scope/query/mediator loop
+within the room timeout.
 
 The default agents use `claude_agent_sdk`, so models that are weak at
 Claude/Anthropic-style tool loops can submit successfully and then fail or
-produce unhelpful scoped queries. For this watch-history room, use Sonnet when
-you need the table to work. `anthropic/claude-haiku-4.5` is the cheaper
-candidate to try next; generic OpenAI/Gemini models are not currently the
-reliable path for these agents.
+produce unhelpful scoped queries. For this watch-history room, GLM-5 is the
+cheap verified default. DeepSeek V4 Flash and V4 Pro submitted successfully but
+timed out on this agent loop in testing; generic OpenAI/Gemini models are not
+currently the reliable path for these agents.
 
 The copied room link can be shared as a shell variable:
 
 ```bash
 ROOM='hmroom://hivemind.teleport.computer/room_...?service=https%3A%2F%2Fhivemind.teleport.computer&token=hmq_...&owner_pubkey=...'
 hivemind profile use liz
-hivemind -y room ask "$ROOM" --provider openrouter --model anthropic/claude-sonnet-4.5 "..."
+hivemind -y room ask "$ROOM" --provider openrouter --model z-ai/glm-5 "..."
 ```
 
 `room ask` defaults to `--timeout 600`, `--max-llm-calls 20`,

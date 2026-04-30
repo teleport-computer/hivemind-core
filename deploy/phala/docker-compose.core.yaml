@@ -65,13 +65,12 @@ services:
       HIVEMIND_CONTROL_DATABASE: ${HIVEMIND_CONTROL_DATABASE:-hivemind_control}
       HIVEMIND_TENANT_CACHE_SIZE: ${HIVEMIND_TENANT_CACHE_SIZE:-32}
 
-      # LLM proxy. Default model is Kimi K2.6 — research validated this on
-      # mediator (autoresearch/study_wrap_up.md). Per-role overrides below
-      # let the operator pin specific models per agent role; empty falls
-      # back to the global HIVEMIND_LLM_MODEL.
+      # LLM proxy. Default model is GLM-5. Per-role overrides below let the
+      # operator pin specific models per agent role; empty falls back to the
+      # global HIVEMIND_LLM_MODEL.
       HIVEMIND_LLM_API_KEY: ${HIVEMIND_LLM_API_KEY:?Set LLM API key}
       HIVEMIND_LLM_BASE_URL: ${HIVEMIND_LLM_BASE_URL:-https://openrouter.ai/api/v1}
-      HIVEMIND_LLM_MODEL: ${HIVEMIND_LLM_MODEL:-moonshotai/kimi-k2.6}
+      HIVEMIND_LLM_MODEL: ${HIVEMIND_LLM_MODEL:-z-ai/glm-5}
       HIVEMIND_SCOPE_MODEL: ${HIVEMIND_SCOPE_MODEL:-}
       HIVEMIND_QUERY_MODEL: ${HIVEMIND_QUERY_MODEL:-}
       HIVEMIND_MEDIATOR_MODEL: ${HIVEMIND_MEDIATOR_MODEL:-}

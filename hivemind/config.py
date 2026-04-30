@@ -28,7 +28,7 @@ class Settings(BaseSettings):
     # LLM (for bridge proxy)
     llm_api_key: str = ""
     llm_base_url: str = "https://openrouter.ai/api/v1"
-    llm_model: str = "moonshotai/kimi-k2.6"
+    llm_model: str = "z-ai/glm-5"
     llm_timeout_seconds: int = 45
 
     # Optional secondary provider. When ``tinfoil_api_key`` is set, callers
@@ -41,10 +41,9 @@ class Settings(BaseSettings):
 
     # Per-role model overrides. Empty falls back to ``llm_model``. Set via
     # HIVEMIND_SCOPE_MODEL / HIVEMIND_QUERY_MODEL / HIVEMIND_MEDIATOR_MODEL /
-    # HIVEMIND_INDEX_MODEL. Research (autoresearch/study_wrap_up.md) found
-    # asymmetric model fit: Haiku-scope is more conservative, Kimi-mediator
-    # generalizes better on out-of-distribution refusals. Operators who
-    # want the validated mix override scope_model only.
+    # HIVEMIND_INDEX_MODEL. Empty means every stage uses llm_model. Operators
+    # can still pin stronger or more conservative models per role when a room
+    # needs them.
     scope_model: str = ""
     query_model: str = ""
     mediator_model: str = ""

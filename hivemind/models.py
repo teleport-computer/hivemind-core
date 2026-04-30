@@ -29,7 +29,7 @@ class QueryRequest(BaseModel):
     # Per-call LLM model override. Empty/None falls back to per-role
     # config (HIVEMIND_SCOPE_MODEL/QUERY_MODEL/MEDIATOR_MODEL) and then
     # to the global HIVEMIND_LLM_MODEL. Use to A/B different models per
-    # query, e.g. "moonshotai/kimi-k2.6" or "anthropic/claude-haiku-4.5".
+    # query, e.g. "z-ai/glm-5" or "moonshotai/kimi-k2.5".
     model: str | None = None
     # Per-call LLM provider override. Accepts "openrouter" (default) or
     # "tinfoil" (requires HIVEMIND_TINFOIL_API_KEY on the server). Lets a

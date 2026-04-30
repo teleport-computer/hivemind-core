@@ -58,7 +58,12 @@ _TOKENS_PER_MTOK = 1_000_000
 # model list. Unknown providers/models are still metered as token usage but
 # are not charged until a price row is configured.
 _DEFAULT_MODEL_PRICES: tuple[tuple[str, str, int, int, str], ...] = (
-    ("openrouter", "moonshotai/kimi-k2.6", 744_800, 4_655_000, "openrouter"),
+    ("openrouter", "z-ai/glm-5", 600_000, 2_080_000, "openrouter"),
+    ("openrouter", "moonshotai/kimi-k2.6", 750_000, 3_500_000, "openrouter"),
+    ("openrouter", "moonshotai/kimi-k2.5", 440_000, 2_000_000, "openrouter"),
+    ("openrouter", "moonshotai/kimi-k2-0905", 400_000, 2_000_000, "openrouter"),
+    ("openrouter", "moonshotai/kimi-k2-thinking", 600_000, 2_500_000, "openrouter"),
+    ("openrouter", "moonshotai/kimi-k2", 570_000, 2_300_000, "openrouter"),
     ("openrouter", "anthropic/claude-haiku-4.5", 1_000_000, 5_000_000, "openrouter"),
     ("openrouter", "anthropic/claude-sonnet-4.5", 3_000_000, 15_000_000, "openrouter"),
     ("openrouter", "openai/gpt-5-mini", 250_000, 2_000_000, "openrouter"),
