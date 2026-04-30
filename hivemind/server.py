@@ -915,6 +915,31 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         tenants = await asyncio.to_thread(registry.list_tenants)
         return {"tenants": tenants}
 
+    @app.get("/v1/admin/billing/prices", dependencies=[Depends(check_admin)])
+    async def admin_billing_prices(request: Request):
+        registry = _registry(request)
+        prices = await asyncio.to_thread(registry.billing_list_prices)
+        return {"prices": prices}
+
+    @app.post("/v1/admin/billing/prices", dependencies=[Depends(check_admin)])
+    async def admin_billing_set_price(payload: dict, request: Request):
+        registry = _registry(request)
+        try:
+            return await asyncio.to_thread(
+                registry.billing_set_price,
+                str((payload or {}).get("provider") or ""),
+                str((payload or {}).get("model") or ""),
+                prompt_usd_per_million=(payload or {}).get(
+                    "prompt_usd_per_million"
+                ),
+                completion_usd_per_million=(payload or {}).get(
+                    "completion_usd_per_million"
+                ),
+                source=str((payload or {}).get("source") or "admin"),
+            )
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+
     @app.get("/v1/admin/billing/{tenant_id}", dependencies=[Depends(check_admin)])
     async def admin_billing_account(
         tenant_id: str,
@@ -955,31 +980,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             )
         except KeyError as e:
             raise HTTPException(404, str(e))
-        except ValueError as e:
-            raise HTTPException(400, str(e))
-
-    @app.get("/v1/admin/billing/prices", dependencies=[Depends(check_admin)])
-    async def admin_billing_prices(request: Request):
-        registry = _registry(request)
-        prices = await asyncio.to_thread(registry.billing_list_prices)
-        return {"prices": prices}
-
-    @app.post("/v1/admin/billing/prices", dependencies=[Depends(check_admin)])
-    async def admin_billing_set_price(payload: dict, request: Request):
-        registry = _registry(request)
-        try:
-            return await asyncio.to_thread(
-                registry.billing_set_price,
-                str((payload or {}).get("provider") or ""),
-                str((payload or {}).get("model") or ""),
-                prompt_usd_per_million=(payload or {}).get(
-                    "prompt_usd_per_million"
-                ),
-                completion_usd_per_million=(payload or {}).get(
-                    "completion_usd_per_million"
-                ),
-                source=str((payload or {}).get("source") or "admin"),
-            )
         except ValueError as e:
             raise HTTPException(400, str(e))
 

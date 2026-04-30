@@ -157,6 +157,21 @@ class TestAdminTenants:
         assert "already exists" in resp.json()["detail"]
 
 
+class TestAdminBilling:
+    @pytest.mark.asyncio
+    async def test_prices_route_is_not_shadowed_by_tenant_route(self, server_env):
+        client, _api_key = server_env
+        resp = await client.get(
+            "/v1/admin/billing/prices",
+            headers={"Authorization": "Bearer admin-test-key"},
+        )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert isinstance(data["prices"], list)
+        assert any(p["model"] == "openai/gpt-5-mini" for p in data["prices"])
+
+
 class TestAgentCRUD:
     @pytest.mark.asyncio
     async def test_list_agents(self, server_env):
