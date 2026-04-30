@@ -251,6 +251,15 @@ Room trust modes:
 Updating room trust re-signs the same room id. Existing invite links keep
 working because they verify the new envelope against the same owner public key.
 
+Client-side room acceptance is a separate local checkpoint for invite links.
+After the client verifies the live attestation, room signature, owner public
+key, and room trust mode, it requires the active local profile to accept the
+manifest hash before sending the first prompt. The acceptance cache is keyed by
+profile, service, room id, owner public key, and manifest hash, so a changed
+manifest prompts again. `hivemind room accept "$ROOM"` records this explicitly;
+otherwise the first `room ask` prompts. `--dangerously-skip-attestations`
+bypasses this checkpoint together with the rest of client-side trust checking.
+
 ## Scope And Query Agent Interaction
 
 Inside a room, the scope agent and query agent do not share a database

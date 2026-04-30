@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json as _json
+import os
 import time
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
@@ -11,7 +12,7 @@ import click
 import httpx
 import yaml
 
-from ._config import _config_path, _headers, _load_config
+from ._config import _config_path, _headers, _load_config, _profile_name
 from ._http import _api_error, _tarball_from_dir
 from ._shared import _emit_run_result, _query_tracked
 from ._trust import _require_trust
@@ -146,6 +147,177 @@ def _enforce_room_trust(room_attest: dict) -> None:
             "live compose_hash is not allowed by the room manifest. "
             f"mode={mode} live={live or '(missing)'} allowed={sorted(allowed)}"
         )
+
+
+def _room_acceptances_path() -> Path:
+    from . import _HIVEMIND_HOME
+
+    return _HIVEMIND_HOME / "accepted-rooms.json"
+
+
+def _room_acceptance_key(
+    *,
+    profile: str,
+    service: str,
+    room_id: str,
+    manifest_hash: str,
+    owner_pubkey_b64: str | None,
+) -> str:
+    return "|".join(
+        [
+            profile,
+            service.rstrip("/"),
+            room_id,
+            owner_pubkey_b64 or "",
+            manifest_hash,
+        ]
+    )
+
+
+def _load_room_acceptances() -> dict:
+    path = _room_acceptances_path()
+    if not path.exists():
+        return {}
+    try:
+        with open(path) as f:
+            data = _json.load(f)
+    except (_json.JSONDecodeError, OSError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _save_room_acceptance(
+    *,
+    service: str,
+    room_id: str,
+    room_data: dict,
+    owner_pubkey_b64: str | None,
+) -> None:
+    room = room_data.get("room") or {}
+    manifest = room.get("manifest") or {}
+    manifest_hash = str(room.get("manifest_hash") or "")
+    if not manifest_hash:
+        raise click.ClickException("room manifest response did not include manifest_hash")
+    profile = _profile_name()
+    key = _room_acceptance_key(
+        profile=profile,
+        service=service,
+        room_id=room_id,
+        manifest_hash=manifest_hash,
+        owner_pubkey_b64=owner_pubkey_b64,
+    )
+    path = _room_acceptances_path()
+    accepted = _load_room_acceptances()
+    accepted[key] = {
+        "profile": profile,
+        "service": service.rstrip("/"),
+        "room_id": room_id,
+        "name": manifest.get("name") or "",
+        "manifest_hash": manifest_hash,
+        "owner_pubkey_b64": owner_pubkey_b64 or "",
+        "accepted_at": time.time(),
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w") as f:
+        _json.dump(accepted, f, indent=2, sort_keys=True)
+        f.write("\n")
+
+
+def _room_manifest_is_accepted(
+    *,
+    service: str,
+    room_id: str,
+    room_data: dict,
+    owner_pubkey_b64: str | None,
+) -> bool:
+    manifest_hash = str(((room_data.get("room") or {}).get("manifest_hash")) or "")
+    if not manifest_hash:
+        return False
+    key = _room_acceptance_key(
+        profile=_profile_name(),
+        service=service,
+        room_id=room_id,
+        manifest_hash=manifest_hash,
+        owner_pubkey_b64=owner_pubkey_b64,
+    )
+    return key in _load_room_acceptances()
+
+
+def _room_manifest_summary(room_data: dict) -> list[str]:
+    room = room_data.get("room") or {}
+    manifest = room.get("manifest") or {}
+    scope = manifest.get("scope") or {}
+    query = manifest.get("query") or {}
+    mediator = manifest.get("mediator") or {}
+    output = manifest.get("output") or {}
+    egress = manifest.get("egress") or {}
+    trust = manifest.get("trust") or {}
+    providers = egress.get("llm_providers") or []
+    mediator_agent = mediator.get("agent_id") or "disabled"
+    return [
+        f"Room:     {manifest.get('room_id') or room.get('room_id') or '(unknown)'}",
+        f"Name:     {manifest.get('name') or '(unnamed)'}",
+        f"Hash:     {room.get('manifest_hash') or '(missing)'}",
+        f"Scope:    {scope.get('agent_id') or '(missing)'} ({scope.get('visibility') or 'unknown'})",
+        f"Query:    {query.get('mode') or 'unknown'} {query.get('agent_id') or ''} ({query.get('visibility') or 'unknown'})",
+        f"Mediator: {mediator_agent}",
+        f"Output:   {output.get('visibility') or 'unknown'}",
+        "LLM:      " + (", ".join(str(p) for p in providers) or "disabled"),
+        f"Trust:    {trust.get('mode') or 'operator_updates'}",
+    ]
+
+
+def _echo_room_manifest_summary(room_data: dict) -> None:
+    for line in _room_manifest_summary(room_data):
+        click.echo(line)
+
+
+def _require_room_manifest_acceptance(
+    *,
+    service: str,
+    room_id: str,
+    room_data: dict,
+    owner_pubkey_b64: str | None,
+) -> None:
+    if owner_pubkey_b64 is None:
+        return
+    if os.environ.get("HIVEMIND_NO_TRUST_CHECK"):
+        return
+    if _room_manifest_is_accepted(
+        service=service,
+        room_id=room_id,
+        room_data=room_data,
+        owner_pubkey_b64=owner_pubkey_b64,
+    ):
+        return
+
+    click.echo("This room manifest has not been accepted for this profile.")
+    click.echo("Review the signed room rules before sending prompts or data:")
+    click.echo("  hivemind room inspect \"$ROOM\" --json | jq '.room.manifest'")
+    click.echo("")
+    _echo_room_manifest_summary(room_data)
+    click.echo("")
+    if not click.confirm(
+        f"Accept this room manifest for profile '{_profile_name()}'?",
+        default=False,
+    ):
+        raise click.ClickException(
+            "room manifest not accepted. Run "
+            "`hivemind room inspect \"$ROOM\" --json | jq '.room.manifest'` "
+            "and `hivemind room accept \"$ROOM\"` before asking, or use "
+            "--dangerously-skip-attestations only as an explicit risk "
+            "acceptance bypass."
+        )
+    _save_room_acceptance(
+        service=service,
+        room_id=room_id,
+        room_data=room_data,
+        owner_pubkey_b64=owner_pubkey_b64,
+    )
+    click.echo(
+        "Accepted room manifest "
+        f"{(room_data.get('room') or {}).get('manifest_hash') or '(missing)'}."
+    )
 
 
 def _parse_meta(pairs: tuple[str, ...]) -> dict:
@@ -588,6 +760,43 @@ def inspect_room(room: str, as_json: bool):
     click.echo("Sig:    verified")
 
 
+@rooms_cli.command("accept")
+@click.argument("room")
+@click.option("--json", "as_json", is_flag=True, help="Emit JSON on stdout.")
+def accept_room(room: str, as_json: bool):
+    """Accept a room manifest for this local profile before asking."""
+    service, room_id, headers, owner_pubkey = _parse_room_ref(room)
+    data = _fetch_verified_room(
+        service,
+        room_id,
+        headers,
+        owner_pubkey_b64=owner_pubkey,
+    )
+    _enforce_room_trust(data)
+    _save_room_acceptance(
+        service=service,
+        room_id=room_id,
+        room_data=data,
+        owner_pubkey_b64=owner_pubkey,
+    )
+    if as_json:
+        click.echo(
+            _json.dumps(
+                {
+                    "accepted": True,
+                    "profile": _profile_name(),
+                    "room_id": room_id,
+                    "manifest_hash": data["room"]["manifest_hash"],
+                    "manifest": data["room"]["manifest"],
+                },
+                indent=2,
+            )
+        )
+        return
+    _echo_room_manifest_summary(data)
+    click.echo(f"Accepted for profile '{_profile_name()}'.")
+
+
 @rooms_cli.command("add-data")
 @click.argument("room")
 @click.argument("text", required=False)
@@ -839,6 +1048,12 @@ def ask_room(
         owner_pubkey_b64=owner_pubkey,
     )
     _enforce_room_trust(room_data)
+    _require_room_manifest_acceptance(
+        service=service,
+        room_id=room_id,
+        room_data=room_data,
+        owner_pubkey_b64=owner_pubkey,
+    )
     manifest_hash = room_data["room"]["manifest_hash"]
     payload = {"query": question}
     if query_agent:

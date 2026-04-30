@@ -26,11 +26,16 @@ ROOM='hmroom://...'
 
 hivemind room inspect "$ROOM"
 hivemind room inspect "$ROOM" --json | jq '.room.manifest'
+hivemind room accept "$ROOM"
 hivemind -y room ask "$ROOM" "What changed this month?"
 ```
 
 `room inspect` shows the signed room spec and live attestation summary; use
-`--json` to inspect the full manifest. `room ask` defaults to `--timeout 600`,
+`--json` to inspect the full manifest. `room accept` records the verified
+manifest hash for this local profile; if you skip it, the first `room ask`
+prompts before sending your question. `-y` does not accept room manifests.
+`--dangerously-skip-attestations` bypasses both attestation checks and this
+first-use manifest acceptance gate. `room ask` defaults to `--timeout 600`,
 `--max-llm-calls 20`, and `--max-tokens 100000`. Hosted deployments can clamp
 requests lower than what you ask for; the current Phala deployment caps runtime
 at 900s, LLM calls at 100, and tokens at 1000000.
@@ -212,6 +217,7 @@ attested output.
 ```bash
 hivemind room inspect 'hmroom://...'
 hivemind room inspect 'hmroom://...' --json | jq '.room.manifest'
+hivemind room accept 'hmroom://...'
 hivemind room ask 'hmroom://...' "What changed this month?"
 ```
 
@@ -222,9 +228,11 @@ hivemind room ask 'hmroom://...' "What changed this month?" \
   --agent ./my-query-agent
 ```
 
-Every answer is checked against the accepted room manifest hash and the live
-CVM run signer. The default behavior is fail-closed when the run attestation is
-missing or does not match the room.
+`room accept` saves the verified manifest hash for the active local profile.
+Without it, the first `room ask` displays the manifest summary and asks for
+confirmation before sending the prompt. Every answer is checked against the
+accepted room manifest hash and the live CVM run signer. The default behavior
+is fail-closed when the run attestation is missing or does not match the room.
 
 Ask defaults are intentionally small: `--timeout 600`,
 `--max-llm-calls 20`, `--max-tokens 100000`, and `--memory-mb 256`.

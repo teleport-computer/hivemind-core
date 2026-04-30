@@ -151,9 +151,12 @@ def test_room_ask_omits_room_id_from_path_scoped_run_body(
             "kimi-k2-6",
             "Show me top hashtags.",
         ],
+        input="y\n",
     )
 
     assert result.exit_code == 0, result.output
+    assert "This room manifest has not been accepted" in result.output
+    assert "Accepted room manifest mh" in result.output
     assert captured["payload"]["query"] == "Show me top hashtags."
     assert captured["payload"]["provider"] == "tinfoil"
     assert captured["payload"]["model"] == "kimi-k2-6"
@@ -161,6 +164,80 @@ def test_room_ask_omits_room_id_from_path_scoped_run_body(
     assert captured["headers"]["X-Hivemind-Payer-Key"] == "hmk_test"
     assert "room_id" not in captured["payload"]
     assert captured["kwargs"]["submit_path"] == "/v1/rooms/room_test/runs"
+
+
+def test_room_accept_records_manifest_before_ask(_sandbox, monkeypatch):
+    captured: dict = {}
+    (_cli_mod._PROFILES_DIR / "default.yaml").write_text(
+        "service: https://cvm.example\napi_key: hmk_test\n"
+    )
+
+    monkeypatch.setattr(
+        _rooms_cli,
+        "_fetch_verified_room",
+        lambda *a, **kw: {
+            "room": {
+                "room_id": "room_test",
+                "manifest_hash": "mh",
+                "manifest": {
+                    "room_id": "room_test",
+                    "name": "test room",
+                    "scope": {
+                        "agent_id": "scope_123",
+                        "visibility": "inspectable",
+                    },
+                    "query": {
+                        "mode": "fixed",
+                        "agent_id": "query_123",
+                        "visibility": "inspectable",
+                    },
+                    "mediator": {"agent_id": "med_123"},
+                    "output": {"visibility": "querier_only"},
+                    "egress": {"llm_providers": ["openrouter"]},
+                    "trust": {
+                        "mode": "operator_updates",
+                        "allowed_composes": [],
+                    },
+                },
+            },
+            "attestation": {"attestation": {"compose_hash": "0xabc"}},
+        },
+    )
+    monkeypatch.setattr(_rooms_cli, "_enforce_room_trust", lambda data: None)
+    monkeypatch.setattr(
+        _rooms_cli,
+        "_hget",
+        lambda *a, **kw: type(
+            "Resp",
+            (),
+            {
+                "status_code": 200,
+                "json": lambda self: {
+                    "attestation": {
+                        "run_signer_pubkey_b64": "pub",
+                        "compose_hash": "0xabc",
+                    }
+                },
+            },
+        )(),
+    )
+
+    def fake_query_tracked(service, headers, payload, **kwargs):
+        captured["payload"] = payload
+
+    monkeypatch.setattr(_rooms_cli, "_query_tracked", fake_query_tracked)
+
+    runner = CliRunner()
+    accept = runner.invoke(_cli_mod.cli, ["room", "accept", _ROOM_LINK])
+
+    assert accept.exit_code == 0, accept.output
+    assert "Accepted for profile 'default'" in accept.output
+
+    ask = runner.invoke(_cli_mod.cli, ["room", "ask", _ROOM_LINK, "hello"])
+
+    assert ask.exit_code == 0, ask.output
+    assert "This room manifest has not been accepted" not in ask.output
+    assert captured["payload"]["query"] == "hello"
 
 
 def test_room_ask_requires_billable_profile_for_invite_links(_sandbox):
@@ -180,6 +257,10 @@ def test_room_help_documents_spec_and_budget_defaults():
     inspect = runner.invoke(_cli_mod.cli, ["room", "inspect", "--help"])
     assert inspect.exit_code == 0
     assert "jq '.room.manifest'" in inspect.output
+
+    accept = runner.invoke(_cli_mod.cli, ["room", "accept", "--help"])
+    assert accept.exit_code == 0
+    assert "Accept a room manifest" in accept.output
 
     ask = runner.invoke(_cli_mod.cli, ["room", "ask", "--help"])
     assert ask.exit_code == 0

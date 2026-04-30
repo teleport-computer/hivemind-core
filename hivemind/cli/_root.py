@@ -13,7 +13,8 @@ import click
     is_flag=True,
     help="Auto-answer 'yes' to the compose-hash approval prompt. "
     "TLS pinning and the on-chain revoke kill-switch still apply, so a "
-    "tampered or revoked hash still hard-aborts. Use in CI / scripts.",
+    "tampered or revoked hash still hard-aborts. Does not accept room "
+    "manifests; run `hivemind room accept` first in CI / scripts.",
 )
 @click.option(
     "--dangerously-skip-attestations",
@@ -22,7 +23,7 @@ import click
     help="Disable ALL attestation verification — no TLS pin, no on-chain "
     "check, no compose-hash prompt. This is an explicit tenant/operator "
     "risk-acceptance bypass for cases where you do not want client-side "
-    "attestation.",
+    "attestation. Also bypasses first-use room manifest acceptance.",
 )
 @click.option(
     "--allow-degraded-attestation",

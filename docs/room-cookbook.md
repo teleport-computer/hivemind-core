@@ -77,7 +77,14 @@ Inspect the signed room spec:
 ROOM='hmroom://...'
 hivemind room inspect "$ROOM"
 hivemind room inspect "$ROOM" --json | jq '.room.manifest'
+hivemind room accept "$ROOM"
 ```
+
+`room accept` saves the verified manifest hash for the active local profile.
+If you skip it, the first `room ask` pauses and asks for acceptance before it
+sends your prompt. `-y` does not auto-accept room manifests; scripts should
+run `room accept` first. `--dangerously-skip-attestations` bypasses this gate
+because it opts out of client-side trust checks.
 
 Ask through the invite:
 
