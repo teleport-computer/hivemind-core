@@ -158,12 +158,15 @@ Use an explicit payer only when a different tenant should pay:
 
 ```bash
 hivemind room ask "$ROOM" --payer-profile liz-billing "What changed this month?"
+hivemind room ask "$ROOM" --payer-key hmk_... "What changed this month?"
 HIVEMIND_PAYER_API_KEY=hmk_... hivemind room ask "$ROOM" "What changed this month?"
 ```
 
 The payer key is sent as `X-Hivemind-Payer-Key`; it does not change the room
 authorization. Raw API clients using `hmq_` invite tokens must send the same
-header so the service knows which tenant to charge. Admin billing commands:
+header so the service knows which tenant to charge. The CLI also accepts
+`HIVEMIND_PAYER_KEY` and `X_HIVEMIND_PAYER_KEY` as aliases for
+`HIVEMIND_PAYER_API_KEY`. Admin billing commands:
 
 ```bash
 hivemind admin billing grant t_... 25.00 --note "initial credit"

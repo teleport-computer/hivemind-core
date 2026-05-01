@@ -56,11 +56,11 @@ def _payer_key_from_options(
     payer_api_key: str | None,
 ) -> str | None:
     if payer_profile and payer_api_key:
-        raise click.ClickException("use either --payer-profile or --payer-api-key")
+        raise click.ClickException("use either --payer-profile or --payer-key")
     if payer_api_key:
         key = payer_api_key.strip()
         if not key.startswith("hmk_"):
-            raise click.ClickException("--payer-api-key must be an hmk_ tenant key")
+            raise click.ClickException("--payer-key must be an hmk_ tenant key")
         return key
     if not payer_profile:
         return None
@@ -987,7 +987,12 @@ def trust_room(
 )
 @click.option(
     "--payer-api-key",
-    envvar="HIVEMIND_PAYER_API_KEY",
+    "--payer-key",
+    envvar=[
+        "HIVEMIND_PAYER_API_KEY",
+        "HIVEMIND_PAYER_KEY",
+        "X_HIVEMIND_PAYER_KEY",
+    ],
     default=None,
     help="hmk_ tenant key to charge instead of the active profile.",
 )
@@ -1022,7 +1027,7 @@ def ask_room(
     --max-tokens 100000. Dynamic scope/query/mediator rooms may need larger
     budgets such as --timeout 900 --max-tokens 1000000 --max-llm-calls 60.
     Invite-token room asks are billed to the active hmk_ tenant profile unless
-    --payer-profile or --payer-api-key is supplied.
+    --payer-profile or --payer-key is supplied.
     """
     if query_agent and agent_path:
         raise click.ClickException("use either --query-agent id or --agent path, not both")
@@ -1036,7 +1041,7 @@ def ask_room(
                 "Use an active tenant profile with an hmk_ api_key "
                 "(`hivemind --profile NAME init --api-key hmk_...` and "
                 "`hivemind profile use NAME`), or pass --payer-profile/"
-                "--payer-api-key."
+                "--payer-key."
             )
     if payer_key:
         headers = dict(headers)
