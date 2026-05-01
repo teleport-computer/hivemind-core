@@ -25,8 +25,17 @@ import os
 import sys
 import tempfile
 import uuid
+from urllib.parse import urlparse
 
 import httpx
+
+
+def _hostname(url: str | None) -> str:
+    return (urlparse(url or "").hostname or "").lower()
+
+
+def _should_pin_enclave_cert(base_url: str, pinning_url: str | None) -> bool:
+    return not pinning_url or _hostname(base_url) == _hostname(pinning_url)
 
 
 def _pin_from_attestation(base_url: str, *, insecure_bootstrap: bool) -> str | None:
@@ -40,6 +49,9 @@ def _pin_from_attestation(base_url: str, *, insecure_bootstrap: bool) -> str | N
         r.raise_for_status()
         tls = (r.json().get("attestation") or {}).get("tls") or {}
     if not tls.get("enabled"):
+        return None
+    pinning_url = tls.get("pinning_url")
+    if not _should_pin_enclave_cert(base_url, str(pinning_url or "")):
         return None
     pem = tls.get("cert_pem")
     claimed_fp = tls.get("cert_fingerprint_sha256_hex")

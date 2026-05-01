@@ -295,6 +295,32 @@ sync_default_llm_model() {
     esac
 }
 
+sync_env_value() {
+    local env_file="$1"
+    local key="$2"
+    local desired="$3"
+    local current
+    current=$(grep -E "^${key}=" "${env_file}" 2>/dev/null | head -1 | sed -E "s|^${key}=||" || true)
+
+    if [ "${current}" = "${desired}" ]; then
+        log "sync_env_value: ${key} already ${desired}"
+        return 0
+    fi
+    if [ -z "${current}" ]; then
+        log "sync_env_value: appending ${key}=${desired} (was unset)"
+        echo "${key}=${desired}" >> "${env_file}"
+        return 0
+    fi
+    warn "sync_env_value: rewriting ${key} (${current} -> ${desired})"
+    sed -i -E "s|^${key}=.*|${key}=${desired}|" "${env_file}"
+}
+
+sync_self_serve_billing_policy() {
+    local env_file="$1"
+    sync_env_value "${env_file}" HIVEMIND_SELF_SERVE_SIGNUP_ENABLED true
+    sync_env_value "${env_file}" HIVEMIND_BILLING_ENFORCE_CREDITS true
+}
+
 # Does this core compose have enclave TLS enabled (default or override)?
 core_tls_enabled() {
     local compose="$1"
@@ -349,6 +375,7 @@ wait_healthy() {
 deploy_core() {
     sync_pinning_gateway "${CORE_NAME}" "${ENV_FILE}"
     sync_default_llm_model "${ENV_FILE}"
+    sync_self_serve_billing_policy "${ENV_FILE}"
     precheck_env  "${CORE_COMPOSE}" "${ENV_FILE}"
     deploy_and_seal "${CORE_NAME}"  "${CORE_COMPOSE}" "${ENV_FILE}"
     local url tls=0

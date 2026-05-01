@@ -143,8 +143,8 @@ services:
       HIVEMIND_AGENT_TIMEOUT: ${HIVEMIND_AGENT_TIMEOUT:-900}
       # Metering is always recorded when available. Credit enforcement
       # rejects query-token runs without a payer key or enough balance.
-      HIVEMIND_BILLING_ENFORCE_CREDITS: ${HIVEMIND_BILLING_ENFORCE_CREDITS:-false}
-      HIVEMIND_SELF_SERVE_SIGNUP_ENABLED: ${HIVEMIND_SELF_SERVE_SIGNUP_ENABLED:-false}
+      HIVEMIND_BILLING_ENFORCE_CREDITS: ${HIVEMIND_BILLING_ENFORCE_CREDITS:-true}
+      HIVEMIND_SELF_SERVE_SIGNUP_ENABLED: ${HIVEMIND_SELF_SERVE_SIGNUP_ENABLED:-true}
 
       # Default agents — CI only builds base/core/postgres/sql-proxy.
       # The 4 default agents (scope/query/index/mediator) are NOT in GHCR;
