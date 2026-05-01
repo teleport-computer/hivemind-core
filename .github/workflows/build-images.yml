@@ -29,6 +29,10 @@ on:
 
 env:
   REGISTRY: ghcr.io
+  # Keep build provenance attestable through source + image digests, but do
+  # not retain Docker build records as public GitHub artifacts.
+  DOCKER_BUILD_RECORD_UPLOAD: "false"
+  DOCKER_BUILD_RECORD_RETENTION_DAYS: "1"
 
 # Action SHAs resolved 2026-04-29:
 # - actions/checkout v6.0.2
