@@ -21,7 +21,9 @@ admin can't use it. ``/v1/admin/tenants`` also doesn't have a
   3. If it doesn't exist (and ``--register`` is set): INSERT a fresh row
      pointing at the supplied db_name with the new hmk_'s hash.
 
-The fresh ``hmk_`` is printed once. It will not be retrievable later.
+The fresh ``hmk_`` is written once through ``--output-file`` or, for
+interactive local use only, printed with ``--print-key``. It will not be
+retrievable later.
 
 Env (required):
   HIVEMIND_BASE_URL    — sql_proxy base URL (port-8080 gateway URL)
@@ -34,6 +36,8 @@ Args:
   --register       if no existing row, INSERT one (off by default — fail
                    loudly so we don't silently create new tenants)
   --control-db     control DB name (default: hivemind_control)
+  --output-file    write the fresh hmk_ to this chmod-600 file
+  --print-key      explicitly print the fresh hmk_ to stdout
 """
 
 from __future__ import annotations
@@ -41,6 +45,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import os
+from pathlib import Path
 import secrets
 import sys
 import time
@@ -82,6 +87,12 @@ def main() -> int:
     parser.add_argument("--name", default="")
     parser.add_argument("--register", action="store_true")
     parser.add_argument("--control-db", default="hivemind_control")
+    parser.add_argument("--output-file", default="")
+    parser.add_argument(
+        "--print-key",
+        action="store_true",
+        help="print the fresh hmk_ to stdout; unsafe in CI logs",
+    )
     args = parser.parse_args()
 
     base = os.environ.get("HIVEMIND_BASE_URL")
@@ -97,6 +108,13 @@ def main() -> int:
     if not tenant_id.startswith("t_"):
         print(f"[reset] FAIL: tenant_id must start with 't_': {tenant_id}",
               file=sys.stderr)
+        return 2
+    if not args.output_file and not args.print_key:
+        print(
+            "[reset] FAIL: choose --output-file PATH or --print-key. "
+            "Refusing to emit an owner key implicitly.",
+            file=sys.stderr,
+        )
         return 2
 
     # 1. probe — does the row exist already?
@@ -170,11 +188,22 @@ def main() -> int:
         )
 
     # 3. emit the new key.  This is the only time it's recoverable.
-    print()
-    print("─── tenant API key (rotate immediately on first use) ───")
-    print(f"tenant_id : {tenant_id}")
-    print(f"api_key   : {new_key}")
-    print("───────────────────────────────────────────────────────")
+    if args.output_file:
+        out = Path(args.output_file).expanduser()
+        out.parent.mkdir(parents=True, exist_ok=True)
+        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+        fd = os.open(out, flags, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(f"tenant_id={tenant_id}\n")
+            f.write(f"api_key={new_key}\n")
+        os.chmod(out, 0o600)
+        print(f"[reset] tenant API key written to {out} (mode 0600)")
+    if args.print_key:
+        print()
+        print("─── tenant API key (rotate immediately on first use) ───")
+        print(f"tenant_id : {tenant_id}")
+        print(f"api_key   : {new_key}")
+        print("───────────────────────────────────────────────────────")
     return 0
 
 

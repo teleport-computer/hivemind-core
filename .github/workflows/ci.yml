@@ -54,9 +54,8 @@ jobs:
         run: uv run ruff check .
 
       - name: Run unit tests
-        # Docker-tier tests (test_docker_runner.py, test_integration_docker.py)
-        # need iptables-capable Docker daemons and run only on the EC2 relay.
+        # Real Docker integration tests need the EC2 relay. The DockerRunner
+        # unit tests are mocked and stay in the normal CI gate.
         run: |
           uv run pytest -q \
-            --ignore=tests/test_integration_docker.py \
-            --ignore=tests/test_docker_runner.py
+            --ignore=tests/test_integration_docker.py

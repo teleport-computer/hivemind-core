@@ -14,11 +14,12 @@ Env:
 Usage:
   HIVEMIND_BASE_URL=https://<app>-8100.<gateway> \\
   HIVEMIND_ADMIN_KEY=... \\
-    python scripts/smoke_multi_tenant.py
+    python scripts/smoke_multi_tenant.py [--insecure-attestation-bootstrap]
 """
 
 from __future__ import annotations
 
+import argparse
 import hashlib
 import os
 import sys
@@ -28,13 +29,13 @@ import uuid
 import httpx
 
 
-def _pin_from_attestation(base_url: str) -> str | None:
+def _pin_from_attestation(base_url: str, *, insecure_bootstrap: bool) -> str | None:
     """Fetch /v1/attestation and return the enclave cert PEM if present.
 
     Returns None when the server is not in enclave-TLS mode (gateway TLS),
     in which case default CA verification is the right thing to do.
     """
-    with httpx.Client(verify=False, timeout=30.0) as c:
+    with httpx.Client(verify=not insecure_bootstrap, timeout=30.0) as c:
         r = c.get(f"{base_url.rstrip('/')}/v1/attestation")
         r.raise_for_status()
         tls = (r.json().get("attestation") or {}).get("tls") or {}
@@ -74,6 +75,17 @@ def _delete(c: httpx.Client, path: str, *, key: str) -> httpx.Response:
 
 
 def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--insecure-attestation-bootstrap",
+        action="store_true",
+        help=(
+            "disable TLS verification only for the initial /v1/attestation "
+            "fetch used to pin an enclave self-signed cert"
+        ),
+    )
+    args = parser.parse_args()
+
     base = os.environ.get("HIVEMIND_BASE_URL")
     admin = os.environ.get("HIVEMIND_ADMIN_KEY")
     if not base or not admin:
@@ -85,7 +97,15 @@ def main() -> int:
 
     # For enclave-TLS URLs (Tier 3) the cert is self-signed and pinned to
     # the TDX quote — verify against that PEM, not system CAs.
-    pinned_pem = _pin_from_attestation(base)
+    if args.insecure_attestation_bootstrap:
+        print(
+            "[smoke] warning: initial attestation fetch skips TLS verification",
+            file=sys.stderr,
+        )
+    pinned_pem = _pin_from_attestation(
+        base,
+        insecure_bootstrap=args.insecure_attestation_bootstrap,
+    )
     if pinned_pem:
         ca_file = tempfile.NamedTemporaryFile(
             mode="w", suffix=".pem", delete=False

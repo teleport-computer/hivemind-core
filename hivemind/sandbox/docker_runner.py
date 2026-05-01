@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import ipaddress
 import json
 import logging
@@ -6,6 +7,7 @@ import os
 import platform
 import socket
 import subprocess
+import sys
 import tempfile
 import tarfile
 from dataclasses import dataclass
@@ -613,6 +615,9 @@ class DockerRunner:
                 # extra_volumes format matches Docker SDK's volumes= kwarg:
                 #   {"/host/abs/path": {"bind": "/container/path", "mode": "ro"}}
                 run_kwargs["volumes"] = dict(extra_volumes)
+            container_user = (self.settings.container_user or "").strip()
+            if container_user:
+                run_kwargs["user"] = container_user
             if self.settings.container_drop_all_caps:
                 run_kwargs["cap_drop"] = ["ALL"]
             if security_opt:
@@ -809,6 +814,83 @@ class DockerRunner:
                     )
                 return
 
+    def _build_container_limits(self) -> dict:
+        memory_bytes = int(self.settings.docker_build_memory_mb) * 1024 * 1024
+        limits: dict = {
+            "memory": memory_bytes,
+            "memswap": memory_bytes,
+            "cpushares": int(self.settings.docker_build_cpu_shares),
+        }
+        return limits
+
+    def _validate_build_context(self, build_path: str) -> str:
+        dockerfile = os.path.join(build_path, "Dockerfile")
+        if not os.path.isfile(dockerfile):
+            raise ValueError(
+                "No Dockerfile found in upload. A Dockerfile is required."
+            )
+        self._ensure_agent_base_for_dockerfile(dockerfile)
+        return dockerfile
+
+    def _docker_build_worker_host(self) -> str | None:
+        explicit = (self.settings.docker_host or "").strip()
+        if explicit:
+            return explicit
+        env_host = os.getenv("DOCKER_HOST", "").strip()
+        if env_host:
+            return env_host
+        return self._docker_host_from_context()
+
+    def _build_worker_args(self, build_path: str, tag: str) -> list[str]:
+        args = [
+            sys.executable,
+            "-m",
+            "hivemind.sandbox.docker_build_worker",
+            "--path",
+            build_path,
+            "--tag",
+            tag,
+            "--memory-mb",
+            str(int(self.settings.docker_build_memory_mb)),
+            "--cpu-shares",
+            str(int(self.settings.docker_build_cpu_shares)),
+        ]
+        build_network = (self.settings.docker_build_network or "").strip()
+        if build_network:
+            args.extend(["--network", build_network])
+        docker_host = self._docker_build_worker_host()
+        if docker_host:
+            args.extend(["--docker-host", docker_host])
+        return args
+
+    async def _build_image_worker_async(self, build_path: str, tag: str) -> str:
+        proc = await asyncio.create_subprocess_exec(
+            *self._build_worker_args(build_path, tag),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(),
+                timeout=self.settings.docker_build_timeout_seconds,
+            )
+        except asyncio.TimeoutError:
+            with contextlib.suppress(ProcessLookupError):
+                proc.kill()
+            await proc.communicate()
+            raise TimeoutError(
+                f"Docker image build timed out after "
+                f"{self.settings.docker_build_timeout_seconds}s"
+            )
+        if proc.returncode != 0:
+            details = (stderr or stdout or b"").decode(errors="replace").strip()
+            raise RuntimeError(
+                f"Docker image build failed for {tag}: "
+                f"{details[:1200] or 'no details'}"
+            )
+        logger.info("Built Docker image %s from %s", tag, build_path)
+        return tag
+
     def build_image(self, build_path: str, tag: str) -> str:
         """Build a Docker image from a directory containing a Dockerfile.
 
@@ -822,14 +904,7 @@ class DockerRunner:
         Raises:
             ValueError: If no Dockerfile is found in build_path.
         """
-        import os
-
-        dockerfile = os.path.join(build_path, "Dockerfile")
-        if not os.path.isfile(dockerfile):
-            raise ValueError(
-                "No Dockerfile found in upload. A Dockerfile is required."
-            )
-        self._ensure_agent_base_for_dockerfile(dockerfile)
+        self._validate_build_context(build_path)
 
         client = self._get_client()
         build_kwargs: dict = {
@@ -839,6 +914,7 @@ class DockerRunner:
             "forcerm": True,
             "pull": False,
             "labels": {CONTAINER_LABEL: CONTAINER_LABEL_VALUE},
+            "container_limits": self._build_container_limits(),
         }
         build_network = (self.settings.docker_build_network or "").strip()
         if build_network:
@@ -848,17 +924,9 @@ class DockerRunner:
         return tag
 
     async def build_image_async(self, build_path: str, tag: str) -> str:
-        """Async wrapper around build_image()."""
-        try:
-            return await asyncio.wait_for(
-                asyncio.to_thread(self.build_image, build_path, tag),
-                timeout=self.settings.docker_build_timeout_seconds,
-            )
-        except asyncio.TimeoutError as e:
-            raise TimeoutError(
-                f"Docker image build timed out after "
-                f"{self.settings.docker_build_timeout_seconds}s"
-            ) from e
+        """Build in a worker process so async timeout can cancel the build client."""
+        self._validate_build_context(build_path)
+        return await self._build_image_worker_async(build_path, tag)
 
     def image_exists(self, image: str) -> bool:
         """Return True if the Docker image is present locally."""
@@ -898,31 +966,28 @@ class DockerRunner:
                 "before build-context persistence) — please re-upload it."
             )
 
-        def _materialize_and_build() -> None:
-            with tempfile.TemporaryDirectory(prefix="hivemind-rebuild-") as td:
-                base = os.path.realpath(td)
-                for rel_path, content in files.items():
-                    # Defense-in-depth: refuse absolute / parent-traversing
-                    # paths even though the source comes from our own DB.
-                    if os.path.isabs(rel_path) or ".." in rel_path.split("/"):
-                        raise ValueError(
-                            f"Refusing to materialize unsafe path: {rel_path}"
-                        )
-                    target = os.path.realpath(os.path.join(td, rel_path))
-                    if not target.startswith(base + os.sep) and target != base:
-                        raise ValueError(
-                            f"Refusing to materialize path outside tmpdir: {rel_path}"
-                        )
-                    os.makedirs(os.path.dirname(target), exist_ok=True)
-                    with open(target, "w", encoding="utf-8") as f:
-                        f.write(content)
-                self.build_image(td, image_tag)
-
         logger.info(
             "Image %s missing; rebuilding from stored context (%d files)",
             image_tag, len(files),
         )
-        await asyncio.to_thread(_materialize_and_build)
+        with tempfile.TemporaryDirectory(prefix="hivemind-rebuild-") as td:
+            base = os.path.realpath(td)
+            for rel_path, content in files.items():
+                # Defense-in-depth: refuse absolute / parent-traversing
+                # paths even though the source comes from our own DB.
+                if os.path.isabs(rel_path) or ".." in rel_path.split("/"):
+                    raise ValueError(
+                        f"Refusing to materialize unsafe path: {rel_path}"
+                    )
+                target = os.path.realpath(os.path.join(td, rel_path))
+                if not target.startswith(base + os.sep) and target != base:
+                    raise ValueError(
+                        f"Refusing to materialize path outside tmpdir: {rel_path}"
+                    )
+                os.makedirs(os.path.dirname(target), exist_ok=True)
+                with open(target, "w", encoding="utf-8") as f:
+                    f.write(content)
+            await self.build_image_async(td, image_tag)
         return True
 
     # ── Image filesystem extraction ──

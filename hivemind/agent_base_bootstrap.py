@@ -30,21 +30,24 @@ _LOCAL_TAG = "hivemind-agent-base:latest"
 # fresh Phala CVM 2026-04-25). 2.1.109 is the current npm `stable` dist-tag.
 _CLAUDE_CODE_VERSION = "2.1.109"
 _CLAUDE_AGENT_SDK_VERSION = "0.1.61"
+_AIOHTTP_VERSION = "3.13.5"
 
 # Keep this in sync with agents/base/Dockerfile. The boot-time build is the
 # fallback when GHCR pull fails, so the recipe must be self-sufficient.
 _INLINE_DOCKERFILE = f"""\
-FROM python:3.12-slim
+FROM python:3.12-slim@sha256:46cb7cc2877e60fbd5e21a9ae6115c30ace7a077b9f8772da879e4590c18c2e3
 
 RUN apt-get update && \\
     apt-get install -y --no-install-recommends curl ca-certificates && \\
-    curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \\
+    curl -fsSL https://deb.nodesource.com/setup_20.x -o /tmp/nodesource_setup.sh && \\
+    bash /tmp/nodesource_setup.sh && \\
     apt-get install -y --no-install-recommends nodejs && \\
+    rm -f /tmp/nodesource_setup.sh && \\
     rm -rf /var/lib/apt/lists/*
 
 RUN npm install -g @anthropic-ai/claude-code@{_CLAUDE_CODE_VERSION}
 
-RUN pip install --no-cache-dir "claude-agent-sdk=={_CLAUDE_AGENT_SDK_VERSION}" aiohttp
+RUN pip install --no-cache-dir "claude-agent-sdk=={_CLAUDE_AGENT_SDK_VERSION}" "aiohttp=={_AIOHTTP_VERSION}"
 
 RUN useradd -m -s /bin/bash agent
 

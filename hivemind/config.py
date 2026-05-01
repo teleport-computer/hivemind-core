@@ -56,14 +56,20 @@ class Settings(BaseSettings):
     docker_network_internal: bool = True
     # Docker build-time isolation for uploaded agent images. Runtime
     # containers are separately hardened below; builds run on the host Docker
-    # daemon, so default to no build network and a hard wall-clock cap.
+    # daemon, so default to no build network, resource caps, and a hard
+    # wall-clock cap. Async builds use a separate worker process so a timeout
+    # closes the client connection to the daemon instead of leaving an
+    # unkillable Python thread blocked in the SDK.
     docker_build_network: str = "none"
     docker_build_timeout_seconds: int = 600
+    docker_build_memory_mb: int = 1024
+    docker_build_cpu_shares: int = 512
     enforce_bridge_only_egress: bool = True
     enforce_bridge_only_egress_fail_closed: bool = True
     container_memory_mb: int = 256
     container_cpu_quota: float = 1.0
     container_pids_limit: int = 256
+    container_user: str = "1000:1000"
     container_read_only_fs: bool = True
     container_drop_all_caps: bool = True
     container_no_new_privileges: bool = True

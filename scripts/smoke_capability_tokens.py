@@ -14,7 +14,7 @@ Usage::
 
     HIVEMIND_PROFILE=watchhistory \
         SCOPE_AGENT_ID=<id> \
-        uv run python scripts/smoke_capability_tokens.py
+        uv run python scripts/smoke_capability_tokens.py [--insecure]
 
 Environment knobs:
   - HIVEMIND_PROFILE  → which profile to read service+api_key from
@@ -26,6 +26,7 @@ failure. Designed to be safe to re-run.
 
 from __future__ import annotations
 
+import argparse
 import os
 import sys
 from pathlib import Path
@@ -52,6 +53,14 @@ def _load_profile() -> tuple[str, str]:
 
 
 def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--insecure",
+        action="store_true",
+        help="disable TLS certificate verification for the service URL",
+    )
+    args = parser.parse_args()
+
     service, owner_key = _load_profile()
     scope_agent_id = os.environ.get("SCOPE_AGENT_ID", "").strip()
 
@@ -60,7 +69,10 @@ def main() -> int:
 
     H_OWNER = {"Authorization": f"Bearer {owner_key}"}
 
-    with httpx.Client(verify=False, timeout=30) as c:
+    if args.insecure:
+        print("[smoke] warning: TLS certificate verification disabled", file=sys.stderr)
+
+    with httpx.Client(verify=not args.insecure, timeout=30) as c:
         # 1. issue query token
         r = c.post(
             f"{service}/v1/tokens",

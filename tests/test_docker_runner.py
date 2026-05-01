@@ -1,4 +1,6 @@
+import asyncio
 import io
+import sys
 import tarfile
 import time
 from types import SimpleNamespace
@@ -9,6 +11,7 @@ import pytest
 from hivemind.sandbox.docker_runner import ContainerResult, DockerRunner
 from hivemind.sandbox.docker_runner import CONTAINER_LABEL, CONTAINER_LABEL_VALUE
 from hivemind.sandbox.models import AgentConfig, SandboxSettings
+from hivemind.sandbox import docker_build_worker
 
 
 def _make_settings(**overrides):
@@ -146,6 +149,7 @@ async def test_run_agent_basic():
     assert kwargs["read_only"] is True
     assert kwargs["cap_drop"] == ["ALL"]
     assert "no-new-privileges:true" in kwargs["security_opt"]
+    assert kwargs["user"] == "1000:1000"
     assert "/tmp" in kwargs["tmpfs"]
     assert kwargs["detach"] is True
 
@@ -216,6 +220,7 @@ async def test_run_agent_can_disable_hardening_flags():
     assert "read_only" not in kwargs
     assert "cap_drop" not in kwargs
     assert "security_opt" not in kwargs
+    assert kwargs["user"] == "1000:1000"
 
 
 @pytest.mark.asyncio
@@ -944,6 +949,11 @@ def test_build_image_returns_tag(tmp_path):
         forcerm=True,
         pull=False,
         labels={CONTAINER_LABEL: CONTAINER_LABEL_VALUE},
+        container_limits={
+            "memory": 1024 * 1024 * 1024,
+            "memswap": 1024 * 1024 * 1024,
+            "cpushares": 512,
+        },
         network_mode="none",
     )
 
@@ -991,22 +1001,83 @@ def test_build_image_rejects_missing_dockerfile(tmp_path):
 
 @pytest.mark.asyncio
 async def test_build_image_async_returns_tag(tmp_path):
-    """Async wrapper should return the same tag."""
+    """Async build should use a cancellable worker process."""
     (tmp_path / "Dockerfile").write_text("FROM python:3.12-slim\n")
 
-    mock_client = MagicMock()
-    mock_client.images.build.return_value = (MagicMock(), [])
+    class _Proc:
+        returncode = 0
 
-    settings = _make_settings()
+        async def communicate(self):
+            return b"ok", b""
 
-    with patch("hivemind.sandbox.docker_runner.docker") as mock_docker:
-        mock_docker.from_env.return_value = mock_client
-        mock_docker.errors = __import__("docker").errors
+        def kill(self):
+            raise AssertionError("should not kill successful build")
 
+    settings = _make_settings(docker_host="unix:///tmp/docker.sock")
+
+    with patch(
+        "hivemind.sandbox.docker_runner.asyncio.create_subprocess_exec",
+        return_value=_Proc(),
+    ) as create_proc:
         runner = DockerRunner(settings)
         tag = await runner.build_image_async(str(tmp_path), "test:latest")
 
     assert tag == "test:latest"
+    args = create_proc.call_args.args
+    assert args[:3] == (
+        sys.executable,
+        "-m",
+        "hivemind.sandbox.docker_build_worker",
+    )
+    assert "--path" in args
+    assert str(tmp_path) in args
+    assert "--tag" in args
+    assert "test:latest" in args
+    assert "--network" in args
+    assert "none" in args
+    assert "--memory-mb" in args
+    assert "1024" in args
+    assert "--cpu-shares" in args
+    assert "512" in args
+    assert "--docker-host" in args
+    assert "unix:///tmp/docker.sock" in args
+
+
+@pytest.mark.asyncio
+async def test_build_image_async_timeout_kills_worker_process(tmp_path):
+    (tmp_path / "Dockerfile").write_text("FROM python:3.12-slim\n")
+
+    class _Proc:
+        returncode = None
+
+        def __init__(self):
+            self.killed = False
+            self.calls = 0
+
+        async def communicate(self):
+            self.calls += 1
+            if self.calls == 1:
+                await asyncio.sleep(10)
+            return b"", b""
+
+        def kill(self):
+            self.killed = True
+
+    proc = _Proc()
+    settings = _make_settings(
+        docker_build_timeout_seconds=1,
+        docker_host="unix:///tmp/docker.sock",
+    )
+
+    with patch(
+        "hivemind.sandbox.docker_runner.asyncio.create_subprocess_exec",
+        return_value=proc,
+    ):
+        runner = DockerRunner(settings)
+        with pytest.raises(TimeoutError, match="timed out"):
+            await runner.build_image_async(str(tmp_path), "test:latest")
+
+    assert proc.killed is True
 
 
 # ── ensure_image_async tests ──
@@ -1056,13 +1127,16 @@ async def test_ensure_image_async_rebuilds_when_missing():
 
     mock_client = MagicMock()
     mock_client.images.get.side_effect = docker_errors.ImageNotFound("missing")
-    mock_client.images.build.side_effect = _fake_build
+    async def _fake_build_async(build_path, tag):
+        _fake_build(path=build_path, tag=tag)
+        return tag
 
     settings = _make_settings()
     with patch("hivemind.sandbox.docker_runner.docker") as mock_docker:
         mock_docker.from_env.return_value = mock_client
         mock_docker.errors = docker_errors
         runner = DockerRunner(settings)
+        runner._build_image_worker_async = _fake_build_async
         rebuilt = await runner.ensure_image_async(
             "hivemind-agent-x:latest",
             {
@@ -1073,14 +1147,6 @@ async def test_ensure_image_async_rebuilds_when_missing():
         )
 
     assert rebuilt is True
-    assert mock_client.images.build.call_count == 1
-    build_kwargs = mock_client.images.build.call_args.kwargs
-    assert build_kwargs["tag"] == "hivemind-agent-x:latest"
-    assert build_kwargs["rm"] is True
-    assert build_kwargs["forcerm"] is True
-    assert build_kwargs["pull"] is False
-    assert build_kwargs["labels"] == {CONTAINER_LABEL: CONTAINER_LABEL_VALUE}
-    assert build_kwargs["network_mode"] == "none"
     assert captured_contents == {
         "Dockerfile": "FROM scratch\n",
         "agent.py": "print(1)\n",
@@ -1145,3 +1211,44 @@ async def test_ensure_image_async_rejects_path_traversal():
             )
 
     mock_client.images.build.assert_not_called()
+
+
+def test_docker_build_worker_uses_build_limits(tmp_path):
+    (tmp_path / "Dockerfile").write_text("FROM python:3.12-slim\n")
+
+    mock_client = MagicMock()
+    mock_client.images.build.return_value = (MagicMock(), [])
+
+    with patch("hivemind.sandbox.docker_build_worker.docker") as mock_docker:
+        mock_docker.from_env.return_value = mock_client
+        rc = docker_build_worker.main(
+            [
+                "--path",
+                str(tmp_path),
+                "--tag",
+                "test:latest",
+                "--network",
+                "none",
+                "--memory-mb",
+                "1024",
+                "--cpu-shares",
+                "512",
+            ]
+        )
+
+    assert rc == 0
+    mock_client.images.build.assert_called_once_with(
+        path=str(tmp_path),
+        tag="test:latest",
+        rm=True,
+        forcerm=True,
+        pull=False,
+        labels={CONTAINER_LABEL: CONTAINER_LABEL_VALUE},
+        container_limits={
+            "memory": 1024 * 1024 * 1024,
+            "memswap": 1024 * 1024 * 1024,
+            "cpushares": 512,
+        },
+        network_mode="none",
+    )
+    mock_client.close.assert_called_once()

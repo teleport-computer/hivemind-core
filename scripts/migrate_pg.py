@@ -44,6 +44,7 @@ Usage:
         [--batch-size 5000]
         [--dry-run]                            # plan only, no writes
         [--truncate-dst]                       # allow overwrite
+        [--insecure]                           # disable TLS verification
 """
 
 from __future__ import annotations
@@ -64,7 +65,14 @@ import httpx
 class Proxy:
     """Thin wrapper over a sql-proxy /execute, /admin, /import/csv URL."""
 
-    def __init__(self, base: str, proxy_key: str, admin_key: str = "") -> None:
+    def __init__(
+        self,
+        base: str,
+        proxy_key: str,
+        admin_key: str = "",
+        *,
+        verify_tls: bool = True,
+    ) -> None:
         self.base = base.rstrip("/")
         self.proxy_key = proxy_key
         self.admin_key = admin_key
@@ -73,7 +81,7 @@ class Proxy:
         # buffering. Connect timeout stays short so we fail fast on
         # routing mistakes.
         self.client = httpx.Client(
-            verify=False,
+            verify=verify_tls,
             timeout=httpx.Timeout(connect=10.0, read=300.0, write=300.0, pool=10.0),
             limits=httpx.Limits(max_connections=4),
         )
@@ -572,6 +580,11 @@ def main() -> int:
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--truncate-dst", action="store_true",
                     help="if a dst table already has rows, TRUNCATE before load (otherwise: skip)")
+    ap.add_argument(
+        "--insecure",
+        action="store_true",
+        help="disable TLS certificate verification for both SQL proxy URLs",
+    )
     args = ap.parse_args()
 
     proxy_key = os.environ.get("SQL_PROXY_KEY", "")
@@ -583,8 +596,11 @@ def main() -> int:
         print("error: SQL_PROXY_ADMIN_KEY env var required (for create-db)", file=sys.stderr)
         return 2
 
-    src = Proxy(args.src, proxy_key, admin_key)
-    dst = Proxy(args.dst, proxy_key, admin_key)
+    if args.insecure:
+        print("warning: TLS certificate verification disabled (--insecure)", file=sys.stderr)
+
+    src = Proxy(args.src, proxy_key, admin_key, verify_tls=not args.insecure)
+    dst = Proxy(args.dst, proxy_key, admin_key, verify_tls=not args.insecure)
 
     src_dbs = src.list_dbs()
     print(f"src DBs: {src_dbs}")

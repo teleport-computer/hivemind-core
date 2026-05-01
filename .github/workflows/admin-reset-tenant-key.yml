@@ -7,9 +7,9 @@ name: Admin reset tenant key (via EC2 relay)
 # SQL_PROXY_KEY + HIVEMIND_DATABASE_URL from deploy/phala/.env, and
 # runs scripts/admin_reset_tenant_key.py.
 #
-# WARNING: the resulting hmk_ is printed to the workflow log. GH Actions
-# logs are private to repo collaborators, but treat the key as
-# bootstrap-only — rotate via /v1/tenant/rotate-key on first use.
+# The resulting hmk_ is written to a chmod-600 file on the EC2 relay,
+# not printed to GitHub Actions logs. Treat the key as bootstrap-only —
+# rotate via /v1/tenant/rotate-key on first use.
 
 on:
   workflow_dispatch:
@@ -118,12 +118,19 @@ jobs:
               ARGS+=(--name "${FRIENDLY_NAME}")
             fi
           fi
+          OUT_DIR="$HOME/.hivemind/admin-reset-keys"
+          mkdir -p "$OUT_DIR"
+          chmod 700 "$OUT_DIR"
+          OUT_FILE="$OUT_DIR/${TENANT_ID}.key"
+          ARGS+=(--output-file "$OUT_FILE")
 
           echo "── running admin_reset_tenant_key.py ────────────"
           HIVEMIND_BASE_URL="${BASE_URL}" \
           SQL_PROXY_KEY="${SQL_PROXY_KEY}" \
             uv run --with httpx --python 3.12 python \
             scripts/admin_reset_tenant_key.py "${ARGS[@]}"
+          chmod 600 "$OUT_FILE"
+          echo "new key stored on relay: $OUT_FILE"
           REMOTE
 
       - name: Cleanup SSH key

@@ -96,11 +96,14 @@ class SandboxSettings(BaseModel):
     docker_network_internal: bool = True
     docker_build_network: str = "none"
     docker_build_timeout_seconds: int = Field(default=600, ge=1)
+    docker_build_memory_mb: int = Field(default=1024, ge=128)
+    docker_build_cpu_shares: int = Field(default=512, ge=2)
     enforce_bridge_only_egress: bool = True
     enforce_bridge_only_egress_fail_closed: bool = True
     container_memory_mb: int = Field(default=256, ge=16)
     container_cpu_quota: float = Field(default=1.0, gt=0.0)
     container_pids_limit: int = Field(default=256, ge=16)
+    container_user: str = "1000:1000"
     container_read_only_fs: bool = True
     container_drop_all_caps: bool = True
     container_no_new_privileges: bool = True
