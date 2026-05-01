@@ -11,8 +11,14 @@ the room-approved output leaves the enclave.
 Requires Python 3.11+, `uv`, Docker for agent builds/runs, and Postgres for
 local development.
 
-For regular CLI users, install from the published Git source into uv's isolated
-tool environment:
+For regular CLI users, install the CLI into uv's isolated tool environment:
+
+```bash
+uv tool install hivemind-core
+hivemind --version
+```
+
+Until the first PyPI release is published, install from the Git source:
 
 ```bash
 uv tool install --upgrade git+https://github.com/Account-Link/hivemind-core.git
@@ -41,20 +47,23 @@ hivemind profile use my-tenant
 ROOM='hmroom://...'
 
 hivemind room inspect "$ROOM"
+hivemind doctor "$ROOM"
 hivemind room inspect "$ROOM" --json | jq '.room.manifest'
 hivemind room accept "$ROOM"
+hivemind balance
 hivemind -y room ask "$ROOM" "What changed this month?"
 ```
 
 `room inspect` shows the signed room spec and live attestation summary; use
-`--json` to inspect the full manifest. `room accept` records the verified
-manifest hash for this local profile; if you skip it, the first `room ask`
-prompts before sending your question. `-y` does not accept room manifests.
-`--dangerously-skip-attestations` bypasses both attestation checks and this
-first-use manifest acceptance gate. `room ask` defaults to `--timeout 600`,
-`--max-llm-calls 20`, and `--max-tokens 100000`. Hosted deployments can clamp
-requests lower than what you ask for; the current Phala deployment caps runtime
-at 900s, LLM calls at 100, and tokens at 1000000.
+`--json` to inspect the full manifest. `doctor ROOM` checks the active profile,
+service auth, billing balance, room trust, and local room acceptance in one
+place. `room accept` records the verified manifest hash for this local profile;
+if you skip it, the first `room ask` prompts before sending your question. `-y`
+does not accept room manifests. `--dangerously-skip-attestations` bypasses both
+attestation checks and this first-use manifest acceptance gate. `room ask`
+defaults to `--timeout 600`, `--max-llm-calls 20`, and `--max-tokens 100000`.
+Hosted deployments can clamp requests lower than what you ask for; the current
+Phala deployment caps runtime at 900s, LLM calls at 100, and tokens at 1000000.
 
 For invite-token room asks, the CLI bills the active `hmk_` tenant profile
 automatically. The room token still controls what data can be read; the active
@@ -103,6 +112,7 @@ hivemind admin credit-codes create --credit 3.00 --uses 1 --expires-in 7d
 hivemind admin credit-codes list
 hivemind admin billing accounts
 hivemind admin billing ledger
+hivemind admin tenants reset-key t_... --clear-seal --revoke-capabilities
 ```
 
 Operator switches:

@@ -29,6 +29,11 @@ def _hpost(*a, **kw):
     return _f(*a, **kw)
 
 
+def _hdelete(*a, **kw):
+    from . import _hdelete as _f
+    return _f(*a, **kw)
+
+
 def _parse_room_ref(
     ref: str,
     config: dict | None = None,
@@ -805,6 +810,61 @@ def accept_room(room: str, as_json: bool):
         return
     _echo_room_manifest_summary(data)
     click.echo(f"Accepted for profile '{_profile_name()}'.")
+
+
+@rooms_cli.command("list")
+@click.option("--limit", type=int, default=50, show_default=True)
+@click.option("--json", "as_json", is_flag=True, help="Emit JSON on stdout.")
+def list_rooms(limit: int, as_json: bool):
+    """List rooms visible to the active profile."""
+    config = _load_config()
+    service = config["service"]
+    resp = _hget(
+        f"{service}/v1/rooms",
+        headers=_headers(config),
+        params={"limit": limit},
+        timeout=30,
+    )
+    if resp.status_code >= 400:
+        raise click.ClickException(f"{resp.status_code}: {_api_error(resp)}")
+    rooms = resp.json().get("rooms") or []
+    if as_json:
+        click.echo(_json.dumps(rooms, indent=2, default=str))
+        return
+    if not rooms:
+        click.echo("(no rooms)")
+        return
+    click.echo(f"{'ROOM_ID':<18} {'STATUS':<8} {'QUERY':<8} NAME")
+    for room in rooms:
+        status = "revoked" if room.get("revoked_at") is not None else "active"
+        click.echo(
+            f"{room.get('room_id',''):<18} "
+            f"{status:<8} "
+            f"{room.get('query_mode',''):<8} "
+            f"{room.get('name') or ''}"
+        )
+
+
+@rooms_cli.command("revoke")
+@click.argument("room")
+@click.option("--json", "as_json", is_flag=True, help="Emit JSON on stdout.")
+@click.confirmation_option(prompt="Revoke this room invite? Existing links stop working.")
+def revoke_room(room: str, as_json: bool):
+    """Revoke a room owned by the active profile."""
+    config = _load_config()
+    service, room_id, _room_headers, _owner_pubkey = _parse_room_ref(room, config=config)
+    resp = _hdelete(
+        f"{service}/v1/rooms/{room_id}",
+        headers=_headers(config),
+        timeout=30,
+    )
+    if resp.status_code >= 400:
+        raise click.ClickException(f"{resp.status_code}: {_api_error(resp)}")
+    data = resp.json()
+    if as_json:
+        click.echo(_json.dumps(data, indent=2, default=str))
+        return
+    click.echo(f"Revoked room {room_id}.")
 
 
 @rooms_cli.command("add-data")

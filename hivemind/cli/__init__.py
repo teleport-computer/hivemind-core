@@ -8,10 +8,12 @@ subcommand group lives in its own sub-module under ``~1000`` lines:
 * ``_config.py`` — profile / config / header helpers.
 * ``_trust.py`` — remote attestation, DCAP, on-chain governance gate.
 * ``_shared.py`` — room run polling and attestation helpers.
-* ``owner.py`` — ``signup``, ``init``, ``redeem-credit``, and ``rotate-key``.
+* ``owner.py`` — ``signup``, ``init``, ``balance``, ``redeem-credit``, and
+  ``rotate-key``.
 * ``rooms.py`` — signed-room creation, data loading, inspection, and asking.
 * ``profile.py`` — ``profile`` subcommand group.
 * ``admin.py`` — ``admin`` subcommand group.
+* ``diagnostics.py`` — ``doctor`` readiness checks.
 * ``trust_cmds.py`` — ``trust`` subcommand group.
 
 This file pulls them all together and registers every command on the
@@ -56,7 +58,7 @@ _ACTIVE_POINTER = _HIVEMIND_HOME / "active"
 from ._http import _hdelete, _hget, _hpost  # noqa: F401  (test contract)
 
 # ── Subcommand modules ──
-from . import admin, owner, profile, rooms, trust_cmds
+from . import admin, diagnostics, owner, profile, rooms, trust_cmds
 from ._root import cli
 
 # ── Test-patchable trust helper ──
@@ -78,8 +80,10 @@ from ._trust import _fetch_attestation  # noqa: F401  (test contract)
 # Owner-side identity flow.
 cli.add_command(owner.signup)
 cli.add_command(owner.init)
+cli.add_command(owner.balance)
 cli.add_command(owner.redeem_credit, "redeem-credit")
 cli.add_command(owner.rotate_key, "rotate-key")
+cli.add_command(diagnostics.doctor, "doctor")
 
 # Room-first product surface.
 cli.add_command(rooms.rooms_cli, "room")

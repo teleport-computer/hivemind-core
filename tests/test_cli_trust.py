@@ -17,6 +17,7 @@ from hivemind import cli as _cli_mod
 from hivemind import trust as _trust
 from hivemind.cli import _trust as _cli_trust
 from hivemind.cli import admin as _admin_cli
+from hivemind.cli import diagnostics as _diagnostics_cli
 from hivemind.cli import rooms as _rooms_cli
 
 _ROOM_LINK = (
@@ -231,6 +232,152 @@ def test_room_ask_uses_named_profile_api_key_for_billing(_sandbox, monkeypatch):
     assert result.exit_code == 0, result.output
     assert captured["headers"]["Authorization"] == "Bearer hmq_test"
     assert captured["headers"]["X-Hivemind-Api-Key"] == "hmk_liz"
+
+
+def test_balance_shows_active_tenant_credit(_sandbox, monkeypatch):
+    _stub_attestation(
+        monkeypatch,
+        {"ready": True, "attestation": {"compose_hash": "0xabc"}},
+    )
+
+    def fake_get(url, **kwargs):
+        assert url == "https://cvm.example/v1/billing"
+        return type(
+            "Resp",
+            (),
+            {
+                "status_code": 200,
+                "json": lambda self: {
+                    "tenant_id": "t_liz",
+                    "balance_micro_usd": 1_250_000,
+                    "ledger": [],
+                },
+            },
+        )()
+
+    monkeypatch.setattr(_cli_mod, "_hget", fake_get)
+
+    result = CliRunner().invoke(_cli_mod.cli, ["--yes", "balance"])
+
+    assert result.exit_code == 0, result.output
+    assert "Tenant:  t_liz" in result.output
+    assert "Balance: $1.250000" in result.output
+
+
+def test_doctor_checks_profile_billing_and_room(_sandbox, monkeypatch):
+    _stub_attestation(
+        monkeypatch,
+        {"ready": True, "attestation": {"compose_hash": "0xabc"}},
+    )
+
+    def fake_get(url, **kwargs):
+        if url.endswith("/v1/health"):
+            return type(
+                "Resp",
+                (),
+                {
+                    "status_code": 200,
+                    "json": lambda self: {"version": "0.3.4", "table_count": 9},
+                },
+            )()
+        if url.endswith("/v1/billing"):
+            return type(
+                "Resp",
+                (),
+                {
+                    "status_code": 200,
+                    "json": lambda self: {
+                        "tenant_id": "t_liz",
+                        "balance_micro_usd": 500_000,
+                        "ledger": [],
+                    },
+                },
+            )()
+        raise AssertionError(url)
+
+    monkeypatch.setattr(_cli_mod, "_hget", fake_get)
+    monkeypatch.setattr(
+        _diagnostics_cli,
+        "_fetch_verified_room",
+        lambda *a, **kw: {
+            "room": {
+                "room_id": "room_test",
+                "revoked_at": None,
+                "manifest_hash": "mh",
+                "manifest": {"trust": {"mode": "operator_updates"}},
+            },
+            "attestation": {"attestation": {"compose_hash": "0xabc"}},
+        },
+    )
+    monkeypatch.setattr(_diagnostics_cli, "_enforce_room_trust", lambda data: None)
+    monkeypatch.setattr(
+        _diagnostics_cli,
+        "_room_manifest_is_accepted",
+        lambda **kw: True,
+    )
+
+    result = CliRunner().invoke(_cli_mod.cli, ["--yes", "doctor", _ROOM_LINK])
+
+    assert result.exit_code == 0, result.output
+    assert "OK   profile" in result.output
+    assert "OK   billing - balance $0.500000" in result.output
+    assert "OK   room - room_test manifest verified" in result.output
+
+
+def test_room_list_and_revoke_commands(_sandbox, monkeypatch):
+    _stub_attestation(
+        monkeypatch,
+        {"ready": True, "attestation": {"compose_hash": "0xabc"}},
+    )
+    calls: dict = {}
+
+    def fake_get(url, **kwargs):
+        assert url == "https://cvm.example/v1/rooms"
+        return type(
+            "Resp",
+            (),
+            {
+                "status_code": 200,
+                "json": lambda self: {
+                    "rooms": [
+                        {
+                            "room_id": "room_keep",
+                            "name": "keep",
+                            "query_mode": "fixed",
+                            "revoked_at": None,
+                        }
+                    ]
+                },
+            },
+        )()
+
+    def fake_delete(url, **kwargs):
+        calls["url"] = url
+        calls["headers"] = kwargs.get("headers")
+        return type(
+            "Resp",
+            (),
+            {
+                "status_code": 200,
+                "json": lambda self: {"status": "ok", "room_id": "room_keep"},
+            },
+        )()
+
+    monkeypatch.setattr(_cli_mod, "_hget", fake_get)
+    monkeypatch.setattr(_cli_mod, "_hdelete", fake_delete)
+
+    listed = CliRunner().invoke(_cli_mod.cli, ["--yes", "room", "list"])
+    assert listed.exit_code == 0, listed.output
+    assert "room_keep" in listed.output
+
+    revoked = CliRunner().invoke(
+        _cli_mod.cli,
+        ["--yes", "room", "revoke", "room_keep"],
+        input="y\n",
+    )
+    assert revoked.exit_code == 0, revoked.output
+    assert calls["url"] == "https://cvm.example/v1/rooms/room_keep"
+    assert calls["headers"]["Authorization"] == "Bearer test-key"
 
 
 def test_room_inspect_thaws_active_profile_when_room_tenant_is_sealed(

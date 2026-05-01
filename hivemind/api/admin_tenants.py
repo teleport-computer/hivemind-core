@@ -41,6 +41,13 @@ class AdminRenameDatabaseRequest(BaseModel):
     new_name: Any = ""
 
 
+class AdminResetTenantKeyRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    clear_seal: bool = False
+    revoke_capabilities: bool = False
+
+
 def _registry(request: Request) -> TenantRegistry:
     return request.app.state.registry
 
@@ -151,6 +158,28 @@ def register_admin_tenant_routes(
         except RuntimeError as e:
             raise HTTPException(400, str(e))
         return {"status": "ok", "results": results}
+
+    @app.post(
+        "/v1/admin/tenants/{tenant_id}/reset-key",
+        dependencies=[Depends(check_admin)],
+    )
+    async def admin_reset_tenant_key(
+        tenant_id: str,
+        payload: AdminResetTenantKeyRequest,
+        request: Request,
+    ):
+        registry = _registry(request)
+        try:
+            return await asyncio.to_thread(
+                registry.admin_reset_tenant_key,
+                tenant_id,
+                clear_seal=bool(payload.clear_seal),
+                revoke_capabilities=bool(payload.revoke_capabilities),
+            )
+        except KeyError as e:
+            raise HTTPException(404, str(e))
+        except RuntimeError as e:
+            raise HTTPException(400, str(e))
 
     @app.delete(
         "/v1/admin/tenants/{tenant_id}",

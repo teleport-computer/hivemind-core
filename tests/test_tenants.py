@@ -26,6 +26,7 @@ from hivemind.tenants import (
     _hash_api_key,
     _is_missing_database_error,
 )
+from hivemind.tenant_seal import ensure_unsealed, load_seal_record
 
 
 TEST_DSN = os.environ.get(
@@ -139,6 +140,57 @@ def test_provision_rejects_duplicate_name_by_default(registry):
     registry._test_created_dbs.append(second["db_name"])
     assert second["tenant_id"] != first["tenant_id"]
     assert second["name"] == "liz"
+
+
+def test_admin_reset_tenant_key_can_clear_seal_and_revoke_caps(registry):
+    tenant = registry.provision("reset-me")
+    registry._test_created_dbs.append(tenant["db_name"])
+
+    resolved = registry.resolve(tenant["api_key"])
+    assert resolved is not None
+    tenant_id, hm = resolved
+    assert ensure_unsealed(
+        registry.sealer,
+        hm.db,
+        tenant_id,
+        tenant["api_key"],
+        can_initialize=True,
+    )
+    assert load_seal_record(hm.db) is not None
+
+    cap = registry.mint_capability(
+        tenant_id,
+        "query",
+        "old-room",
+        {"room_id": "room_old", "scope_agent_id": "scope_old"},
+    )
+    assert registry.resolve_any(cap["token"]) is not None
+
+    reset = registry.admin_reset_tenant_key(
+        tenant_id,
+        clear_seal=True,
+        revoke_capabilities=True,
+    )
+
+    assert reset["api_key"].startswith("hmk_")
+    assert reset["seal_rows_deleted"] == 1
+    assert reset["capabilities_revoked"] == 1
+    assert registry.resolve(tenant["api_key"]) is None
+    assert registry.resolve_any(cap["token"]) is None
+
+    resolved_after = registry.resolve(reset["api_key"])
+    assert resolved_after is not None
+    after_tenant_id, after_hm = resolved_after
+    assert after_tenant_id == tenant_id
+    assert load_seal_record(after_hm.db) is None
+    assert ensure_unsealed(
+        registry.sealer,
+        after_hm.db,
+        tenant_id,
+        reset["api_key"],
+        can_initialize=True,
+    )
+    assert load_seal_record(after_hm.db) is not None
 
 
 def test_api_key_stored_only_as_hash(registry):

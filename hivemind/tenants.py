@@ -822,6 +822,74 @@ class TenantRegistry(CreditCodeRegistryMixin, BillingRegistryMixin):
         )
         return {"tenant_id": tenant_id, "api_key": new_key}
 
+    def admin_reset_tenant_key(
+        self,
+        tenant_id: str,
+        *,
+        clear_seal: bool = False,
+        revoke_capabilities: bool = False,
+    ) -> dict:
+        """Admin-only clean-start key reset for a tenant.
+
+        Resetting the hash alone is not enough for sealed tenants: the existing
+        tenant DEK wrap is derived from the old owner key, so a fresh key cannot
+        thaw it. ``clear_seal`` intentionally drops that wrap and evicts the
+        in-process DEK cache so the next owner request initializes a fresh seal.
+        Existing encrypted agent files become unreadable; tenant application
+        tables are untouched.
+        """
+        rows = self._control_db.execute(
+            "SELECT id, name, db_name FROM _tenants WHERE id = %s",
+            [tenant_id],
+        )
+        if not rows:
+            raise KeyError(f"tenant '{tenant_id}' not found")
+        tenant = dict(rows[0])
+
+        seal_rows_deleted = 0
+        if clear_seal:
+            hm = self.for_tenant(tenant_id)
+            if hm is None:
+                raise KeyError(f"tenant '{tenant_id}' not found")
+            try:
+                seal_rows_deleted = int(
+                    hm.db.execute_commit("DELETE FROM _hivemind_tenant_kek")
+                    or 0
+                )
+            except Exception as e:
+                raise RuntimeError(f"failed to clear tenant seal: {e}") from e
+            self.sealer.evict(tenant_id)
+
+        capabilities_revoked = 0
+        if revoke_capabilities:
+            capabilities_revoked = int(
+                self._control_db.execute_commit(
+                    "UPDATE _capability_tokens SET revoked_at = %s "
+                    "WHERE tenant_id = %s AND revoked_at IS NULL",
+                    [time.time(), tenant_id],
+                )
+                or 0
+            )
+
+        new_key = _new_api_key()
+        new_hash = _hash_api_key(new_key)
+        rowcount = self._control_db.execute_commit(
+            "UPDATE _tenants SET api_key_hash = %s WHERE id = %s",
+            [new_hash, tenant_id],
+        )
+        if rowcount != 1:
+            raise RuntimeError(f"reset-key rowcount={rowcount} (expected 1)")
+        return {
+            "tenant_id": tenant_id,
+            "name": tenant.get("name") or "",
+            "db_name": tenant.get("db_name") or "",
+            "api_key": new_key,
+            "clear_seal": bool(clear_seal),
+            "seal_rows_deleted": seal_rows_deleted,
+            "revoke_capabilities": bool(revoke_capabilities),
+            "capabilities_revoked": capabilities_revoked,
+        }
+
     def delete(self, tenant_id: str) -> None:
         """Drop tenant DB, evict from cache, remove control row."""
         rows = self._control_db.execute(

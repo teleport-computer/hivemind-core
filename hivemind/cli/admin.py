@@ -300,6 +300,93 @@ def admin_migrate_to_roles(service: str | None, admin_key: str, as_json: bool):
             click.echo(f"  ERR  {r['db_name']}: {r['error']}", err=True)
 
 
+@admin_tenants.command("reset-key")
+@click.argument("tenant_id")
+@click.option(
+    "--clear-seal",
+    is_flag=True,
+    help=(
+        "Drop the tenant seal row so the fresh key initializes a new seal. "
+        "Existing encrypted agent files become unreadable."
+    ),
+)
+@click.option(
+    "--revoke-capabilities",
+    is_flag=True,
+    help="Revoke active hmq_ room/invite tokens for this tenant.",
+)
+@click.option(
+    "--profile-name",
+    default="",
+    help="Profile name to include in the printed tenant init command.",
+)
+@click.option("--service", default=None, help="Hivemind service URL")
+@click.option(
+    "--admin-key",
+    envvar="HIVEMIND_ADMIN_KEY",
+    default="",
+    help="Admin bearer token. Defaults to HIVEMIND_ADMIN_KEY or "
+    "the active profile's api_key when role=admin.",
+)
+@click.option("--json", "as_json", is_flag=True, help="Emit JSON only")
+@click.confirmation_option(
+    prompt=(
+        "Reset this tenant's owner key? The current hmk_ stops working "
+        "immediately. Continue?"
+    )
+)
+def admin_reset_tenant_key(
+    tenant_id: str,
+    clear_seal: bool,
+    revoke_capabilities: bool,
+    profile_name: str,
+    service: str | None,
+    admin_key: str,
+    as_json: bool,
+):
+    """Reset a tenant owner key, optionally doing a clean-start seal repair."""
+    admin_key = _resolve_admin_key(admin_key)
+    url = _resolve_admin_service(service)
+    payload = {
+        "clear_seal": clear_seal,
+        "revoke_capabilities": revoke_capabilities,
+    }
+    try:
+        resp = _hpost(
+            f"{url}/v1/admin/tenants/{tenant_id}/reset-key",
+            headers=_admin_headers(admin_key),
+            json=payload,
+            timeout=60,
+        )
+    except httpx.RequestError as e:
+        click.echo(f"Error: {e}", err=True)
+        raise SystemExit(2)
+    if resp.status_code >= 400:
+        click.echo(f"Error {resp.status_code}: {_api_error(resp)}", err=True)
+        raise SystemExit(3)
+    data = resp.json()
+    profile = profile_name or str(data.get("name") or tenant_id)
+    setup = _tenant_init_command(
+        service=url,
+        profile=profile,
+        api_key=str(data["api_key"]),
+    )
+    data["tenant_setup_command"] = setup
+    if as_json:
+        click.echo(_json.dumps(data, indent=2, default=str))
+        return
+    click.echo(f"Tenant:   {data['tenant_id']}  ({data.get('name') or ''})")
+    click.echo(f"Database: {data.get('db_name') or ''}")
+    click.echo(f"Seal rows cleared:       {data.get('seal_rows_deleted', 0)}")
+    click.echo(f"Capabilities revoked:    {data.get('capabilities_revoked', 0)}")
+    click.echo("")
+    click.echo("API key (store it now -- we won't show it again):")
+    click.echo(f"  {data['api_key']}")
+    click.echo("")
+    click.echo("Tenant init command:")
+    click.echo(f"  {setup}")
+
+
 @admin_cli.command("sweep")
 @click.option("--service", default=None, help="Hivemind service URL")
 @click.option(

@@ -167,6 +167,56 @@ def redeem_credit(credit_code: str, as_json: bool):
     click.echo(f"Balance: {data.get('balance_micro_usd', 0) / 1_000_000:.2f} USD")
 
 
+@click.command("balance")
+@click.option("--limit", default=10, show_default=True, help="Ledger entries to show.")
+@click.option("--json", "as_json", is_flag=True, help="Emit JSON on stdout")
+def balance(limit: int, as_json: bool):
+    """Show the active tenant's credit balance and recent ledger."""
+    config = _load_config()
+    service = config["service"]
+    headers = _headers(config)
+    if "Authorization" not in headers:
+        click.echo("Error: no api_key in config. Run 'hivemind init'.", err=True)
+        raise SystemExit(1)
+    try:
+        resp = _hget(
+            f"{service}/v1/billing",
+            headers=headers,
+            params={"limit": limit},
+            timeout=30,
+        )
+    except httpx.RequestError as e:
+        click.echo(f"Error: {e}", err=True)
+        raise SystemExit(2)
+    if resp.status_code >= 400:
+        click.echo(f"Error {resp.status_code}: {_api_error(resp)}", err=True)
+        raise SystemExit(3)
+
+    data = resp.json()
+    if as_json:
+        click.echo(_json.dumps(data, indent=2, default=str))
+        return
+
+    balance_micro = int(data.get("balance_micro_usd") or 0)
+    click.echo(f"Tenant:  {data.get('tenant_id', '?')}")
+    click.echo(f"Balance: ${balance_micro / 1_000_000:.6f}")
+    if balance_micro <= 0:
+        click.echo("Status:  new paid room asks may be blocked until credit is added")
+    ledger = data.get("ledger") or []
+    if not ledger:
+        return
+    click.echo("")
+    click.echo(f"{'WHEN':<12} {'KIND':<16} {'AMOUNT':>14} RUN")
+    for row in ledger:
+        amount = int(row.get("amount_micro_usd") or 0) / 1_000_000
+        click.echo(
+            f"{str(row.get('created_at',''))[:12]:<12} "
+            f"{str(row.get('kind',''))[:16]:<16} "
+            f"${amount:>13.6f} "
+            f"{row.get('run_id') or ''}"
+        )
+
+
 @click.command("rotate-key")
 @click.option("--json", "as_json", is_flag=True, help="Emit JSON on stdout")
 @click.confirmation_option(

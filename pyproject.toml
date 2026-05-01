@@ -1,11 +1,22 @@
 [project]
 name = "hivemind-core"
-version = "0.3.3"
+version = "0.3.4"
 description = "Attested recall agreements for mutually distrusting parties and their agents"
+readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.11"
+authors = [
+    { name = "Account Link" },
+]
 classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Security",
 ]
 dependencies = [
     "openai>=1.0",
@@ -36,6 +47,11 @@ dev = [
 
 [project.scripts]
 hivemind = "hivemind.cli:cli"
+
+[project.urls]
+Homepage = "https://github.com/Account-Link/hivemind-core"
+Repository = "https://github.com/Account-Link/hivemind-core"
+Issues = "https://github.com/Account-Link/hivemind-core/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["hivemind"]
