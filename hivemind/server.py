@@ -374,21 +374,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     ) -> dict:
         """Resolve who pays for this run.
 
-        Query-token calls attach ``X-Hivemind-Payer-Key: hmk_...`` so the data
-        owner is not charged for the participant's LLM spend. Owner calls
-        default to the owner tenant. Query-token calls without a payer key are
-        rejected before work starts; the credit-enforcement setting controls
-        whether a known payer must have enough positive balance, not whether a
-        payer is required.
+        Query-token calls attach the participant tenant's ``hmk_`` API key so
+        the data owner is not charged for the participant's LLM spend. Owner
+        calls default to the owner tenant. Query-token calls without a tenant
+        API key are rejected before work starts; the credit-enforcement setting
+        controls whether a known payer must have enough positive balance, not
+        whether a payer is required.
         """
-        payer_key = (request.headers.get("X-Hivemind-Payer-Key") or "").strip()
+        payer_key = (
+            request.headers.get("X-Hivemind-Api-Key")
+            or request.headers.get("X-Hivemind-Payer-Key")
+            or ""
+        ).strip()
         if payer_key:
             payer = await asyncio.to_thread(
                 _registry(request).resolve_payer_key,
                 payer_key,
             )
             if payer is None:
-                raise HTTPException(401, "invalid payer credential")
+                raise HTTPException(401, "invalid tenant API key")
             return {
                 "payer_tenant_id": payer["tenant_id"],
                 "payer_token_id": payer.get("payer_token_id") or "",

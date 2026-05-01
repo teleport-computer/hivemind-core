@@ -994,7 +994,7 @@ def ask_room(
             )
     if profile_api_key:
         headers = dict(headers)
-        headers["X-Hivemind-Payer-Key"] = profile_api_key
+        headers["X-Hivemind-Api-Key"] = profile_api_key
     room_data = _fetch_verified_room(
         service,
         room_id,

@@ -161,7 +161,7 @@ def test_room_ask_omits_room_id_from_path_scoped_run_body(
     assert captured["payload"]["provider"] == "tinfoil"
     assert captured["payload"]["model"] == "kimi-k2-6"
     assert captured["headers"]["Authorization"] == "Bearer hmq_test"
-    assert captured["headers"]["X-Hivemind-Payer-Key"] == "hmk_test"
+    assert captured["headers"]["X-Hivemind-Api-Key"] == "hmk_test"
     assert "room_id" not in captured["payload"]
     assert captured["kwargs"]["submit_path"] == "/v1/rooms/room_test/runs"
 
@@ -230,7 +230,7 @@ def test_room_ask_uses_named_profile_api_key_for_billing(_sandbox, monkeypatch):
 
     assert result.exit_code == 0, result.output
     assert captured["headers"]["Authorization"] == "Bearer hmq_test"
-    assert captured["headers"]["X-Hivemind-Payer-Key"] == "hmk_liz"
+    assert captured["headers"]["X-Hivemind-Api-Key"] == "hmk_liz"
 
 
 def test_room_accept_records_manifest_before_ask(_sandbox, monkeypatch):

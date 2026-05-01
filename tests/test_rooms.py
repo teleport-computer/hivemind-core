@@ -59,7 +59,7 @@ def _headers(token: str) -> dict[str, str]:
 
 def _query_headers(token: str, payer_key: str) -> dict[str, str]:
     headers = _headers(token)
-    headers["X-Hivemind-Payer-Key"] = payer_key
+    headers["X-Hivemind-Api-Key"] = payer_key
     return headers
 
 
