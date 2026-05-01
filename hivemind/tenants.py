@@ -55,7 +55,12 @@ from .tenant_keys import (
     usd_to_micro_usd as _usd_to_micro_usd,
     usd_to_micro_usd_nonnegative as _usd_to_micro_usd_nonnegative,
 )
-from .tenant_seal import ensure_unsealed
+from .seal import TenantSealed
+from .tenant_seal import (
+    ensure_unsealed,
+    unwrap_dek_for_bearer,
+    wrap_dek_for_bearer,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -308,6 +313,18 @@ class TenantRegistry(CreditCodeRegistryMixin, BillingRegistryMixin):
             "CREATE INDEX IF NOT EXISTS _capability_tokens_tenant_idx "
             "ON _capability_tokens (tenant_id)"
         )
+        for column in (
+            "seal_salt TEXT",
+            "seal_wrapped_dek TEXT",
+            "seal_kdf_params TEXT",
+        ):
+            try:
+                self._control_db.execute_commit(
+                    f"ALTER TABLE _capability_tokens "
+                    f"ADD COLUMN IF NOT EXISTS {column}"
+                )
+            except Exception:
+                pass
         # Compose pins. Owner-signed envelopes that authorize one or more
         # ``compose_hash`` values for a scope agent. ``hmq_`` URIs can
         # reference a pin instead of baking a single compose_hash, so
@@ -554,10 +571,14 @@ class TenantRegistry(CreditCodeRegistryMixin, BillingRegistryMixin):
 
         token = _new_capability_token(_QUERY_TOKEN_PREFIX)
         token_hash = _hash_api_key(token)
+        seal_salt, seal_wrapped_dek, seal_kdf_params = (
+            self._capability_dek_wrap(tenant_id, token)
+        )
         self._control_db.execute_commit(
             "INSERT INTO _capability_tokens "
-            "(token_hash, tenant_id, kind, label, constraints, created_at) "
-            "VALUES (%s, %s, %s, %s, %s, %s)",
+            "(token_hash, tenant_id, kind, label, constraints, created_at, "
+            "seal_salt, seal_wrapped_dek, seal_kdf_params) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
             [
                 token_hash,
                 tenant_id,
@@ -565,6 +586,9 @@ class TenantRegistry(CreditCodeRegistryMixin, BillingRegistryMixin):
                 label.strip(),
                 _json.dumps(constraints),
                 time.time(),
+                seal_salt,
+                seal_wrapped_dek,
+                seal_kdf_params,
             ],
         )
         return {
@@ -574,6 +598,47 @@ class TenantRegistry(CreditCodeRegistryMixin, BillingRegistryMixin):
             "label": label.strip(),
             "constraints": constraints,
         }
+
+    def _capability_dek_wrap(
+        self,
+        tenant_id: str,
+        token: str,
+    ) -> tuple[str | None, str | None, str | None]:
+        try:
+            dek = self.sealer.get_dek(tenant_id)
+        except TenantSealed:
+            return None, None, None
+        try:
+            return wrap_dek_for_bearer(dek, token)
+        except Exception as e:
+            logger.warning("tenant %s capability DEK wrap failed: %s", tenant_id, e)
+            return None, None, None
+
+    def _thaw_capability_dek(
+        self,
+        *,
+        tenant_id: str,
+        token: str,
+        row: dict,
+    ) -> bool:
+        salt = row.get("seal_salt")
+        wrapped = row.get("seal_wrapped_dek")
+        if not salt or not wrapped:
+            return False
+        try:
+            dek = unwrap_dek_for_bearer(
+                salt,
+                wrapped,
+                row.get("seal_kdf_params"),
+                token,
+            )
+        except Exception as e:
+            logger.warning(
+                "tenant %s capability seal unwrap failed: %s", tenant_id, e,
+            )
+            return False
+        self.sealer.cache(tenant_id, dek)
+        return True
 
     def list_capabilities(self, tenant_id: str) -> list[dict]:
         """List non-revoked capability tokens for a tenant. Hashes only."""
@@ -861,9 +926,8 @@ class TenantRegistry(CreditCodeRegistryMixin, BillingRegistryMixin):
 
         Side effect: thaws the per-tenant DEK cache when possible. An
         ``hmk_`` bearer always thaws (and initializes the seal record on
-        first contact). An ``hmq_`` bearer cannot derive the owner-bound
-        KEK, so it leaves the seal sealed; downstream operations that
-        need DEK material will surface ``TenantSealed`` → HTTP 503.
+        first contact). An ``hmq_`` bearer thaws only when that capability
+        row carries a DEK wrap minted by the owner.
         """
         if not token:
             return None
@@ -904,6 +968,7 @@ class TenantRegistry(CreditCodeRegistryMixin, BillingRegistryMixin):
         token_hash = _hash_api_key(token)
         rows = self._control_db.execute(
             "SELECT c.tenant_id, c.kind, c.constraints, c.revoked_at, "
+            "       c.seal_salt, c.seal_wrapped_dek, c.seal_kdf_params, "
             "       t.suspended "
             "FROM _capability_tokens c "
             "JOIN _tenants t ON t.id = c.tenant_id "
@@ -930,10 +995,16 @@ class TenantRegistry(CreditCodeRegistryMixin, BillingRegistryMixin):
         hive = self.for_tenant(tenant_id)
         if hive is None:
             return None
-        # Capability tokens cannot thaw the seal: the owner-bound KEK
-        # is keyed by hmk_, not hmq_. Reads of encrypted data while the
-        # cache is cold will surface TenantSealed → 503.
+        # Capability tokens minted while the owner tenant is warm carry
+        # their own encrypted tenant-DEK wrap. That lets room invites keep
+        # working after a deploy without requiring a separate owner request.
         sealed = not self.sealer.is_unsealed(tenant_id)
+        if sealed:
+            sealed = not self._thaw_capability_dek(
+                tenant_id=tenant_id,
+                token=token,
+                row=row,
+            )
         return Caller(
             tenant_id=tenant_id,
             role="query",

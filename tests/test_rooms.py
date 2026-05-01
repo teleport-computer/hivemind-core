@@ -379,6 +379,62 @@ def test_room_query_agent_upload_sealed_mode_uses_room_endpoint(room_env):
     assert run["prompt"] is None
 
 
+def test_room_token_thaws_tenant_for_attestation_after_restart(room_env):
+    client, tenant, hive = room_env
+
+    warm = client.get("/v1/health", headers=_headers(tenant["api_key"]))
+    assert warm.status_code == 200, warm.text
+
+    scope_id = f"scope_after_warm_{secrets.token_hex(3)}"
+    hive.agent_store.create(
+        AgentConfig(
+            agent_id=scope_id,
+            name="tenant-sealed-scope",
+            description="fixture",
+            agent_type="scope",
+            image="hivemind-test:latest",
+            entrypoint=None,
+            memory_mb=256,
+            max_llm_calls=10,
+            max_tokens=10_000,
+            timeout_seconds=60,
+            inspection_mode="full",
+        )
+    )
+    hive.agent_store.save_files(
+        scope_id,
+        {"agent.py": "print('tenant encrypted scope')\n"},
+        inspection_mode="full",
+    )
+    rows = hive.db.execute(
+        "SELECT content, ciphertext, seal_mode "
+        "FROM _hivemind_agent_files WHERE agent_id = %s",
+        [scope_id],
+    )
+    assert rows[0]["content"] is None
+    assert rows[0]["ciphertext"]
+    assert rows[0]["seal_mode"] == "tenant"
+
+    out = _create_fixed_room(
+        client,
+        tenant["api_key"],
+        scope_agent_id=scope_id,
+    )
+
+    assert hive.sealer is not None
+    hive.sealer.evict(tenant["tenant_id"])
+    assert not hive.sealer.is_unsealed(tenant["tenant_id"])
+
+    resp = client.get(
+        f"/v1/rooms/{out['room_id']}/attest",
+        headers=_headers(out["token"]),
+    )
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["scope_agent"]["files_count"] == 1
+    assert hive.sealer.is_unsealed(tenant["tenant_id"])
+
+
 def test_inspectable_query_visibility_persists_room_prompt(room_env):
     client, tenant, hive = room_env
     out = _create_fixed_room(client, tenant["api_key"])

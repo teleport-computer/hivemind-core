@@ -79,6 +79,16 @@ def _thaw_active_profile_tenant(service: str) -> bool:
     return resp.status_code < 400
 
 
+def _room_sealed_hint(detail: str) -> str:
+    return (
+        f"{detail}\n\n"
+        "This room belongs to another tenant and that owner tenant is still "
+        "sealed after a server restart. Ask the room owner to run an hmk_ "
+        "request once, for example `hivemind room inspect \"$ROOM\"` with "
+        "the owner profile, then recreate the room and share the new invite."
+    )
+
+
 def _fetch_verified_room(
     service: str,
     room_id: str,
@@ -98,12 +108,12 @@ def _fetch_verified_room(
     )
     if resp.status_code >= 400:
         detail = _api_error(resp)
-        if (
+        room_tenant_sealed = (
             owner_pubkey_b64
             and resp.status_code == 503
             and "Tenant is sealed" in detail
-            and _thaw_active_profile_tenant(service)
-        ):
+        )
+        if room_tenant_sealed and _thaw_active_profile_tenant(service):
             resp = _hget(
                 f"{service}/v1/rooms/{room_id}/attest",
                 headers=headers,
@@ -111,6 +121,8 @@ def _fetch_verified_room(
             )
             detail = _api_error(resp) if resp.status_code >= 400 else ""
         if resp.status_code >= 400:
+            if room_tenant_sealed and "Tenant is sealed" in detail:
+                detail = _room_sealed_hint(detail)
             raise click.ClickException(f"{resp.status_code}: {detail}")
     data = resp.json()
     envelope = ((data.get("room") or {}).get("envelope") or {})

@@ -54,6 +54,33 @@ def load_seal_record(db) -> tuple[bytes, bytes, KdfParams] | None:
     )
 
 
+def wrap_dek_for_bearer(dek: bytes, bearer: str) -> tuple[str, str, str]:
+    """Wrap an existing tenant DEK to another valid bearer token."""
+    salt = new_salt()
+    params = KdfParams()
+    kek = derive_kek(bearer, salt, params)
+    try:
+        wrapped = wrap_dek(kek, dek)
+    finally:
+        del kek
+    return _b64e(salt), _b64e(wrapped), params.to_json()
+
+
+def unwrap_dek_for_bearer(
+    salt_b64: str,
+    wrapped_dek_b64: str,
+    kdf_params_json: str | None,
+    bearer: str,
+) -> bytes:
+    """Unwrap a tenant DEK previously wrapped to ``bearer``."""
+    params = KdfParams.from_json(kdf_params_json)
+    kek = derive_kek(bearer, _b64d(salt_b64), params)
+    try:
+        return unwrap_dek(kek, _b64d(wrapped_dek_b64))
+    finally:
+        del kek
+
+
 def save_seal_record(
     db, salt: bytes, wrapped_dek: bytes, params: KdfParams,
 ) -> None:

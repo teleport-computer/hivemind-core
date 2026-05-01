@@ -11,6 +11,22 @@ the room-approved output leaves the enclave.
 Requires Python 3.11+, `uv`, Docker for agent builds/runs, and Postgres for
 local development.
 
+For regular CLI users, install from the published Git source into uv's isolated
+tool environment:
+
+```bash
+uv tool install --upgrade git+https://github.com/Account-Link/hivemind-core.git
+hivemind --version
+```
+
+To upgrade later:
+
+```bash
+uv tool upgrade hivemind-core
+```
+
+For repo development, use an editable install from the checkout:
+
 ```bash
 uv tool install --editable .
 hivemind --help

@@ -124,8 +124,8 @@ CVM update:
 
 - encrypted room data remains in Postgres;
 - sealed query-agent source remains encrypted;
-- the service cannot decrypt either one until an owner or invite holder opens
-  the room again;
+- invite tokens minted by the owner carry encrypted DEK wraps, so an invite
+  holder can reopen the room after a restart without a separate owner request;
 - that participant should verify live attestation and the room trust policy
   before presenting the invite token to the new process.
 

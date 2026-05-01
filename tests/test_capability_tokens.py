@@ -316,9 +316,8 @@ def test_resolve_any_cold_cache_after_eviction(registry):
     """Simulates a CVM restart wiping the in-process DEK cache.
 
     After eviction the owner (hmk_) re-thaws on next contact. Capability
-    tokens (hmq_) cannot thaw — ``resolve_any`` returns a ``Caller`` with
-    ``sealed=True`` until the owner re-thaws. Downstream operations that
-    touch ciphertext raise ``TenantSealed`` → HTTP 503.
+    tokens (hmq_) minted before owner thaw do not get upgraded in place.
+    Recreate the room to mint a wrapped invite.
     """
     t = registry.provision("seal_cold")
     registry._test_created_dbs.append(t["db_name"])
@@ -331,7 +330,8 @@ def test_resolve_any_cold_cache_after_eviction(registry):
     assert owner_caller is not None and owner_caller.sealed is False
     assert registry.sealer.is_unsealed(t["tenant_id"])
 
-    # Capability resolves while warm — sealed=False.
+    # Capability resolves while warm because the owner warmed the tenant,
+    # but this intentionally does not mutate the old capability row.
     cap_caller = registry.resolve_any(out["token"])
     assert cap_caller is not None and cap_caller.sealed is False
 
@@ -339,15 +339,15 @@ def test_resolve_any_cold_cache_after_eviction(registry):
     registry.sealer.evict(t["tenant_id"])
     assert not registry.sealer.is_unsealed(t["tenant_id"])
 
-    # Capability token alone cannot thaw → caller carries sealed=True.
+    # The old unwrapped capability token cannot thaw the tenant by itself.
     cap_cold = registry.resolve_any(out["token"])
     assert cap_cold is not None
     assert cap_cold.role == "query"
     assert cap_cold.sealed is True
-    # Cache stays cold — capability resolution must not silently warm it.
     assert not registry.sealer.is_unsealed(t["tenant_id"])
 
     # Owner contact re-thaws via the persisted wrapped-DEK record.
+    registry.sealer.evict(t["tenant_id"])
     owner_warm = registry.resolve_any(t["api_key"])
     assert owner_warm is not None and owner_warm.sealed is False
     assert registry.sealer.is_unsealed(t["tenant_id"])
@@ -355,6 +355,51 @@ def test_resolve_any_cold_cache_after_eviction(registry):
     # Capability now sees the warm cache.
     cap_warm = registry.resolve_any(out["token"])
     assert cap_warm is not None and cap_warm.sealed is False
+
+
+def test_unwrapped_capability_stays_unwrapped_after_owner_warms(registry):
+    t = registry.provision("seal_unwrapped")
+    registry._test_created_dbs.append(t["db_name"])
+    out = registry.mint_capability(
+        t["tenant_id"], "query", "", {"scope_agent_id": "s"},
+    )
+
+    # The token was minted before the owner ever initialized the seal,
+    # so there is no DEK wrap for it yet.
+    cold = registry.resolve_any(out["token"])
+    assert cold is not None
+    assert cold.sealed is True
+    assert not registry.sealer.is_unsealed(t["tenant_id"])
+
+    owner = registry.resolve_any(t["api_key"])
+    assert owner is not None and owner.sealed is False
+    warm = registry.resolve_any(out["token"])
+    assert warm is not None and warm.sealed is False
+    registry.sealer.evict(t["tenant_id"])
+
+    still_unwrapped = registry.resolve_any(out["token"])
+    assert still_unwrapped is not None
+    assert still_unwrapped.sealed is True
+    assert not registry.sealer.is_unsealed(t["tenant_id"])
+
+
+def test_capability_minted_while_owner_warm_thaws_after_eviction(registry):
+    t = registry.provision("seal_wrapped")
+    registry._test_created_dbs.append(t["db_name"])
+
+    owner = registry.resolve_any(t["api_key"])
+    assert owner is not None and owner.sealed is False
+
+    out = registry.mint_capability(
+        t["tenant_id"], "query", "", {"scope_agent_id": "s"},
+    )
+    registry.sealer.evict(t["tenant_id"])
+
+    cap = registry.resolve_any(out["token"])
+    assert cap is not None
+    assert cap.role == "query"
+    assert cap.sealed is False
+    assert registry.sealer.is_unsealed(t["tenant_id"])
 
 
 def test_resolve_any_wrong_owner_after_eviction_stays_sealed(registry):
