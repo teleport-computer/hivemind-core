@@ -7,7 +7,7 @@ import pytest
 import hivemind.pipeline as pipeline_module
 from hivemind.config import Settings
 from hivemind.db import Database
-from hivemind.models import IndexRequest, QueryRequest, StoreRequest
+from hivemind.models import QueryRequest, StoreRequest
 from hivemind.pipeline import Pipeline
 from hivemind.sandbox.agents import AgentStore
 from hivemind.sandbox.models import AgentConfig
@@ -321,136 +321,6 @@ class TestQueryRequestModel:
         assert req.mediator_agent_id == "med1"
 
 
-class TestRunIndex:
-    @pytest.mark.asyncio
-    async def test_index_requires_agent(self, pg_db):
-        pipeline = _make_pipeline(pg_db)
-        req = IndexRequest(data="Some document text")
-        with pytest.raises(ValueError, match="No index agent"):
-            await pipeline.run_index(req)
-
-    @pytest.mark.asyncio
-    async def test_index_agent_not_found(self, pg_db):
-        pipeline = _make_pipeline(pg_db)
-        req = IndexRequest(data="Some document text", index_agent_id="nonexistent")
-        with pytest.raises(ValueError, match="not found"):
-            await pipeline.run_index(req)
-
-    @pytest.mark.asyncio
-    async def test_index_basic(self, pg_db, monkeypatch):
-        """Index pipeline runs agent and parses JSON output."""
-        pipeline = _make_pipeline(pg_db)
-        pipeline.agent_store.create(AgentConfig(
-            agent_id="idx1",
-            name="Index Agent",
-            image="img:index",
-        ))
-
-        expected_output = json.dumps({
-            "index_text": "Title: Test Doc\nSummary: A test document.",
-            "metadata": {"title": "Test Doc", "tags": ["test"]},
-        })
-
-        class FakeBackend:
-            def __init__(self, *args, **kwargs):
-                pass
-
-            async def run(self, **kwargs):
-                return expected_output, {"total_tokens": 50}
-
-        monkeypatch.setattr(pipeline_module, "SandboxBackend", FakeBackend)
-
-        req = IndexRequest(
-            data="This is a test document.",
-            metadata={"source": "test"},
-            index_agent_id="idx1",
-        )
-        resp = await pipeline.run_index(req)
-
-        assert resp.index_text == "Title: Test Doc\nSummary: A test document."
-        assert resp.metadata == {"title": "Test Doc", "tags": ["test"]}
-        assert resp.usage["total_tokens"] == 50
-
-    @pytest.mark.asyncio
-    async def test_index_invalid_output(self, pg_db, monkeypatch):
-        """Index agent returning invalid JSON should raise ValueError."""
-        pipeline = _make_pipeline(pg_db)
-        pipeline.agent_store.create(AgentConfig(
-            agent_id="idx2",
-            name="Index Agent",
-            image="img:index",
-        ))
-
-        class FakeBackend:
-            def __init__(self, *args, **kwargs):
-                pass
-
-            async def run(self, **kwargs):
-                return "not valid json", {"total_tokens": 10}
-
-        monkeypatch.setattr(pipeline_module, "SandboxBackend", FakeBackend)
-
-        req = IndexRequest(data="doc text", index_agent_id="idx2")
-        with pytest.raises(ValueError, match="Index agent failed"):
-            await pipeline.run_index(req)
-
-    @pytest.mark.asyncio
-    async def test_index_missing_index_text(self, pg_db, monkeypatch):
-        """Index agent returning JSON without index_text should raise ValueError."""
-        pipeline = _make_pipeline(pg_db)
-        pipeline.agent_store.create(AgentConfig(
-            agent_id="idx3",
-            name="Index Agent",
-            image="img:index",
-        ))
-
-        class FakeBackend:
-            def __init__(self, *args, **kwargs):
-                pass
-
-            async def run(self, **kwargs):
-                return json.dumps({"metadata": {}}), {"total_tokens": 10}
-
-        monkeypatch.setattr(pipeline_module, "SandboxBackend", FakeBackend)
-
-        req = IndexRequest(data="doc text", index_agent_id="idx3")
-        with pytest.raises(ValueError, match="index_text must be a non-empty string"):
-            await pipeline.run_index(req)
-
-    @pytest.mark.asyncio
-    async def test_index_uses_default_agent(self, pg_db, monkeypatch):
-        """Index pipeline uses default agent when none specified."""
-        settings = Settings(
-            database_url="unused",
-            llm_api_key="test",
-            default_index_agent="default-idx",
-        )
-        pipeline = Pipeline(settings, pg_db, AgentStore(pg_db))
-        pipeline.agent_store.create(AgentConfig(
-            agent_id="default-idx",
-            name="Default Index",
-            image="img:index",
-        ))
-
-        expected_output = json.dumps({
-            "index_text": "indexed",
-            "metadata": {},
-        })
-
-        class FakeBackend:
-            def __init__(self, *args, **kwargs):
-                pass
-
-            async def run(self, **kwargs):
-                return expected_output, {"total_tokens": 5}
-
-        monkeypatch.setattr(pipeline_module, "SandboxBackend", FakeBackend)
-
-        req = IndexRequest(data="doc text")
-        resp = await pipeline.run_index(req)
-        assert resp.index_text == "indexed"
-
-
 class TestProviderRouting:
     """Pipeline.``_client_for`` decides which AsyncOpenAI client a request uses.
 
@@ -508,20 +378,6 @@ class TestProviderRouting:
                 await pipeline.run_query(req)
             pipeline._run_scope_agent.assert_not_awaited()
             pipeline._run_query_agent.assert_not_awaited()
-
-        import asyncio
-        asyncio.run(_run())
-
-    def test_run_index_eager_validates_unknown_provider(self):
-        pipeline = self._bare_pipeline()
-        pipeline._run_index_agent = AsyncMock()
-
-        req = IndexRequest(data="x", index_agent_id="i1", provider="bogus")
-
-        async def _run():
-            with pytest.raises(ValueError, match="Unknown provider"):
-                await pipeline.run_index(req)
-            pipeline._run_index_agent.assert_not_awaited()
 
         import asyncio
         asyncio.run(_run())
@@ -742,11 +598,3 @@ class TestQueryRequestProvider:
         assert req.provider == "tinfoil"
 
 
-class TestIndexRequestProvider:
-    def test_provider_field_default_none(self):
-        req = IndexRequest(data="x")
-        assert req.provider is None
-
-    def test_provider_field_round_trip(self):
-        req = IndexRequest(data="x", provider="tinfoil")
-        assert req.provider == "tinfoil"

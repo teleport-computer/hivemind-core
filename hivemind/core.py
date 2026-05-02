@@ -137,12 +137,6 @@ class Hivemind:
 
         specs = (
             (
-                "index",
-                "default_index_agent",
-                "default_index_image",
-                "default-index",
-            ),
-            (
                 "scope",
                 "default_scope_agent",
                 "default_scope_image",

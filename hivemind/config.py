@@ -33,21 +33,19 @@ class Settings(BaseSettings):
 
     # Optional secondary provider. When ``tinfoil_api_key`` is set, callers
     # can flip the upstream LLM provider per-call by sending
-    # ``provider="tinfoil"`` on a QueryRequest/IndexRequest (or passing
+    # ``provider="tinfoil"`` on a QueryRequest (or passing
     # ``--provider tinfoil`` on the CLI). Tinfoil is OpenAI-compatible, so
     # the same SDK is reused with a different ``base_url`` + ``api_key``.
     tinfoil_api_key: str = ""
     tinfoil_base_url: str = "https://inference.tinfoil.sh/v1"
 
     # Per-role model overrides. Empty falls back to ``llm_model``. Set via
-    # HIVEMIND_SCOPE_MODEL / HIVEMIND_QUERY_MODEL / HIVEMIND_MEDIATOR_MODEL /
-    # HIVEMIND_INDEX_MODEL. Empty means every stage uses llm_model. Operators
-    # can still pin stronger or more conservative models per role when a room
-    # needs them.
+    # HIVEMIND_SCOPE_MODEL / HIVEMIND_QUERY_MODEL / HIVEMIND_MEDIATOR_MODEL.
+    # Empty means every stage uses llm_model. Operators can still pin stronger
+    # or more conservative models per role when a room needs them.
     scope_model: str = ""
     query_model: str = ""
     mediator_model: str = ""
-    index_model: str = ""
 
     # Docker sandbox
     bridge_host: str = "0.0.0.0"
@@ -113,11 +111,9 @@ class Settings(BaseSettings):
 
     # Default agents (Docker images) — empty = not available
     autoload_default_agents: bool = True
-    default_index_agent: str = ""
     default_query_agent: str = ""
     default_scope_agent: str = ""
     default_mediator_agent: str = ""
-    default_index_image: str = ""
     default_query_image: str = ""
     default_scope_image: str = ""
     default_mediator_image: str = ""

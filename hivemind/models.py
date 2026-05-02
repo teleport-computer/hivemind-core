@@ -55,26 +55,6 @@ class QueryResponse(BaseModel):
     usage: dict | None = None
 
 
-# ── Index ──
-
-
-class IndexRequest(BaseModel):
-    data: str = Field(..., min_length=1)
-    metadata: dict = Field(default_factory=dict)
-    index_agent_id: str | None = None
-    max_tokens: int | None = Field(default=None, ge=1)
-    max_llm_calls: int | None = Field(default=None, ge=1)
-    timeout_seconds: int | None = Field(default=None, ge=1)
-    model: str | None = None
-    provider: str | None = None
-
-
-class IndexResponse(BaseModel):
-    index_text: str
-    metadata: dict
-    usage: dict | None = None
-
-
 # ── Health ──
 
 

@@ -40,7 +40,6 @@ def _redact_run_payload_for_caller(caller: Caller, run: dict) -> dict:
         return run
     redacted = dict(run)
     redacted["output"] = None
-    redacted["index_output"] = None
     redacted["error"] = None
     redacted["artifacts"] = []
     redacted["payload_redacted"] = True

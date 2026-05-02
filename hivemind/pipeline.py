@@ -14,8 +14,6 @@ from openai import AsyncOpenAI
 from .config import Settings
 from .db import Database
 from .models import (
-    IndexRequest,
-    IndexResponse,
     QueryRequest,
     QueryResponse,
     StoreRequest,
@@ -147,7 +145,6 @@ class Pipeline:
             "scope": (settings.scope_model or settings.llm_model),
             "query": (settings.query_model or settings.llm_model),
             "mediator": (settings.mediator_model or settings.llm_model),
-            "index": (settings.index_model or settings.llm_model),
         }
         self._sandbox_settings = build_sandbox_settings(settings)
 
@@ -772,93 +769,6 @@ class Pipeline:
         )
         return output, usage
 
-    # -- Index pipeline --
-
-    async def run_index(self, req: IndexRequest) -> IndexResponse:
-        """Run the index pipeline: index agent processes document data."""
-        global_max = self._sandbox_settings.global_max_tokens
-        effective_max = min(req.max_tokens or global_max, global_max)
-        # Eager validation so an unknown provider fails fast.
-        self._client_for(req.provider)
-
-        index_text, metadata, usage = await self._run_index_agent(
-            req=req,
-            max_tokens=effective_max,
-            max_calls=req.max_llm_calls,
-            timeout_seconds=req.timeout_seconds,
-            model=req.model,
-            provider=req.provider,
-        )
-
-        usage["max_tokens"] = effective_max
-        return IndexResponse(index_text=index_text, metadata=metadata, usage=usage)
-
-    async def _run_index_agent(
-        self,
-        req: IndexRequest,
-        max_tokens: int | None = None,
-        max_calls: int | None = None,
-        timeout_seconds: int | None = None,
-        model: str | None = None,
-        provider: str | None = None,
-    ) -> tuple[str, dict, dict]:
-        """Run index agent with FULL_READWRITE access. Returns (index_text, metadata, usage)."""
-        index_agent_id = req.index_agent_id or self.settings.default_index_agent
-        if not index_agent_id:
-            raise ValueError(
-                "No index agent specified and no default configured"
-            )
-
-        agent_config = await asyncio.to_thread(
-            self.agent_store.get, index_agent_id
-        )
-        if agent_config is None:
-            raise ValueError(f"Index agent '{index_agent_id}' not found")
-
-        tools = build_sql_tools(self.db, AccessLevel.FULL_READWRITE)
-        tool_handlers = {t.name: t.handler for t in tools}
-
-        async def on_tool_call(name: str, args: dict) -> str:
-            if name not in tool_handlers:
-                return f"Error: unknown tool '{name}'. Available: {', '.join(tool_handlers)}"
-            return await asyncio.to_thread(tool_handlers[name], **args)
-
-        env = {
-            "DOCUMENT_DATA": req.data,
-            "DOCUMENT_METADATA": json.dumps(req.metadata),
-        }
-
-        raw, usage = await self._run_agent(
-            agent_config=agent_config,
-            role="index",
-            env=env,
-            tools=tools,
-            on_tool_call=on_tool_call,
-            max_calls=max_calls,
-            max_tokens=max_tokens,
-            timeout_seconds=timeout_seconds,
-            return_budget_summary=True,
-            model=model,
-            provider=provider,
-        )
-
-        try:
-            data = json.loads(raw.strip())
-            index_text = data.get("index_text")
-            metadata = data.get("metadata")
-            if not isinstance(index_text, str) or index_text == "":
-                raise ValueError("index_text must be a non-empty string")
-            if not isinstance(metadata, dict):
-                raise ValueError("metadata must be a dict")
-            return index_text, metadata, usage
-        except (json.JSONDecodeError, TypeError) as e:
-            logger.error(
-                "Index agent output not valid JSON (%s, %d chars)", e, len(raw)
-            )
-            raise ValueError(f"Index agent failed: {e}")
-        except ValueError:
-            raise
-
     # -- Phase 5: signed run attestation --
 
     def _sha256_hex(self, value: str) -> str:
@@ -1318,82 +1228,3 @@ class Pipeline:
             except Exception:
                 logger.warning("Failed to update run %s to failed", run_id)
 
-    # -- Tracked index agent run (background) --
-
-    async def run_index_tracked(
-        self,
-        index_agent_id: str,
-        run_id: str,
-        run_store,
-        document_data: str,
-        document_metadata: str,
-        max_tokens: int | None = None,
-        max_calls: int | None = None,
-        timeout_seconds: int | None = None,
-        model: str | None = None,
-        provider: str | None = None,
-        payer_tenant_id: str | None = None,
-        payer_token_id: str | None = None,
-        billable_role: str = "index",
-        billing_provider: str | None = None,
-        billing_model: str | None = None,
-        billing_hold_micro_usd: int = 0,
-    ) -> None:
-        """Run index agent with tracking. Updates run_store through lifecycle."""
-        usage_total = _new_usage_summary(max_tokens or 0)
-        try:
-            index_t0 = time.time()
-            await asyncio.to_thread(
-                run_store.update_stage, run_id, "index", started_at=index_t0,
-            )
-
-            req = IndexRequest(
-                data=document_data,
-                metadata=json.loads(document_metadata) if document_metadata else {},
-                index_agent_id=index_agent_id,
-                max_tokens=max_tokens,
-                max_llm_calls=max_calls,
-                timeout_seconds=timeout_seconds,
-                model=model,
-                provider=provider,
-            )
-            # Eager validation so an unknown provider fails before container start.
-            self._client_for(provider)
-            index_model = self._model_for("index", model)
-            index_text, metadata, usage = await self._run_index_agent(
-                req=req, max_tokens=max_tokens,
-                max_calls=max_calls, timeout_seconds=timeout_seconds,
-                model=model, provider=provider,
-            )
-            _add_stage_usage(
-                usage_total,
-                "index",
-                usage,
-                provider=provider,
-                model=index_model,
-            )
-
-            await asyncio.to_thread(
-                run_store.update_stage, run_id, "index", ended_at=time.time(),
-            )
-            await self._record_run_usage(
-                run_store,
-                run_id,
-                usage_total,
-                payer_tenant_id=payer_tenant_id,
-                payer_token_id=payer_token_id,
-                billable_role=billable_role,
-                billing_hold_micro_usd=billing_hold_micro_usd,
-                default_provider=billing_provider or provider,
-                default_model=billing_model or model or self.llm_model,
-            )
-            await asyncio.to_thread(
-                run_store.update_index_output, run_id,
-                json.dumps({"index_text": index_text, "metadata": metadata})[:10000],
-            )
-        except Exception as e:
-            logger.error("Tracked index run %s failed: %s", run_id, e)
-            await asyncio.to_thread(
-                run_store.update_stage, run_id, "index", ended_at=time.time(),
-            )
-            raise

@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Callable
-from uuid import uuid4
 
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.responses import Response
@@ -13,8 +12,6 @@ from fastapi.responses import Response
 from .agent_helpers import image_digest
 from ..config import Settings
 from ..core import Hivemind
-from ..sandbox.models import AgentConfig, AgentCreateRequest
-from ..sandbox.settings import build_sandbox_settings
 from ..tenants import Caller
 
 logger = logging.getLogger(__name__)
@@ -63,59 +60,6 @@ def register_agent_registry_routes(
     get_tenant_hive: Callable,
 ) -> None:
     """Register room-agent read, delete, file, and attest endpoints."""
-
-    @app.post("/v1/_internal/agents/register-image", include_in_schema=False)
-    async def register_agent(
-        req: AgentCreateRequest,
-        hm: Hivemind = Depends(get_tenant_hive),
-    ):
-        from ..sandbox.backend import _create_runner
-
-        sandbox_settings = build_sandbox_settings(settings)
-        runner = _create_runner(sandbox_settings)
-        try:
-            if not runner.image_exists(req.image):
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Image not found: {req.image}",
-                )
-        except HTTPException:
-            raise
-        except Exception as e:
-            logger.warning("Image preflight failed for %s: %s", req.image, e)
-            raise HTTPException(
-                status_code=503,
-                detail="Container backend unavailable for image validation",
-            )
-
-        agent_id = uuid4().hex[:12]
-        config = AgentConfig(
-            agent_id=agent_id,
-            name=req.name,
-            description=req.description,
-            agent_type=req.agent_type,
-            image=req.image,
-            entrypoint=req.entrypoint,
-            memory_mb=min(req.memory_mb, settings.container_memory_mb),
-            max_llm_calls=req.max_llm_calls,
-            max_tokens=req.max_tokens,
-            timeout_seconds=req.timeout_seconds,
-        )
-        await asyncio.to_thread(hm.agent_store.create, config)
-
-        file_count = 0
-        try:
-            files = await runner.extract_image_files_async(config.image)
-            await asyncio.to_thread(hm.agent_store.save_files, agent_id, files)
-            file_count = len(files)
-        except Exception as e:
-            logger.warning("Failed to extract files from %s: %s", config.image, e)
-
-        return {
-            "agent_id": agent_id,
-            "name": req.name,
-            "files_extracted": file_count,
-        }
 
     @app.get("/v1/room-agents")
     async def list_agents(
@@ -207,25 +151,3 @@ def register_agent_registry_routes(
             raise HTTPException(404, "Agent not found")
         return await build_agent_attestation(caller, agent_id)
 
-    @app.get("/v1/_internal/scope-attest", include_in_schema=False)
-    async def scope_attest(
-        scope_agent_id: str | None = None,
-        caller: Caller = Depends(requires_role("owner", "query")),
-    ):
-        if caller.role == "query":
-            scope_id = caller.constraints.get("scope_agent_id") or ""
-            if not scope_id:
-                raise HTTPException(
-                    500, "query token missing scope_agent_id constraint"
-                )
-        else:
-            scope_id = (scope_agent_id or "").strip()
-            if not scope_id:
-                raise HTTPException(
-                    400,
-                    "owner must pass ?scope_agent_id=… (no token binding)",
-                )
-        if not query_token_visible_agent(caller, scope_id):
-            raise HTTPException(404, "Agent not found")
-        body = await build_agent_attestation(caller, scope_id)
-        return {"scope_agent_id": scope_id, **body}

@@ -32,8 +32,6 @@ from .api.tenant_owner import register_tenant_owner_routes
 from .config import Settings
 from .core import Hivemind
 from .models import (
-    IndexRequest,
-    IndexResponse,
     QueryRequest,
     StoreRequest,
     StoreResponse,
@@ -576,47 +574,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         requires_role,
         _submit_query_run_for_request,
     )
-
-    @app.post("/v1/_internal/query/run/submit", include_in_schema=False)
-    async def submit_query_run(
-        req: QueryRequest,
-        request: Request,
-        caller: Caller = Depends(requires_role("owner", "query")),
-    ):
-        """Submit a query for tracked async processing.
-
-        Returns a ``run_id``; the run executes via
-        ``run_query_agent_tracked`` so the completed row carries a
-        signed attestation envelope.
-        """
-        room: dict | None = None
-        room_id = (req.room_id or "").strip()
-        if caller.role == "query" and caller.constraints.get("room_id"):
-            room = await _load_room_for_caller(caller, room_id)
-            req = _apply_room_to_query_request(req, room)
-        elif room_id:
-            room = await _load_room_for_caller(caller, room_id)
-            req = _apply_room_to_query_request(req, room)
-        else:
-            req = _force_scope_for_query_token(req, caller)
-        return await _submit_query_run_for_request(
-            req,
-            caller,
-            room,
-            request=request,
-            bearer=_bearer(request),
-        )
-
-    @app.post(
-        "/v1/_internal/index",
-        response_model=IndexResponse,
-        include_in_schema=False,
-    )
-    async def index(req: IndexRequest, hm: Hivemind = Depends(get_tenant_hive)):
-        try:
-            return await hm.pipeline.run_index(req)
-        except ValueError as e:
-            raise HTTPException(status_code=400, detail=str(e))
 
     register_agent_upload_routes(
         app,

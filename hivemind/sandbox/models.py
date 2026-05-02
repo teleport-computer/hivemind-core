@@ -3,7 +3,7 @@ import re
 from pydantic import BaseModel, Field, field_validator
 
 
-VALID_AGENT_TYPES = {"index", "scope", "query", "mediator"}
+VALID_AGENT_TYPES = {"scope", "query", "mediator"}
 MAX_ARTIFACT_FILENAME_LENGTH = 128
 MAX_ARTIFACT_BYTES = 25 * 1024 * 1024
 _ARTIFACT_FILENAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
@@ -70,7 +70,7 @@ class AgentConfig(BaseModel):
     agent_id: str
     name: str
     description: str = ""
-    agent_type: str = "query"  # index | scope | query | mediator
+    agent_type: str = "query"  # scope | query | mediator
     image: str  # Docker image reference (e.g. "myorg/my-agent:v1")
     entrypoint: str | None = None  # Override container CMD
     memory_mb: int = Field(default=256, ge=16)  # Container memory limit
@@ -145,20 +145,6 @@ class BridgeToolResponse(BaseModel):
 
     result: str
     error: str | None = None
-
-
-class AgentCreateRequest(BaseModel):
-    """Internal request body for registering an already-built Docker image."""
-
-    name: str
-    image: str  # Docker image reference (required)
-    description: str = ""
-    agent_type: str = "query"  # index | scope | query | mediator
-    entrypoint: str | None = None
-    memory_mb: int = Field(default=256, ge=16)
-    max_llm_calls: int = Field(default=20, ge=1)
-    max_tokens: int = Field(default=100_000, ge=1)
-    timeout_seconds: int = Field(default=120, ge=1)
 
 
 # ── Simulation models (scope agents only) ──

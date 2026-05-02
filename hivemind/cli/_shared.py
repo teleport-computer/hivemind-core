@@ -150,7 +150,7 @@ def _query_tracked(
     fetch: bool = False,
     fetch_headers: dict | None = None,
     poll_seconds: int = 600,
-    submit_path: str = "/v1/_internal/query/run/submit",
+    submit_path: str,
 ) -> None:
     """Submit a query, poll the run row, verify the Phase 5 envelope.
 
@@ -289,7 +289,6 @@ def _emit_run_result(
 ) -> None:
     # Server returns these as top-level columns from the runs table.
     output = data.get("output") or ""
-    index_output = data.get("index_output") or ""
     mediated = data.get("mediated")  # reserved for future mediator runs
     artifacts = data.get("artifacts", []) or []
 
@@ -401,10 +400,6 @@ def _emit_run_result(
     click.echo("")
     click.echo("── Output ──")
     click.echo(output or "(empty)")
-    if index_output:
-        click.echo("")
-        click.echo("── Index agent output ──")
-        click.echo(index_output)
     if mediated:
         click.echo(f"\n(mediated: {mediated})", err=True)
     if artifact_urls:

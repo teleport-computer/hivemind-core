@@ -18,8 +18,7 @@ _COLUMNS = (
     "scope_started_at, scope_ended_at, "
     "query_started_at, query_ended_at, "
     "mediator_started_at, mediator_ended_at, "
-    "index_started_at, index_ended_at, index_output, "
-    "room_id, room_manifest_hash, scope_agent_id, index_agent_id, "
+    "room_id, room_manifest_hash, scope_agent_id, "
     "prompt, output, attestation, issuer_token_id, "
     "payer_tenant_id, payer_token_id, billable_role, "
     "billing_provider, billing_model, billing_hold_micro_usd, "
@@ -40,7 +39,6 @@ class RunStore:
         agent_id: str,
         *,
         scope_agent_id: str | None = None,
-        index_agent_id: str | None = None,
         issuer_token_id: str | None = None,
         room_id: str | None = None,
         room_manifest_hash: str | None = None,
@@ -66,20 +64,19 @@ class RunStore:
         self.db.execute_commit(
             "INSERT INTO _hivemind_query_runs "
             "(run_id, agent_id, room_id, room_manifest_hash, "
-            "scope_agent_id, index_agent_id, issuer_token_id, "
+            "scope_agent_id, issuer_token_id, "
             "prompt, payer_tenant_id, payer_token_id, billable_role, "
             "billing_provider, billing_model, billing_hold_micro_usd, "
             "billing_status, output_visibility, artifacts_enabled, status, "
             "created_at, updated_at) "
             "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, "
-            "%s, %s, %s, %s, %s, %s, %s)",
+            "%s, %s, %s, %s, %s, %s)",
             [
                 run_id,
                 agent_id,
                 room_id,
                 room_manifest_hash,
                 scope_agent_id,
-                index_agent_id,
                 issuer_token_id,
                 prompt,
                 payer_tenant_id,
@@ -102,7 +99,6 @@ class RunStore:
             "room_id": room_id,
             "room_manifest_hash": room_manifest_hash,
             "scope_agent_id": scope_agent_id,
-            "index_agent_id": index_agent_id,
             "issuer_token_id": issuer_token_id,
             "prompt": prompt,
             "payer_tenant_id": payer_tenant_id,
@@ -176,10 +172,9 @@ class RunStore:
         cutoff = time.time() - ttl_seconds
         return self.db.execute_commit(
             "UPDATE _hivemind_query_runs "
-            "SET output = NULL, error = NULL, index_output = NULL "
+            "SET output = NULL, error = NULL "
             "WHERE updated_at < %s "
-            "AND (output IS NOT NULL OR error IS NOT NULL "
-            "OR index_output IS NOT NULL)",
+            "AND (output IS NOT NULL OR error IS NOT NULL)",
             [cutoff],
         )
 
@@ -260,7 +255,7 @@ class RunStore:
         ended_at: float | None = None,
     ) -> bool:
         """Update timing for a pipeline stage (scope/query/mediator)."""
-        if stage not in ("build", "scope", "query", "mediator", "index"):
+        if stage not in ("build", "scope", "query", "mediator"):
             raise ValueError(f"Invalid stage: {stage}")
         now = time.time()
         sets = ["updated_at = %s"]
@@ -276,16 +271,6 @@ class RunStore:
             f"UPDATE _hivemind_query_runs SET {', '.join(sets)} "
             f"WHERE run_id = %s",
             params,
-        )
-        return rowcount > 0
-
-    def update_index_output(self, run_id: str, index_output: str) -> bool:
-        """Store index agent output text."""
-        now = time.time()
-        rowcount = self.db.execute_commit(
-            "UPDATE _hivemind_query_runs "
-            "SET index_output = %s, updated_at = %s WHERE run_id = %s",
-            [index_output, now, run_id],
         )
         return rowcount > 0
 
