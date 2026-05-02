@@ -4,7 +4,7 @@ from importlib.metadata import PackageNotFoundError, version as package_version
 
 
 _PACKAGE_NAME = "hmctl"
-_FALLBACK_VERSION = "0.3.5"
+_FALLBACK_VERSION = "0.3.6"
 
 
 def resolve_version() -> str:

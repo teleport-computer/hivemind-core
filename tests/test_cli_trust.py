@@ -319,7 +319,9 @@ def test_doctor_checks_profile_billing_and_room(_sandbox, monkeypatch):
     result = CliRunner().invoke(_cli_mod.cli, ["--yes", "doctor", _ROOM_LINK])
 
     assert result.exit_code == 0, result.output
+    assert "OK   cli - version" in result.output
     assert "OK   profile" in result.output
+    assert "WARN version sync" in result.output
     assert "OK   billing - balance $0.500000" in result.output
     assert "OK   room - room_test manifest verified" in result.output
 
@@ -378,6 +380,100 @@ def test_room_list_and_revoke_commands(_sandbox, monkeypatch):
     assert revoked.exit_code == 0, revoked.output
     assert calls["url"] == "https://cvm.example/v1/rooms/room_keep"
     assert calls["headers"]["Authorization"] == "Bearer test-key"
+
+
+def test_room_prune_dry_run_and_revoke_keeps_requested_room(_sandbox, monkeypatch):
+    _stub_attestation(
+        monkeypatch,
+        {"ready": True, "attestation": {"compose_hash": "0xabc"}},
+    )
+    deleted: list[str] = []
+
+    def fake_get(url, **kwargs):
+        assert url == "https://cvm.example/v1/rooms"
+        return type(
+            "Resp",
+            (),
+            {
+                "status_code": 200,
+                "json": lambda self: {
+                    "rooms": [
+                        {
+                            "room_id": "room_keep",
+                            "name": "watch-history-keep",
+                            "query_mode": "fixed",
+                            "revoked_at": None,
+                        },
+                        {
+                            "room_id": "room_old",
+                            "name": "watch-history-old",
+                            "query_mode": "fixed",
+                            "revoked_at": None,
+                        },
+                        {
+                            "room_id": "room_other",
+                            "name": "unrelated",
+                            "query_mode": "fixed",
+                            "revoked_at": None,
+                        },
+                        {
+                            "room_id": "room_revoked",
+                            "name": "watch-history-revoked",
+                            "query_mode": "fixed",
+                            "revoked_at": 1.0,
+                        },
+                    ]
+                },
+            },
+        )()
+
+    def fake_delete(url, **kwargs):
+        deleted.append(url.rsplit("/", 1)[-1])
+        return type(
+            "Resp",
+            (),
+            {
+                "status_code": 200,
+                "json": lambda self: {"status": "ok", "room_id": deleted[-1]},
+            },
+        )()
+
+    monkeypatch.setattr(_cli_mod, "_hget", fake_get)
+    monkeypatch.setattr(_cli_mod, "_hdelete", fake_delete)
+
+    dry_run = CliRunner().invoke(
+        _cli_mod.cli,
+        [
+            "--yes",
+            "room",
+            "prune",
+            "--name-prefix",
+            "watch-history-",
+            "--keep",
+            "room_keep",
+        ],
+    )
+    assert dry_run.exit_code == 0, dry_run.output
+    assert "Would revoke: 1" in dry_run.output
+    assert "room_old" in dry_run.output
+    assert deleted == []
+
+    revoked = CliRunner().invoke(
+        _cli_mod.cli,
+        [
+            "--yes",
+            "room",
+            "prune",
+            "--name-prefix",
+            "watch-history-",
+            "--keep",
+            "room_keep",
+            "--no-dry-run",
+        ],
+    )
+    assert revoked.exit_code == 0, revoked.output
+    assert "Revoked: 1" in revoked.output
+    assert deleted == ["room_old"]
 
 
 def test_room_inspect_thaws_active_profile_when_room_tenant_is_sealed(

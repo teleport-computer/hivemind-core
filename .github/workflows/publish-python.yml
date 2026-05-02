@@ -25,3 +25,19 @@ jobs:
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
+
+      - name: Verify public uv tool install
+        run: |
+          VERSION="$(uv run python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
+          for attempt in $(seq 1 12); do
+            if uv tool install --force "hmctl==${VERSION}"; then
+              break
+            fi
+            if [ "$attempt" = "12" ]; then
+              echo "hmctl==${VERSION} was not installable from PyPI after retries" >&2
+              exit 1
+            fi
+            sleep 10
+          done
+          hmctl --version
+          hivemind --version

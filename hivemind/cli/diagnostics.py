@@ -15,6 +15,7 @@ from .rooms import (
     _parse_room_ref,
     _room_manifest_is_accepted,
 )
+from ..version import APP_VERSION
 
 
 def _hget(*a, **kw):
@@ -48,6 +49,7 @@ def doctor(room: str | None, as_json: bool):
     """Check the active profile, service auth, billing, and optional room."""
     checks: list[dict] = []
     exit_code = 0
+    _add_check(checks, "cli", "ok", f"version {APP_VERSION}")
 
     try:
         config = _load_config()
@@ -85,13 +87,21 @@ def doctor(room: str | None, as_json: bool):
     else:
         if resp.status_code == 200:
             data = resp.json()
+            service_version = str(data.get("version") or "")
             _add_check(
                 checks,
                 "service",
                 "ok",
-                f"version {data.get('version', '?')}, "
+                f"version {service_version or '?'}, "
                 f"tables {data.get('table_count', '?')}",
             )
+            if service_version and service_version != APP_VERSION:
+                _add_check(
+                    checks,
+                    "version sync",
+                    "warn",
+                    f"cli {APP_VERSION}, service {service_version}",
+                )
         elif resp.status_code == 401 and role == "admin":
             admin_resp = _hget(
                 f"{service}/v1/admin/tenants",

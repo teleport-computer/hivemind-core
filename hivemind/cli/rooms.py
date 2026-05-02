@@ -867,6 +867,127 @@ def revoke_room(room: str, as_json: bool):
     click.echo(f"Revoked room {room_id}.")
 
 
+@rooms_cli.command("prune")
+@click.option("--limit", type=int, default=200, show_default=True)
+@click.option(
+    "--keep",
+    "keeps",
+    multiple=True,
+    help="Room id or hmroom link to preserve. Repeat for multiple rooms.",
+)
+@click.option(
+    "--name-prefix",
+    default=None,
+    help="Only consider active rooms whose names start with this prefix.",
+)
+@click.option(
+    "--all-active",
+    is_flag=True,
+    help="Allow considering all active rooms not listed in --keep.",
+)
+@click.option(
+    "--dry-run/--no-dry-run",
+    default=True,
+    show_default=True,
+    help="Preview candidates or actually revoke them.",
+)
+@click.option("--json", "as_json", is_flag=True, help="Emit JSON on stdout.")
+def prune_rooms(
+    limit: int,
+    keeps: tuple[str, ...],
+    name_prefix: str | None,
+    all_active: bool,
+    dry_run: bool,
+    as_json: bool,
+):
+    """Bulk-revoke old active room invites, dry-run first by default."""
+    if not name_prefix and not all_active:
+        raise click.ClickException("pass --name-prefix or --all-active")
+
+    config = _load_config()
+    service = config["service"]
+    keep_ids: set[str] = set()
+    for keep in keeps:
+        if keep.startswith("hmroom://"):
+            _keep_service, keep_id, _headers_unused, _owner_pubkey = _parse_room_ref(
+                keep,
+                config=config,
+            )
+        else:
+            keep_id = keep.strip()
+        if keep_id:
+            keep_ids.add(keep_id)
+
+    resp = _hget(
+        f"{service}/v1/rooms",
+        headers=_headers(config),
+        params={"limit": limit},
+        timeout=30,
+    )
+    if resp.status_code >= 400:
+        raise click.ClickException(f"{resp.status_code}: {_api_error(resp)}")
+
+    rooms = resp.json().get("rooms") or []
+    candidates = []
+    for room in rooms:
+        room_id = str(room.get("room_id") or "")
+        name = str(room.get("name") or "")
+        if not room_id or room.get("revoked_at") is not None:
+            continue
+        if room_id in keep_ids:
+            continue
+        if name_prefix and not name.startswith(name_prefix):
+            continue
+        candidates.append(room)
+
+    revoked: list[dict] = []
+    errors: list[dict] = []
+    if candidates and not dry_run:
+        if not os.environ.get("HIVEMIND_TRUST_ALL"):
+            click.confirm(
+                f"Revoke {len(candidates)} active room invite"
+                f"{'s' if len(candidates) != 1 else ''}?",
+                abort=True,
+            )
+        for room in candidates:
+            room_id = str(room.get("room_id") or "")
+            delete_resp = _hdelete(
+                f"{service}/v1/rooms/{room_id}",
+                headers=_headers(config),
+                timeout=30,
+            )
+            if delete_resp.status_code >= 400:
+                errors.append(
+                    {
+                        "room_id": room_id,
+                        "error": f"{delete_resp.status_code}: {_api_error(delete_resp)}",
+                    }
+                )
+            else:
+                revoked.append(delete_resp.json())
+
+    out = {
+        "dry_run": dry_run,
+        "candidates": candidates,
+        "revoked": revoked,
+        "errors": errors,
+    }
+    if as_json:
+        click.echo(_json.dumps(out, indent=2, default=str))
+    else:
+        verb = "Would revoke" if dry_run else "Revoked"
+        click.echo(f"{verb}: {len(candidates) if dry_run else len(revoked)}")
+        for room in candidates:
+            click.echo(f"- {room.get('room_id')} {room.get('name') or ''}")
+        for error in errors:
+            click.echo(
+                f"Error: {error['room_id']} {error['error']}",
+                err=True,
+            )
+    if errors:
+        raise SystemExit(1)
+
+
 @rooms_cli.command("add-data")
 @click.argument("room")
 @click.argument("text", required=False)
