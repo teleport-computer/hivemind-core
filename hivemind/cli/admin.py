@@ -531,7 +531,7 @@ def admin_approve_hash(
 
     if not compose_yaml_uri:
         compose_yaml_uri = (
-            f"https://github.com/account-link/hivemind-core/blob/"
+            f"https://github.com/teleport-computer/hivemind-core/blob/"
             f"{git_commit}/deploy/phala/docker-compose.core.yaml"
         )
 

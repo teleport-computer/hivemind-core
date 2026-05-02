@@ -216,9 +216,9 @@ jobs:
           if [ -n "${IMAGE_SHA:-}" ]; then
             echo "── pin override: rewriting image to :${IMAGE_SHA} ──"
             # Only rewrites in the running working tree — not committed.
-            sed -i -E "s|(ghcr\.io/account-link/hivemind-core:)[A-Za-z0-9._-]+|\1${IMAGE_SHA}|" \
+            sed -i -E "s|(ghcr\.io/teleport-computer/hivemind-core:)[A-Za-z0-9._-]+|\1${IMAGE_SHA}|" \
               deploy/phala/docker-compose.core.yaml
-            sed -i -E "s|(ghcr\.io/account-link/hivemind-sql-proxy:)[A-Za-z0-9._-]+|\1${IMAGE_SHA}|" \
+            sed -i -E "s|(ghcr\.io/teleport-computer/hivemind-sql-proxy:)[A-Za-z0-9._-]+|\1${IMAGE_SHA}|" \
               deploy/phala/docker-compose.postgres.yaml
             grep "image:" deploy/phala/docker-compose.core.yaml
             grep "image:" deploy/phala/docker-compose.postgres.yaml

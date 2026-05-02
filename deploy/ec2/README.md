@@ -55,7 +55,7 @@ ssh-keyscan github.com >> ~/.ssh/known_hosts
 
 # 4. Clone the repo
 cd ~
-git clone git@github-hivemind-core:Account-Link/hivemind-core.git
+git clone git@github-hivemind-core:teleport-computerhivemind-core.git
 cd hivemind-core
 
 # 5. Populate .env — every ${VAR:?} in BOTH compose files must exist

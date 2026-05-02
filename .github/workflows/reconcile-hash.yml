@@ -104,7 +104,7 @@ jobs:
           # ── Step 3: app_compose → image short SHA → full SHA ──
           # The dstack 8090 page exposes the raw app_compose JSON whose
           # sha256 IS the compose_hash (self-verifying). We extract the
-          # ghcr.io/account-link/hivemind-core image tag from the embedded
+          # ghcr.io/teleport-computer/hivemind-core image tag from the embedded
           # docker_compose_file — that tag is the short git SHA written
           # by the build-images workflow (`type=sha,prefix=`). Resolving
           # it to a full SHA via `gh api` gives us the actual git_commit
@@ -146,7 +146,7 @@ jobs:
           inner = json.loads(app_compose_str)
           yaml_text = inner.get("docker_compose_file") or ""
           m = re.search(
-              r"image:\s*ghcr\.io/account-link/hivemind-core:([A-Za-z0-9._-]+)",
+              r"image:\s*ghcr\.io/teleport-computer/hivemind-core:([A-Za-z0-9._-]+)",
               yaml_text,
           )
           if not m:

@@ -268,7 +268,7 @@ def fetch_repo_yaml(blob_url: str, *, timeout: float = 15.0) -> str:
 def _replace_core_image(yaml_text: str, image_ref: str) -> str:
     pattern = re.compile(
         r"(^\s*image:\s*)"
-        r"ghcr\.io/account-link/hivemind-core(?::[^\s#]+|@[^\s#]+)?"
+        r"ghcr\.io/teleport-computer/hivemind-core(?::[^\s#]+|@[^\s#]+)?"
         r"([^\S\r\n]*(?:#.*)?$)",
         re.MULTILINE,
     )
@@ -280,7 +280,7 @@ def _replace_core_image(yaml_text: str, image_ref: str) -> str:
     if count != 1:
         raise ValueError(
             "registered compose render requested a core image override, "
-            "but no ghcr.io/account-link/hivemind-core image line was found"
+            "but no ghcr.io/teleport-computer/hivemind-core image line was found"
         )
     return rendered
 
@@ -309,7 +309,7 @@ def render_registered_compose(
             [f"core image override: {core_image}"],
         )
     if image_sha:
-        image_ref = f"ghcr.io/account-link/hivemind-core:{image_sha}"
+        image_ref = f"ghcr.io/teleport-computer/hivemind-core:{image_sha}"
         return (
             _replace_core_image(yaml_text, image_ref),
             [f"core image tag override: {image_sha}"],

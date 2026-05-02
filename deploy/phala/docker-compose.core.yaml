@@ -40,7 +40,7 @@ services:
     # container. Symptom before the fix: claude-code crashes with
     # "Command failed with exit code 1", zero LLM calls, empty stderr.
     # The `:latest` tag in GHCR is from pre-multi-tenant main — don't use.
-    image: ghcr.io/account-link/hivemind-core:fd87c82
+    image: ghcr.io/teleport-computer/hivemind-core:fd87c82
     ports:
       - "8100:8100"
     environment:

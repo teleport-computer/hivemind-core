@@ -24,7 +24,7 @@ name, and `hivemind` for existing scripts.
 Until the first `hmctl` PyPI release is published, install from the Git source:
 
 ```bash
-uv tool install --upgrade git+https://github.com/Account-Link/hivemind-core.git
+uv tool install --upgrade git+https://github.com/teleport-computer/hivemind-core.git
 hmctl --version
 ```
 

@@ -21,7 +21,7 @@ import tempfile
 
 logger = logging.getLogger(__name__)
 
-_GHCR_IMAGE_DEFAULT = "ghcr.io/account-link/hivemind-agent-base:latest"
+_GHCR_IMAGE_DEFAULT = "ghcr.io/teleport-computer/hivemind-agent-base:latest"
 _LOCAL_TAG = "hivemind-agent-base:latest"
 
 # Pin both the node CLI and the Python SDK to known-compatible versions.

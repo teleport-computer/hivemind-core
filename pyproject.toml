@@ -50,9 +50,9 @@ hmctl = "hivemind.cli:cli"
 hivemind = "hivemind.cli:cli"
 
 [project.urls]
-Homepage = "https://github.com/Account-Link/hivemind-core"
-Repository = "https://github.com/Account-Link/hivemind-core"
-Issues = "https://github.com/Account-Link/hivemind-core/issues"
+Homepage = "https://github.com/teleport-computer/hivemind-core"
+Repository = "https://github.com/teleport-computer/hivemind-core"
+Issues = "https://github.com/teleport-computer/hivemind-core/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["hivemind"]
