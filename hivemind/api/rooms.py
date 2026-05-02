@@ -130,7 +130,7 @@ def register_room_routes(
                     "allowed_tables references tables that don't exist in "
                     "your tenant DB: "
                     + ", ".join(sorted(missing))
-                    + ". Create them first via /v1/_internal/store, or "
+                    + ". Create them first via /v1/tenant/sql, or "
                     "remove them from the allowed_tables list.",
                 )
 

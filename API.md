@@ -105,6 +105,36 @@ version checks.
 Owner-only. Rotates the current tenant's `hmk_...` API key and returns the
 plaintext replacement once.
 
+### `POST /v1/tenant/sql`
+
+Owner-only. Run a SQL statement against the tenant database. SELECTs return
+rows; INSERT/UPDATE/DELETE/DDL are committed and return `rowcount`. Internal
+tables (`_hivemind_*`, `_billing_*`, `_credit_*`, `_tenants`) and the
+introspection schemas (`information_schema`, `pg_catalog`) are blocked at the
+SQL parser. Used by the website's database browser and the bootstrap scripts
+to seed tables before binding them to a room via `allowed_tables`.
+
+```json
+{ "sql": "CREATE TABLE notes (id SERIAL, body TEXT)", "params": [] }
+```
+
+```json
+{ "rows": [], "rowcount": 0 }
+```
+
+### Tenant Capability Tokens
+
+Owner-only. List and revoke `hmq_...` capability tokens. Tokens are minted
+implicitly when the owner creates a room — `POST /v1/rooms` returns the
+plaintext token once, and the same lifecycle endpoints below let the owner
+audit and revoke individual invites without tearing down the whole room.
+
+- `GET /v1/tenant/tokens` — list non-revoked tokens for the calling tenant.
+  Returns `{ "tokens": [{ "token_id", "kind", "label", "constraints",
+  "created_at", "revoked_at" }, ...] }`. No plaintext is ever returned.
+- `DELETE /v1/tenant/tokens/{token_id}` — revoke a single token by its
+  `token_id` prefix. Returns 404 if no matching live token exists.
+
 ### `GET /v1/whoami`
 
 Returns the authenticated caller role and tenant/capability identity.

@@ -182,12 +182,12 @@ if [ "$DO_DEMO" -eq 1 ]; then
 
     # Developer-only seed path. Public clients should add data through rooms,
     # but this quickstart needs a table for the default SQL query agent.
-    curl -fsS -X POST http://localhost:8100/v1/_internal/store \
+    curl -fsS -X POST http://localhost:8100/v1/tenant/sql \
         "${AUTH_HEADER[@]}" \
         -H "Content-Type: application/json" \
         -d '{"sql": "CREATE TABLE IF NOT EXISTS demo_notes (id SERIAL PRIMARY KEY, content TEXT)", "params": []}' \
         >/dev/null
-    curl -fsS -X POST http://localhost:8100/v1/_internal/store \
+    curl -fsS -X POST http://localhost:8100/v1/tenant/sql \
         "${AUTH_HEADER[@]}" \
         -H "Content-Type: application/json" \
         -d '{"sql": "INSERT INTO demo_notes (content) VALUES (%s), (%s), (%s)", "params": ["sprint retro","design review","team lunch"]}' \

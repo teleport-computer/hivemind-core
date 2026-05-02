@@ -403,16 +403,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     # ── Internal pipeline primitives ──
     #
-    # Room endpoints below are the public execution surface. These lower-level
-    # primitives are kept for tests/admin maintenance and are hidden from the
-    # generated API schema so new clients do not learn the old generic path.
+    # Room endpoints below are the public execution surface. The tenant SQL
+    # primitive lets owners run DDL/DML against their tenant database from
+    # outside a room — used by the website's database browser and the
+    # bootstrap scripts to seed tables before binding them into rooms.
 
-    @app.post(
-        "/v1/_internal/store",
-        response_model=StoreResponse,
-        include_in_schema=False,
-    )
-    async def store(
+    @app.post("/v1/tenant/sql", response_model=StoreResponse)
+    async def tenant_sql(
         req: StoreRequest,
         caller: Caller = Depends(requires_role("owner")),
     ):

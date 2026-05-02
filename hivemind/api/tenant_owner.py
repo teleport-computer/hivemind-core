@@ -40,29 +40,7 @@ def register_tenant_owner_routes(
             raise HTTPException(404, f"tenant '{tenant_id}' not found")
         return result
 
-    @app.post("/v1/_internal/tokens", include_in_schema=False)
-    async def issue_capability(
-        payload: dict,
-        request: Request,
-        _hm: Hivemind = Depends(get_tenant_hive),
-    ):
-        """Issue a query capability token."""
-        kind = (payload or {}).get("kind", "query") or "query"
-        label = (payload or {}).get("label", "") or ""
-        constraints = (payload or {}).get("constraints") or {}
-        registry = _registry(request)
-        tenant_id = request.state.tenant_id
-        try:
-            result = await asyncio.to_thread(
-                registry.mint_capability, tenant_id, kind, label, constraints
-            )
-        except ValueError as e:
-            raise HTTPException(400, str(e))
-        except KeyError as e:
-            raise HTTPException(404, str(e))
-        return result
-
-    @app.get("/v1/_internal/tokens", include_in_schema=False)
+    @app.get("/v1/tenant/tokens")
     async def list_tokens(
         request: Request,
         _hm: Hivemind = Depends(get_tenant_hive),
@@ -72,7 +50,7 @@ def register_tenant_owner_routes(
         rows = await asyncio.to_thread(registry.list_capabilities, tenant_id)
         return {"tokens": rows}
 
-    @app.delete("/v1/_internal/tokens/{token_id}", include_in_schema=False)
+    @app.delete("/v1/tenant/tokens/{token_id}")
     async def revoke_token(
         token_id: str,
         request: Request,

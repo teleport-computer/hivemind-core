@@ -31,7 +31,7 @@ from urllib.parse import urlparse
 import httpx
 
 
-STORE_PATH = "/v1/_internal/store"
+STORE_PATH = "/v1/tenant/sql"
 
 
 def _hostname(url: str | None) -> str:
