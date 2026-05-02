@@ -106,6 +106,34 @@ def register_room_routes(
                     f"agent inspection_mode ({mediator_visibility})",
                 )
 
+        # Validate per-room data allowlist against the live tenant DB schema.
+        # The tools layer enforces the allowlist at runtime; this check just
+        # catches typos and stale table names early, before the manifest is
+        # signed.
+        if req.allowed_tables is not None and req.allowed_tables:
+            requested = {t.lower() for t in req.allowed_tables}
+            try:
+                rows = await asyncio.to_thread(
+                    hm.db.execute,
+                    "SELECT table_name FROM information_schema.tables "
+                    "WHERE table_schema = 'public' "
+                    "AND table_name NOT LIKE %s",
+                    ["\\_%"],
+                )
+            except Exception:
+                rows = []
+            existing = {str(r.get("table_name", "")).lower() for r in rows}
+            missing = requested - existing
+            if missing:
+                raise HTTPException(
+                    400,
+                    "allowed_tables references tables that don't exist in "
+                    "your tenant DB: "
+                    + ", ".join(sorted(missing))
+                    + ". Create them first via /v1/_internal/store, or "
+                    "remove them from the allowed_tables list.",
+                )
+
         if (
             req.trust.mode in {"pinned", "owner_approved"}
             and not req.trust.allowed_composes

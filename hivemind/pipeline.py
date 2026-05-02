@@ -471,6 +471,7 @@ class Pipeline:
         provider: str | None = None,
         llm_egress_enabled: bool = True,
         room_vault_items: list[dict] | None = None,
+        allowed_tables: list[str] | None = None,
     ) -> tuple[Callable, str, dict]:
         """Run scope agent to produce a scope function.
 
@@ -537,8 +538,11 @@ class Pipeline:
             if _val is not None:
                 env[_toggle] = _val
 
-        # Scope agents get FULL_READ access
-        scope_tools = build_sql_tools(self.db, AccessLevel.FULL_READ)
+        # Scope agents get FULL_READ access, restricted to the room's
+        # allowed_tables (None = legacy unrestricted).
+        scope_tools = build_sql_tools(
+            self.db, AccessLevel.FULL_READ, allowed_tables=allowed_tables,
+        )
         scope_tools.extend(
             build_room_vault_tools(
                 room_vault_items or [],
@@ -643,6 +647,7 @@ class Pipeline:
         return_tape: bool = False,
         model: str | None = None,
         provider: str | None = None,
+        allowed_tables: list[str] | None = None,
         llm_egress_enabled: bool = True,
         room_vault_items: list[dict] | None = None,
     ):
@@ -661,6 +666,7 @@ class Pipeline:
             AccessLevel.SCOPED,
             scope_fn=scope_fn,
             scope_fn_source=scope_fn_source or None,
+            allowed_tables=allowed_tables,
         )
         tools.extend(
             build_room_vault_tools(
@@ -999,6 +1005,7 @@ class Pipeline:
         allowed_llm_providers: list[str] | None = None,
         artifacts_enabled: bool = True,
         room_vault_items: list[dict] | None = None,
+        allowed_tables: list[str] | None = None,
         payer_tenant_id: str | None = None,
         payer_token_id: str | None = None,
         billable_role: str = "query",
@@ -1070,6 +1077,7 @@ class Pipeline:
                         model=model, provider=provider,
                         llm_egress_enabled=llm_egress_enabled,
                         room_vault_items=room_vault_items,
+                        allowed_tables=allowed_tables,
                     )
                     used = scope_usage.get("total_tokens", 0)
                     remaining = max(1, remaining - used)
@@ -1122,6 +1130,7 @@ class Pipeline:
                 AccessLevel.SCOPED,
                 scope_fn=scope_fn,
                 scope_fn_source=scope_fn_source or None,
+                allowed_tables=allowed_tables,
             )
             tools.extend(
                 build_room_vault_tools(

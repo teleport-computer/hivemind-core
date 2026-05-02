@@ -179,6 +179,80 @@ def _references_internal_tables(sql: str) -> bool:
     return False
 
 
+# Schemas that catalog the entire database — would let an agent enumerate every
+# table that exists, including ones outside its allowlist. Block all references.
+_HIDDEN_SCHEMAS: frozenset[str] = frozenset({
+    "information_schema",
+    "pg_catalog",
+    "pg_toast",
+})
+
+# Table-name prefixes that mark Hivemind's control-plane and tenant-DB internals.
+# An agent on a sandboxed tenant DB shouldn't see any of these even by name.
+_INTERNAL_TABLE_PREFIXES: tuple[str, ...] = (
+    "_hivemind_",
+    "_credit_",
+    "_billing_",
+    "_tenants",
+)
+
+
+def _validate_table_allowlist(
+    sql: str,
+    allowed_tables: list[str] | None,
+) -> str | None:
+    """Return None if every table reference in ``sql`` is permitted, else an
+    opaque error string suitable for return to the agent.
+
+    Enforcement layers (each independent):
+      1. ``information_schema.*``, ``pg_catalog.*``, ``pg_toast.*`` — always rejected.
+         These would let the agent enumerate the full schema by listing tables.
+      2. ``_hivemind_*`` / ``_credit_*`` / ``_billing_*`` / ``_tenants`` — always rejected.
+      3. If ``allowed_tables`` is non-None, every remaining table reference must
+         be in the allowlist (case-insensitive). Tables not on the allowlist
+         are treated as if they don't exist.
+
+    ``allowed_tables=None`` is the legacy back-compat path (room manifests
+    minted before this feature shipped) — it skips step 3 entirely so old rooms
+    keep their previous behavior.
+
+    Errors are deliberately opaque: the agent never learns whether a rejected
+    table name actually exists in the tenant DB. The operator-side run log
+    contains the full SQL for audit.
+    """
+    import sqlglot
+
+    if allowed_tables is None:
+        allowed_lower: set[str] | None = None
+    else:
+        allowed_lower = {t.strip().lower() for t in allowed_tables if t}
+
+    try:
+        statements = sqlglot.parse(
+            sql, dialect="postgres", error_level=sqlglot.ErrorLevel.WARN,
+        )
+    except Exception:
+        return "query rejected (could not parse)"
+
+    for stmt in statements:
+        if stmt is None:
+            continue
+        for table in stmt.find_all(sqlglot.exp.Table):
+            schema = (table.db or "").lower().strip()
+            name = (table.name or "").lower().strip()
+
+            if schema in _HIDDEN_SCHEMAS:
+                return "query rejected"
+
+            if any(name.startswith(p) for p in _INTERNAL_TABLE_PREFIXES):
+                return "query rejected"
+
+            if allowed_lower is not None and name not in allowed_lower:
+                return "query rejected"
+
+    return None
+
+
 MAX_RESULT_BYTES = 1_000_000  # cap serialized JSON output to ~1MB per call
 
 
@@ -187,6 +261,7 @@ def build_sql_tools(
     access: AccessLevel,
     scope_fn: Callable[[str, list, list[dict]], dict] | None = None,
     scope_fn_source: str | None = None,
+    allowed_tables: list[str] | None = None,
 ) -> list[Tool]:
     """Build SQL tools with the given access level.
 
@@ -242,18 +317,21 @@ def build_sql_tools(
     def execute_sql(sql: str, params: list | None = None) -> str:
         safe_params = params or []
 
-        # Block internal table access for non-system callers
+        # Per-room allowlist + system-table block. allowed_tables is None for
+        # legacy rooms whose manifests don't carry the field (we keep the old
+        # _references_internal_tables behavior in that case via the prefix
+        # check inside _validate_table_allowlist).
+        violation = _validate_table_allowlist(sql, allowed_tables)
+        if violation:
+            logger.warning(
+                "tool execute_sql rejected (access=%s, allowed=%s): %s",
+                access.value, allowed_tables, sql,
+            )
+            return json.dumps({"error": violation})
+
         if access in (AccessLevel.FULL_READ, AccessLevel.SCOPED):
-            if _references_internal_tables(sql):
-                return json.dumps({"error": "Access to internal tables is denied"})
             if not _is_select_only(sql):
                 return json.dumps({"error": "Only SELECT queries are allowed"})
-
-        if access == AccessLevel.FULL_READWRITE:
-            if _references_internal_tables(sql):
-                # Allow reads but block writes to internal tables
-                if not _is_select_only(sql):
-                    return json.dumps({"error": "Write access to internal tables is denied"})
 
         try:
             if _is_select_only(sql):
@@ -296,6 +374,17 @@ def build_sql_tools(
     def get_schema() -> str:
         try:
             schema = db.get_schema(exclude_internal=True)
+            # When the room has an allowlist, the agent must not see any
+            # other tables — not even by name. Filter the schema rows
+            # (a list of {table_name, column_name, ...}) to keep only the
+            # allowed tables. Legacy rooms (allowed_tables=None) get the
+            # old "everything except _hivemind_*" view.
+            if allowed_tables is not None:
+                allow = {t.strip().lower() for t in allowed_tables if t}
+                schema = [
+                    r for r in schema
+                    if str(r.get("table_name", "")).lower() in allow
+                ]
             return json.dumps(schema, default=str)
         except Exception as e:
             return json.dumps({"error": str(e)})

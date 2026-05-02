@@ -20,6 +20,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import re
 import time
 from typing import Literal
 
@@ -138,6 +139,13 @@ class RoomCreateRequest(BaseModel):
     output_visibility: RoomOutputVisibility = "querier_only"
     egress: RoomEgress = Field(default_factory=RoomEgress)
     trust: RoomTrust = Field(default_factory=RoomTrust)
+    # Per-room data sources. List of tenant table names this room's scope/
+    # query agents may reference. Names are validated against the tenant DB
+    # at create time. None / omitted = legacy unrestricted (back-compat for
+    # rooms minted before this field shipped); new clients should set it
+    # explicitly. An empty list is valid and means "no SQL data sources" —
+    # only the room vault is reachable.
+    allowed_tables: list[str] | None = None
 
     @model_validator(mode="after")
     def _validate_mode(self):
@@ -154,6 +162,30 @@ class RoomCreateRequest(BaseModel):
         if self.policy is None:
             self.policy = self.rules or ""
         self.scope_agent_id = self.scope_agent_id.strip()
+        if self.allowed_tables is not None:
+            cleaned: list[str] = []
+            seen: set[str] = set()
+            for raw in self.allowed_tables:
+                t = (raw or "").strip()
+                if not t:
+                    continue
+                # Postgres identifier shape, conservative.
+                if not re.match(r"^[a-zA-Z_][a-zA-Z0-9_]{0,62}$", t):
+                    raise ValueError(
+                        f"allowed_tables entry '{raw}' is not a valid "
+                        "Postgres identifier"
+                    )
+                if t.startswith("_"):
+                    raise ValueError(
+                        f"allowed_tables entry '{raw}' is reserved "
+                        "(internal table prefix)"
+                    )
+                key = t.lower()
+                if key in seen:
+                    continue
+                seen.add(key)
+                cleaned.append(t)
+            self.allowed_tables = cleaned
         return self
 
 
@@ -224,6 +256,12 @@ def build_room_manifest(
         },
         "egress": req.egress.model_dump(),
         "trust": req.trust.model_dump(),
+        # Per-room SQL allowlist. List of tenant table names. None/missing
+        # is the legacy back-compat value for rooms minted before this
+        # field shipped — interpreted as "no allowlist enforcement at
+        # the tools layer beyond _hivemind_*". New rooms always set this
+        # (possibly to []) so the constraint is signed into the manifest.
+        "allowed_tables": req.allowed_tables,
         "created_at": created_at,
         "owner_pubkey_b64": signer_pubkey_b64,
     }

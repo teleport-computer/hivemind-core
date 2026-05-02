@@ -544,6 +544,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 allowed_llm_providers=(room or {}).get("allowed_llm_providers"),
                 artifacts_enabled=bool((room or {}).get("allow_artifacts", True)),
                 room_vault_items=room_vault_items,
+                # Per-room SQL data sources from the signed manifest. Legacy
+                # rooms without this field pass None and keep the old
+                # unrestricted behavior — see hivemind/tools.py for enforcement.
+                allowed_tables=(
+                    ((room or {}).get("manifest") or {}).get("allowed_tables")
+                ),
                 payer_tenant_id=billing.get("payer_tenant_id"),
                 payer_token_id=billing.get("payer_token_id"),
                 billable_role=billing.get("billable_role") or "query",
