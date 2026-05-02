@@ -243,6 +243,37 @@ def register_admin_billing_routes(
         prices = await asyncio.to_thread(registry.billing_list_prices)
         return {"prices": prices}
 
+    @app.delete(
+        "/v1/admin/billing/prices/{provider}/{model:path}",
+        dependencies=[Depends(check_admin)],
+    )
+    async def admin_billing_delete_price(
+        provider: str,
+        model: str,
+        request: Request,
+    ):
+        """Remove a (provider, model) row from the price table.
+
+        After deletion, the next run requesting this provider/model is
+        treated as missing-price: rejected in enforce mode, free in
+        non-enforce mode. Use to roll back a bad seed.
+        """
+        registry = _registry(request)
+        try:
+            removed = await asyncio.to_thread(
+                registry.billing_delete_price,
+                provider,
+                model,
+            )
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        if not removed:
+            raise HTTPException(
+                404,
+                f"price row not found for {provider}/{model}",
+            )
+        return {"status": "ok", "provider": provider, "model": model}
+
     @app.post("/v1/admin/billing/prices", dependencies=[Depends(check_admin)])
     async def admin_billing_set_price(
         payload: AdminBillingPriceRequest,

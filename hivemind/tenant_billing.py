@@ -174,6 +174,25 @@ class BillingRegistryMixin:
         entry["balance_micro_usd"] = self.billing_balance_micro_usd(tenant_id)
         return entry
 
+    def billing_delete_price(self, provider: str, model: str) -> bool:
+        """Hard-delete a (provider, model) row from the price table.
+
+        Returns True if a row was removed, False if no matching row existed.
+        Use to roll back a bad/hallucinated entry: with the row gone, the
+        next run requesting this provider/model is treated as missing
+        price (rejected in enforce mode, free in non-enforce mode).
+        """
+        clean_provider = (provider or "").strip().lower()
+        clean_model = (model or "").strip()
+        if not clean_provider or not clean_model:
+            raise ValueError("provider and model required")
+        rowcount = self._control_db.execute_commit(
+            "DELETE FROM _billing_model_prices "
+            "WHERE provider = %s AND model = %s",
+            [clean_provider, clean_model],
+        )
+        return rowcount > 0
+
     def billing_list_prices(self) -> list[dict]:
         rows = self._control_db.execute(
             "SELECT provider, model, prompt_microusd_per_mtok, "

@@ -1,0 +1,91 @@
+name: Wipe model prices
+
+# DELETE rows from the billing price table. Use to roll back a bad seed
+# (e.g. hallucinated rates). Once deleted, runs requesting the affected
+# (provider, model) are treated as missing-price → rejected in enforce
+# mode, free in non-enforce mode.
+#
+# Default target: every tinfoil/* row seeded by seed-tinfoil-prices.yml
+# under the inferred-not-real rates.
+
+on:
+  workflow_dispatch:
+    inputs:
+      service:
+        description: "Service URL"
+        required: false
+        default: "https://hivemind.teleport.computer"
+      targets_json:
+        description: "Optional JSON array of {provider, model} to delete (defaults to all hallucinated tinfoil rows)"
+        required: false
+        default: ""
+
+jobs:
+  wipe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Configure SSH
+        env:
+          SSH_KEY: ${{ secrets.EC2_SSH_PRIVATE_KEY }}
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -H "$EC2_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Run wipe via relay
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_USER: ${{ secrets.EC2_USER }}
+          SERVICE: ${{ github.event.inputs.service }}
+          TARGETS_JSON: ${{ github.event.inputs.targets_json }}
+        run: |
+          set -euo pipefail
+          q() { printf "'%s'" "$(printf "%s" "$1" | sed "s/'/'\\\\''/g")"; }
+
+          ssh -i ~/.ssh/id_ed25519 -o BatchMode=yes \
+            "${EC2_USER}@${EC2_HOST}" \
+            "SERVICE=$(q "$SERVICE") TARGETS_JSON=$(q "$TARGETS_JSON") bash -s" <<'REMOTE'
+          set -euo pipefail
+          ENV_FILE=~/hivemind-core/deploy/phala/.env
+          ADMIN_KEY=$(grep -E '^HIVEMIND_ADMIN_KEY=' "$ENV_FILE" | head -1 | cut -d= -f2-)
+          if [ -z "$ADMIN_KEY" ]; then
+            echo "::error::HIVEMIND_ADMIN_KEY missing in $ENV_FILE"
+            exit 1
+          fi
+
+          DEFAULTS='[
+            {"provider":"tinfoil","model":"kimi-k2-6"},
+            {"provider":"tinfoil","model":"kimi-k2"},
+            {"provider":"tinfoil","model":"kimi-k2-thinking"},
+            {"provider":"tinfoil","model":"llama-3.3-70b"},
+            {"provider":"tinfoil","model":"deepseek-v3.1"}
+          ]'
+
+          PAYLOAD="${TARGETS_JSON:-$DEFAULTS}"
+          echo "$PAYLOAD" | jq -c '.[]' | while read -r row; do
+            provider=$(echo "$row" | jq -r '.provider')
+            model=$(echo "$row" | jq -r '.model')
+            # url-encode the model since it can contain '/'
+            enc_provider=$(printf %s "$provider" | jq -sRr @uri)
+            enc_model=$(printf %s "$model" | jq -sRr @uri)
+            echo "→ DELETE ${provider}/${model}"
+            curl -fsS -o /dev/null -w "  status %{http_code}\n" \
+              -X DELETE "${SERVICE%/}/v1/admin/billing/prices/${enc_provider}/${enc_model}" \
+              -H "Authorization: Bearer ${ADMIN_KEY}" \
+              || echo "::warning::wipe failed for ${provider}/${model} (probably already gone)"
+          done
+
+          echo "── verifying tinfoil/ rows are gone ──"
+          curl -fsS "${SERVICE%/}/v1/admin/billing/prices" \
+            -H "Authorization: Bearer ${ADMIN_KEY}" \
+            | jq '[.prices[] | select(.provider == "tinfoil")] | length' \
+            | xargs -I{} echo "remaining tinfoil rows: {}"
+          REMOTE
+
+      - name: Cleanup SSH key
+        if: always()
+        run: rm -f ~/.ssh/id_ed25519
