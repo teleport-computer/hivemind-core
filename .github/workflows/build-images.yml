@@ -12,6 +12,7 @@ on:
       - ".github/workflows/deploy.yml"
       - "agents/**"
       - "deploy/**"
+      - "!deploy/**/*.md"
       - "hivemind/**"
       - "pyproject.toml"
       - "uv.lock"

@@ -21,7 +21,7 @@ hmctl --version
 The package installs two equivalent commands: `hmctl` for the short public CLI
 name, and `hivemind` for existing scripts.
 
-Until the first `hmctl` PyPI release is published, install from the Git source:
+To test an unreleased checkout directly from GitHub:
 
 ```bash
 uv tool install --upgrade git+https://github.com/teleport-computer/hivemind-core.git
