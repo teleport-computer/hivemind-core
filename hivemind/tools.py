@@ -7,7 +7,6 @@ Two data tools replace the old six record tools:
 Access levels:
   - FULL_READ: scope agent — SELECT on all user tables, blocked from _hivemind_*
   - SCOPED: query agent — SQL runs against full DB, results pass through scope_fn
-  - FULL_READWRITE: index agent — full DML, blocked from _hivemind_* writes
   - NONE: mediator — no DB access
 """
 
@@ -48,7 +47,6 @@ class Tool:
 class AccessLevel(enum.Enum):
     FULL_READ = "full_read"
     SCOPED = "scoped"
-    FULL_READWRITE = "full_readwrite"
     NONE = "none"
 
 
@@ -329,17 +327,12 @@ def build_sql_tools(
             )
             return json.dumps({"error": violation})
 
-        if access in (AccessLevel.FULL_READ, AccessLevel.SCOPED):
-            if not _is_select_only(sql):
-                return json.dumps({"error": "Only SELECT queries are allowed"})
+        if not _is_select_only(sql):
+            return json.dumps({"error": "Only SELECT queries are allowed"})
 
         try:
-            if _is_select_only(sql):
-                rows = db.execute(sql, safe_params)
-                rows = rows[:MAX_RESULT_ROWS]
-            else:
-                rowcount = db.execute_commit(sql, safe_params)
-                return json.dumps({"rowcount": rowcount})
+            rows = db.execute(sql, safe_params)
+            rows = rows[:MAX_RESULT_ROWS]
         except Exception as e:
             return json.dumps({"error": str(e)})
 

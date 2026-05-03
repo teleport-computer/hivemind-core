@@ -270,7 +270,9 @@ class TestAccessLevelFullRead:
             tools["execute_sql"].handler("SELECT * FROM _hivemind_agents")
         )
         assert "error" in result
-        assert "internal" in result["error"].lower() or "denied" in result["error"].lower()
+        # Opaque rejection — _validate_table_allowlist returns "query rejected"
+        # regardless of why, so an attacker can't probe what's behind the wall.
+        assert "rejected" in result["error"].lower()
 
     def test_get_schema_excludes_internal(self, pg_db, test_table):
         tools = self._get_tools(pg_db)
@@ -343,69 +345,6 @@ class TestAccessLevelScoped:
         t = {t.name: t for t in tools}
         result = json.loads(t["execute_sql"].handler("SELECT * FROM _hivemind_agents"))
         assert "error" in result
-
-
-# ── build_sql_tools: AccessLevel.FULL_READWRITE (index agent) ──
-
-
-class TestAccessLevelFullReadwrite:
-    def _get_tools(self, pg_db):
-        tools = build_sql_tools(pg_db, AccessLevel.FULL_READWRITE)
-        return {t.name: t for t in tools}
-
-    def test_select_works(self, pg_db, test_table):
-        tools = self._get_tools(pg_db)
-        result = json.loads(tools["execute_sql"].handler("SELECT name FROM test_tools_data ORDER BY name"))
-        assert len(result) == 2
-
-    def test_insert_works(self, pg_db, test_table):
-        tools = self._get_tools(pg_db)
-        result = json.loads(
-            tools["execute_sql"].handler(
-                "INSERT INTO test_tools_data (name, team) VALUES (%s, %s)",
-                ["charlie", "gamma"],
-            )
-        )
-        assert result["rowcount"] == 1
-
-    def test_update_works(self, pg_db, test_table):
-        tools = self._get_tools(pg_db)
-        result = json.loads(
-            tools["execute_sql"].handler(
-                "UPDATE test_tools_data SET team = %s WHERE name = %s",
-                ["omega", "alice"],
-            )
-        )
-        assert result["rowcount"] == 1
-
-    def test_delete_works(self, pg_db, test_table):
-        tools = self._get_tools(pg_db)
-        result = json.loads(
-            tools["execute_sql"].handler(
-                "DELETE FROM test_tools_data WHERE name = %s",
-                ["bob"],
-            )
-        )
-        assert result["rowcount"] == 1
-
-    def test_write_to_internal_table_blocked(self, pg_db):
-        tools = self._get_tools(pg_db)
-        result = json.loads(
-            tools["execute_sql"].handler(
-                "INSERT INTO _hivemind_agents (agent_id, name, image, created_at) "
-                "VALUES ('evil', 'evil', 'evil', 0)"
-            )
-        )
-        assert "error" in result
-        assert "denied" in result["error"].lower()
-
-    def test_select_from_internal_table_allowed(self, pg_db):
-        tools = self._get_tools(pg_db)
-        result = json.loads(
-            tools["execute_sql"].handler("SELECT agent_id FROM _hivemind_agents LIMIT 1")
-        )
-        # Should succeed (returns list, not error dict)
-        assert isinstance(result, list)
 
 
 # ── build_agent_file_tools ──
