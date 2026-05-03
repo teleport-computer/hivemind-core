@@ -45,6 +45,38 @@ hmctl init --service https://hivemind.teleport.computer --api-key hmk_...
 The package installs both `hmctl` (short) and `hivemind` (long) — same
 binary.
 
+## What your code can do inside the CVM (sandbox rules)
+
+Anything you upload runs inside a Docker container with **bridge-only
+egress**. Plan for these constraints up front; they are not negotiable:
+
+- **The only outbound network is the bridge.** `BRIDGE_URL` +
+  `SESSION_TOKEN` env vars. Used for LLM completions only. Every other
+  syscall that tries to leave the container fails closed: no DNS, no
+  internet, no calls to your own API, no S3, no GitHub. Do not write
+  code that assumes it can `curl` an external URL.
+- **No persistent filesystem outside the container.** Everything you
+  write to disk is destroyed when the run ends.
+- **No reading host files.** No `/proc/self/environ` of other
+  processes, no `/host`, no docker socket.
+- **Whatever data you need at run time must be in the agent archive
+  you upload.** Bundle it as files alongside `agent.py`. Mark the
+  archive `inspection_mode=sealed` if the bundled bytes contain
+  anything private — sealing encrypts at rest with a key derivable
+  only inside the CVM. The image digest stays publishable; the bytes
+  do not.
+- **There is no streaming append from outside the run.** A run reads
+  what was bundled at upload time + what is in the room owner's
+  tenant DB at the moment the run starts. If you need fresh-at-runtime
+  data, the room owner has to write to their tenant DB before the run
+  starts; you cannot fetch it from inside.
+
+If you are tempted to make an outbound call from inside the container,
+stop and re-design — bake the data in, or use the bridge for an LLM
+call that produces what you need. Outbound fails are silent at the
+DNS layer and present as connection-refused at the socket layer; you
+will not get a useful error.
+
 ## Two flows you will do
 
 ### Flow A — User shares an `hmroom://` URI; you ask through it
@@ -142,11 +174,12 @@ hmctl room ask 'hmroom://...' "Find a time both calendars allow" \
   --query-visibility sealed
 ```
 
-Constraint: bundled data must fit in the agent archive — the CVM
-enforces bridge-only egress, so the agent cannot reach back to a
-B-controlled server at run time. For genuinely large or live data
-on B's side, this is currently a limitation (room vault is
-owner-write-only).
+See "What your code can do inside the CVM" above for why bundling is
+the only path: bridge-only egress means the agent cannot fetch B's
+data from outside the CVM at run time. Room vault is owner-write-only
+on the current API, so for genuinely large or live B-side data this
+is a limitation today — flag it to your user rather than silently
+truncating.
 
 ## Custom agents (when the user wants more control)
 
