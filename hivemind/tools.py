@@ -159,22 +159,42 @@ def _references_internal_tables(sql: str) -> bool:
 
     Uses the postgres dialect so PG-specific syntax doesn't trip a ParseError
     which would flip this to True (fail-closed) and incorrectly deny the query.
+
+    On parse failure we fall back to a textual check — looking for the literal
+    ``_hivemind_`` prefix in the SQL with regex word boundaries — and only
+    fail closed if that ALSO trips. This keeps owner-supplied SQL with
+    quirky postgres syntax (e.g. ``LIKE '\\_%' ESCAPE '\\'``) usable when
+    sqlglot's parser stumbles, without giving up the prefix block. The hard
+    schema/table allowlist in ``_validate_table_allowlist`` (used by every
+    agent SQL tool) is what actually prevents enumeration of internals; this
+    function is an additional check for the owner-only ``run_store`` path
+    where the access level is already privileged.
     """
+    import re
     import sqlglot
 
     try:
-        for stmt in sqlglot.parse(
+        statements = sqlglot.parse(
             sql, dialect="postgres", error_level=sqlglot.ErrorLevel.WARN
-        ):
-            if stmt is None:
-                continue
-            for table in stmt.find_all(sqlglot.exp.Table):
-                if table.name.upper().startswith("_HIVEMIND_"):
-                    return True
+        )
     except Exception:
-        # Fail closed — if we can't parse, assume it references internal tables
-        return True
-    return False
+        statements = None
+
+    if statements:
+        try:
+            for stmt in statements:
+                if stmt is None:
+                    continue
+                for table in stmt.find_all(sqlglot.exp.Table):
+                    if table.name.upper().startswith("_HIVEMIND_"):
+                        return True
+            return False
+        except Exception:
+            pass
+
+    # Parser stumbled — fall back to a regex check so well-formed SELECTs
+    # against information_schema with PG-specific clauses still get through.
+    return bool(re.search(r"\b_hivemind_", sql, re.IGNORECASE))
 
 
 # Schemas that catalog the entire database — would let an agent enumerate every

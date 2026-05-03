@@ -226,6 +226,35 @@ class TestReferencesInternalTables:
             is True
         )
 
+    def test_information_schema_introspect_passes(self):
+        # The website's database page uses queries like this. Older code
+        # fail-closed when sqlglot tripped on the LIKE/ESCAPE clause and
+        # returned 400 to the owner. Now the fall-through regex check kicks
+        # in and lets it through (information_schema isn't internal).
+        sql = (
+            "SELECT table_name FROM information_schema.tables "
+            "WHERE table_schema='public' "
+            "AND table_name NOT LIKE '\\_%' ESCAPE '\\' "
+            "ORDER BY table_name"
+        )
+        assert _references_internal_tables(sql) is False
+
+    def test_unparseable_sql_with_internal_prefix_still_blocked(self):
+        # Even if sqlglot can't parse the SQL, the literal "_hivemind_"
+        # substring trips the regex fallback. Owners can't sneak an
+        # internal-table read through by appending bogus syntax.
+        sql = "SELECT * FROM _hivemind_agents WHERE bogus !@#$ syntax"
+        assert _references_internal_tables(sql) is True
+
+    def test_unparseable_sql_without_internal_prefix_passes(self):
+        # Truly unparseable AND no _hivemind_ token: now allowed (was
+        # fail-closed). The schema-prefix block in
+        # _validate_table_allowlist is what keeps agents from enumerating
+        # internals via this path; this function is a belt-and-suspenders
+        # check on the owner-only run_store path.
+        sql = "this is !@#$ not sql at all"
+        assert _references_internal_tables(sql) is False
+
 
 # ── build_sql_tools: AccessLevel.NONE ──
 
