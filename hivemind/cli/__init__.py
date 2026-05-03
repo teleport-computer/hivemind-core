@@ -58,7 +58,7 @@ _ACTIVE_POINTER = _HIVEMIND_HOME / "active"
 from ._http import _hdelete, _hget, _hpost  # noqa: F401  (test contract)
 
 # ── Subcommand modules ──
-from . import admin, diagnostics, owner, profile, rooms, trust_cmds
+from . import admin, agents, diagnostics, owner, profile, rooms, sql, trust_cmds
 from ._root import cli
 
 # ── Test-patchable trust helper ──
@@ -92,6 +92,8 @@ cli.add_command(rooms.rooms_cli, "room")
 cli.add_command(profile.profile_cli, "profile")
 cli.add_command(admin.admin_cli, "admin")
 cli.add_command(trust_cmds.trust_group, "trust")
+cli.add_command(agents.agents_cli, "agents")
+cli.add_command(sql.sql_cmd, "sql")
 
 
 if __name__ == "__main__":
