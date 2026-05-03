@@ -115,6 +115,39 @@ For a list of canonical room shapes (fixed query, uploadable, sealed,
 no-LLM), see
 https://github.com/teleport-computer/hivemind/blob/main/docs/room-cookbook.md
 
+### Flow C — Both sides bring private data
+
+When the user is party B in a negotiation and ALSO has private data
+they don't want to share with party A: bake the data into a sealed
+query agent. Sealed source bytes are encrypted at rest with a key
+derivable only inside the CVM, so A cannot read them and the operator
+cannot read them. Inside the CVM the agent decrypts and reads normally,
+so it has access to both A's scope-filtered SQL and its own bundled
+private files in one process. The mediator then filters the output
+against the room rules so B's data cannot leak through the answer
+either.
+
+```
+b-query-agent/
+├── Dockerfile
+├── agent.py           # reads QUERY_PROMPT, queries A's data via SQL,
+│                       # cross-references with my-calendar.json
+├── my-calendar.json   # B's private data — bytes are sealed
+└── my-preferences.json
+```
+
+```bash
+hmctl room ask 'hmroom://...' "Find a time both calendars allow" \
+  --agent ./b-query-agent \
+  --query-visibility sealed
+```
+
+Constraint: bundled data must fit in the agent archive — the CVM
+enforces bridge-only egress, so the agent cannot reach back to a
+B-controlled server at run time. For genuinely large or live data
+on B's side, this is currently a limitation (room vault is
+owner-write-only).
+
 ## Custom agents (when the user wants more control)
 
 Three agent types you can upload via `POST /v1/room-agents` (or via
