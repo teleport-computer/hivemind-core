@@ -93,6 +93,14 @@ Queries the `data_xordi_tiktok_oauth_watch_history` table, computes per-user and
 
 Shows the full async submit → poll → artifact-fetch flow. See `tiktok-analytics/USAGE.md` for the end-to-end walkthrough.
 
+### `dinner-negotiation/` — Bilateral Private Data (Marquee Example)
+
+Two friends each hold a private calendar; neither shares with the other; both want a single dinner time and venue. Bob's sealed query agent bundles his calendar + preferences alongside `agent.py`; the bytes are encrypted at rest, decrypted only inside the CVM, and used in-process with Alice's scope-filtered SQL. The mediator strips anything that violates Alice's rules before release.
+
+**Role:** query (bundled with private data) | **Pattern:** symmetric bilateral with `inspection_mode=sealed` + `output_visibility=owner_and_querier` | **LLM calls:** 1 (polish + venue suggestion)
+
+This is the canonical "two parties, two private datasets, one room" example referenced from the website's `/agents` page and from `SKILL.md`. Read `dinner-negotiation/README.md` for the end-to-end walkthrough.
+
 ### `redact-mediator/` — PII Redaction Mediator
 
 Uses an LLM to strip emails, phone numbers, API keys, and other sensitive data from query output before it reaches the caller.

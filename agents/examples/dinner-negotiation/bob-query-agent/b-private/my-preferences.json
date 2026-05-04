@@ -1,0 +1,20 @@
+{
+  "_comment": "Bob's private dietary + venue preferences — sealed at upload. The agent uses these to filter venue suggestions; the mediator should not include any of these flags verbatim in the released output.",
+  "neighborhoods_preferred": ["Mission", "Hayes Valley", "SoMa"],
+  "neighborhoods_avoid": ["Marina"],
+  "max_distance_km": 5,
+  "diet": {
+    "vegetarian": false,
+    "avoid_pasta": true,
+    "avoid_seafood": false
+  },
+  "venue_preferences": {
+    "loud_ok": false,
+    "min_review_count": 50,
+    "price_max": "$$"
+  },
+  "venues_visited_recently": [
+    {"name": "Tartine Manufactory", "last_visit": "2026-04-28"},
+    {"name": "Lazy Bear", "last_visit": "2026-04-15"}
+  ]
+}

@@ -181,6 +181,41 @@ on the current API, so for genuinely large or live B-side data this
 is a limitation today — flag it to your user rather than silently
 truncating.
 
+## Output visibility — who sees the released text
+
+Rooms have an `output_visibility` field on the manifest, one of:
+
+- `querier_only` (default) — only the participant who issued the query
+  token can fetch the run output. The room owner's
+  `GET /v1/runs/{run_id}` returns the run record but with
+  `output: null, payload_redacted: true`. Useful when the participant
+  wants to keep the answer private even from the data owner.
+- `owner_and_querier` — both can fetch the output. **This is the mode
+  you need for any bilateral negotiation where both parties want the
+  answer** (e.g., the dinner example: Alice and Bob both need the
+  agreed time). In this mode the mediator agent's stripping is the
+  load-bearing trust mechanism — the API does not redact for the
+  owner because the owner is supposed to see the output.
+
+Set on `hmctl room create` with `--output-visibility owner_and_querier`.
+Pick deliberately; it's signed into the manifest.
+
+## Worked example: dinner-time negotiation
+
+The canonical bilateral example lives at
+`agents/examples/dinner-negotiation/` in this repo. Alice loads her
+calendar, mints a room with rules, hands Bob the `hmroom://` URI; Bob
+uploads a sealed query agent that bundles his own calendar +
+preferences alongside `agent.py`; the agent reasons over both inside
+the CVM; mediator releases one date+time+venue. Neither calendar
+crosses the boundary.
+
+Read `agents/examples/dinner-negotiation/README.md` for the full
+walkthrough and a copy-paste end-to-end run. When the user asks for
+something shaped like *"two of us, both have private data, want a
+joint answer"*, the dinner example is the template; replace
+`alice-seed.sql` and `b-private/*.json` with their data.
+
 ## Custom agents (when the user wants more control)
 
 Three agent types you can upload via `POST /v1/room-agents` (or via
