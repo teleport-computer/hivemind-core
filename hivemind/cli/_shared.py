@@ -22,7 +22,17 @@ from ._http import (
 )
 from ._trust import _release_metadata_for
 
-_DEFAULT_SERVICE = "http://localhost:8100"
+import os as _os
+
+# Hosted Hivemind by default so `uv tool install hmctl && hmctl signup …`
+# just works against production. Local devs can override with the
+# HIVEMIND_DEFAULT_SERVICE env var (drop `export
+# HIVEMIND_DEFAULT_SERVICE=http://localhost:8100` into your shell rc or
+# .envrc to skip the explicit --service every time).
+_DEFAULT_SERVICE = _os.environ.get(
+    "HIVEMIND_DEFAULT_SERVICE",
+    "https://hivemind.teleport.computer",
+)
 
 
 # Test-patchable HTTP trampolines (see owner.py for rationale).

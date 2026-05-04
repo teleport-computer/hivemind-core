@@ -42,19 +42,18 @@ binary.
 
 A *profile* is a saved (service URL, API key) pair stored at
 `~/.hivemind/profiles/<name>.yaml`. The default service is
-`http://localhost:8100`, so **you must pass `--service
-https://hivemind.teleport.computer`** the first time you create a
-profile or it'll try localhost. After signup/init writes the profile
-config, every subsequent `hmctl --profile NAME …` command reads the
-service URL from that file — no need to repeat `--service`. To run
-two parties from one machine, use a `--profile` per party:
+`https://hivemind.teleport.computer`, so signup against production
+needs no flags. To override (local dev server, self-hosted, staging),
+either pass `--service URL` on signup/init or set
+`HIVEMIND_DEFAULT_SERVICE` in your shell. After signup/init writes the
+profile config, every subsequent `hmctl --profile NAME …` command
+reads the URL from that file. To run two parties from one machine,
+use a `--profile` per party:
 
 ```bash
-# First-time profile creation MUST pass --service for hosted use:
-hmctl --profile alice signup alice --service https://hivemind.teleport.computer
-hmctl --profile bob   signup bob   --service https://hivemind.teleport.computer
+hmctl --profile alice signup alice
+hmctl --profile bob   signup bob
 
-# After that, --service is implicit from the profile:
 hmctl --profile alice balance
 hmctl --profile bob   balance
 ```
@@ -62,7 +61,7 @@ hmctl --profile bob   balance
 If the user already has an `hmk_…` key, use `init` instead of signup:
 
 ```bash
-hmctl --profile alice init --service https://hivemind.teleport.computer --api-key hmk_...
+hmctl --profile alice init --api-key hmk_...
 ```
 
 ### Funding the tenant

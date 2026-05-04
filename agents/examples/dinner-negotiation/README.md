@@ -92,16 +92,15 @@ seeding and skip the `--agent-timeout` flag.)
 
 About `--profile` and `--service`: a profile is a saved (service
 URL, API key) pair stored at `~/.hivemind/profiles/<name>.yaml`. The
-default service is `http://localhost:8100`, so you MUST pass
-`--service https://hivemind.teleport.computer` on the first signup
-or it'll try localhost. After signup writes the profile config,
-later `hmctl --profile NAME …` commands inherit the service URL
-automatically.
+default service is `https://hivemind.teleport.computer`, so no flag
+is needed for production use. Override with `--service URL` on
+signup/init or set `HIVEMIND_DEFAULT_SERVICE=...` in your shell to
+target local dev or a self-hosted deployment.
 
 ### Alice — provision, seed, mint room
 
 ```bash
-hmctl --profile alice signup alice --service https://hivemind.teleport.computer
+hmctl --profile alice signup alice
 hmctl --profile alice balance
 
 # If balance is $0 (the deployment hasn't enabled auto-credit yet),
@@ -148,7 +147,7 @@ hmctl --profile alice room create agents/examples/dinner-negotiation/scope-agent
 ### Bob — provision, inspect, ask with sealed agent + bundled data
 
 ```bash
-hmctl --profile bob signup bob --service https://hivemind.teleport.computer
+hmctl --profile bob signup bob
 hmctl --profile bob balance
 # If balance is $0:
 hmctl --profile bob redeem-credit hmcc_0F7HJvv8uYNwMj1QPcplj3tGx-zNrcXm9s8ulLLKJd0
