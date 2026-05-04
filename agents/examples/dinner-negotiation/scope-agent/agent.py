@@ -33,14 +33,23 @@ import json
 # scope_fn is serialized as Python source; the pipeline compiles it
 # inside the CVM and runs it on every (sql, params, rows) result the
 # query agent fetches.
+#
+# Important contract note: the runtime statically rejects literal
+# `{"allow": False, ...}` returns with the error "Scope functions must
+# transform rows, not deny queries." The privacy boundary is at the
+# rows, not the SQL text. So to "block" an off-table query, return
+# `{"allow": True, "rows": []}` — semantically equivalent (no rows
+# leak) but follows the row-transforming contract.
 SCOPE_FN_SOURCE = '''
 def scope(sql, params, rows):
     """Allow only is_busy=false rows from the calendar table, and only
-    the start_time/end_time columns. Refuse anything else.
+    the start_time/end_time columns. Off-table queries return zero rows.
     """
     sql_lower = (sql or "").lower()
     if "calendar" not in sql_lower:
-        return {"allow": False, "reason": "scope: only the calendar table is in scope"}
+        # Off-table query — no rows leak. Same effect as deny, but in
+        # the row-transforming contract the runtime requires.
+        return {"allow": True, "rows": []}
 
     allowed_cols = {"start_time", "end_time"}
     out = []

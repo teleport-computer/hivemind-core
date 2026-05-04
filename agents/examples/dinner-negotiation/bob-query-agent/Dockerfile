@@ -1,14 +1,13 @@
 # Base off hivemind-agent-base so the sandbox builder doesn't need to
-# resolve pip + apt at build time. The base image already has httpx
-# pinned. If you need extra dependencies, layer them after this line.
+# resolve pip at build time. agent.py uses stdlib only (urllib),
+# so no extra layers are required.
 #
-# A bare `FROM python:3.12-slim` + `pip install httpx` Dockerfile DOES
-# build standalone but FAILS inside the sandbox builder's network-
-# constrained build context — pip cannot reach PyPI from there. Using
-# the prebuilt base avoids that whole class of issue.
+# IMPORTANT: use the absolute path in CMD. The runtime invokes
+# containers from /tmp, not the WORKDIR, so a bare `python agent.py`
+# fails with No-such-file. All built-in agents (default-scope,
+# default-query, default-mediator) follow this pattern.
 FROM hivemind-agent-base:latest
 
-WORKDIR /app
-COPY agent.py .
-COPY b-private/ ./b-private/
-CMD ["python", "agent.py"]
+COPY agent.py /app/agent.py
+COPY b-private/ /app/b-private/
+CMD ["python", "/app/agent.py"]

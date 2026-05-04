@@ -29,14 +29,26 @@ Do NOT invoke for:
 ## Setup (one-time per environment)
 
 ```bash
-uv tool install hmctl
+# 0.3.7+ has `--agent-timeout` and `hmctl sql -f` used below. PyPI
+# may still be on 0.3.6; install from main until the next release:
+uv tool install --upgrade git+https://github.com/teleport-computer/hivemind.git
+hmctl --version  # expect 0.3.7+
 hmctl signup my-agent --service https://hivemind.teleport.computer
 hmctl balance
 ```
 
-`signup` provisions a $0 balance; the hosted deployment auto-credits a
-starter amount enough for one full run (create room → ask once). If the
-user already has a key:
+`signup` provisions a $0 balance. If the deployment has
+`signup_starter_credit_code` set on the server, signup auto-redeems
+and you have enough for one full run. Otherwise the balance is $0
+and you must redeem a code:
+
+```bash
+# Public starter code: $1, 1000 redemptions, 90-day expiry. One per
+# tenant. If exhausted, ask the operator for a fresh code.
+hmctl redeem-credit hmcc_0F7HJvv8uYNwMj1QPcplj3tGx-zNrcXm9s8ulLLKJd0
+```
+
+If the user already has an `hmk_…` key, skip signup:
 
 ```bash
 hmctl init --service https://hivemind.teleport.computer --api-key hmk_...
@@ -200,9 +212,11 @@ b-query-agent/
 ```
 
 ```bash
+# Visibility is set at room-create time, not on `room ask`. The room
+# above was created with --query-visibility sealed, so B's uploaded
+# archive is sealed at rest by virtue of that.
 hmctl room ask 'hmroom://...' "Find a time both calendars allow" \
-  --agent ./b-query-agent \
-  --query-visibility sealed
+  --agent ./b-query-agent
 ```
 
 See "What your code can do inside the CVM" above for why bundling is

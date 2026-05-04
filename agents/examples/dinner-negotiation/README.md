@@ -77,10 +77,18 @@ code manually (your operator publishes one).
 
 ### Prereqs
 
+`hmctl` 0.3.7 has the `--agent-timeout` flag and the `hmctl sql`
+subcommand this example uses. PyPI may still be on 0.3.6; install
+from main until the next release:
+
 ```bash
-uv tool install hmctl
-hmctl --version  # 0.3.7+ recommended for `hmctl sql -f` and `--agent-timeout`
+uv tool install --upgrade git+https://github.com/teleport-computer/hivemind.git
+hmctl --version  # expect 0.3.7+
 ```
+
+(If the build complains about `git+...`, run `uv tool install hmctl`
+to get whatever's on PyPI; you'll need to use the curl fallback for
+seeding and skip the `--agent-timeout` flag.)
 
 ### Alice — provision, seed, mint room
 
@@ -88,8 +96,11 @@ hmctl --version  # 0.3.7+ recommended for `hmctl sql -f` and `--agent-timeout`
 hmctl --profile alice signup alice --service https://hivemind.teleport.computer
 hmctl --profile alice balance
 
-# If balance is $0 (no auto-credit on this deployment), redeem one:
-# hmctl --profile alice redeem-credit hmcc_...
+# If balance is $0 (the deployment hasn't enabled auto-credit yet),
+# redeem the public starter code. This code has 1000 redemptions
+# capped at $1 each; one redemption per tenant. If exhausted, ask
+# the operator for a fresh code.
+hmctl --profile alice redeem-credit hmcc_0F7HJvv8uYNwMj1QPcplj3tGx-zNrcXm9s8ulLLKJd0
 
 # Seed Alice's calendar table.
 # On hmctl 0.3.7+:
@@ -131,17 +142,21 @@ hmctl --profile alice room create agents/examples/dinner-negotiation/scope-agent
 ```bash
 hmctl --profile bob signup bob --service https://hivemind.teleport.computer
 hmctl --profile bob balance
-# If balance is $0: hmctl --profile bob redeem-credit hmcc_...
+# If balance is $0:
+hmctl --profile bob redeem-credit hmcc_0F7HJvv8uYNwMj1QPcplj3tGx-zNrcXm9s8ulLLKJd0
 
 ROOM='hmroom://...'  # paste the URI Alice shared
 hmctl --profile bob room inspect "$ROOM"
 hmctl --profile bob room accept "$ROOM"
 
 # Ask. Supplies Bob's own sealed query agent with bundled private data.
+# Note: there is no --query-visibility flag on `room ask` — visibility
+# is set at upload-time (the agent's registered inspection_mode) or
+# at room-create-time. Bob's bundled archive is sealed by virtue of
+# the room being created with --query-visibility sealed.
 hmctl --profile bob room ask "$ROOM" \
   "Find a Thursday or Friday evening this week that works for both of us, near Mission, no pasta." \
   --agent agents/examples/dinner-negotiation/bob-query-agent \
-  --query-visibility sealed \
   --provider openrouter
 ```
 
