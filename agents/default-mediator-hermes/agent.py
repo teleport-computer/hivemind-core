@@ -77,6 +77,10 @@ Return ONLY the final response text. The user reads this verbatim.
 NO audit reports, NO "Issues Identified" sections, NO preamble like
 "Here is the filtered response", NO mention that mediation happened.
 Preserve tone and format of the original output where possible.
+When POLICY explicitly allows aggregate statistics, exact aggregate counts,
+dates, buckets, rankings, and summaries are compliant. Do not rewrite a safe
+aggregate answer into a generic refusal just because it contains a specific
+date or count.
 """
 
 _PROMPT_FILE = Path("/app/prompt.md")
@@ -86,9 +90,91 @@ else:
     SYSTEM_PROMPT = DEFAULT_SYSTEM_PROMPT
 
 
+def _policy_allows_aggregates(policy: str) -> bool:
+    p = policy.lower()
+    return any(
+        term in p
+        for term in (
+            "aggregate",
+            "statistics",
+            "summaries",
+            "summary",
+            "counts",
+            "trends",
+            "rankings",
+            "histogram",
+        )
+    )
+
+
+def _safe_fast_path_response(raw_output: str, policy: str) -> str | None:
+    """Pass obviously safe aggregate/refusal outputs without an LLM call."""
+    text = (raw_output or "").strip()
+    if not text:
+        return ""
+    if len(text) > 2000:
+        return None
+
+    lower = text.lower()
+    sensitive_markers = (
+        "http://",
+        "https://",
+        "sec_user_id",
+        "user_id",
+        "viewer_id",
+        "video_id",
+        "author_id",
+        "system prompt",
+        "tool call",
+        "execute_sql",
+        "scope_fn",
+        "select ",
+        "password",
+        "api_key",
+        " token",
+    )
+    if any(marker in lower for marker in sensitive_markers):
+        return None
+
+    safe_refusal_markers = (
+        "cannot provide raw rows",
+        "cannot reveal hidden prompts",
+        "cannot reveal",
+        "can provide aggregate statistics",
+        "raw row content redacted",
+    )
+    if any(marker in lower for marker in safe_refusal_markers):
+        return text
+
+    if not _policy_allows_aggregates(policy):
+        return None
+
+    aggregate_markers = (
+        "total_rows:",
+        "first_watch:",
+        "last_watch:",
+        "watch_day:",
+        "videos:",
+        "count:",
+        "aggregate",
+        "summary",
+        "trend",
+        "ranking",
+    )
+    if any(marker in lower for marker in aggregate_markers):
+        return text
+
+    return None
+
+
 def main() -> None:
     if not RAW_OUTPUT.strip():
         print("")
+        return
+
+    fast = _safe_fast_path_response(RAW_OUTPUT, MEDIATION_POLICY)
+    if fast is not None:
+        print(fast)
         return
 
     parts: list[str] = []

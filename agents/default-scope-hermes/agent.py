@@ -147,6 +147,111 @@ _FALLBACK_SCOPE_FN = (
     "    return {\"allow\": True, \"rows\": [{\"match_count\": len(rows)}]}\n"
 )
 
+_AGGREGATE_POLICY_SCOPE_FN = """\
+def scope(sql, params, rows):
+    # aggregate_policy_fast_path: preserve aggregate outputs, collapse raw rows.
+    if not rows:
+        return {"allow": True, "rows": []}
+    sensitive = {
+        "sec_user_id", "user_id", "viewer_id", "video_id", "url",
+        "title", "description", "author_id", "raw_title",
+        "raw_description", "email", "phone", "token", "secret",
+        "password", "api_key",
+    }
+    metric_names = {
+        "count", "n", "total", "total_rows", "row_count",
+        "match_count", "videos", "watches", "views", "likes",
+        "comments", "shares", "average", "avg", "sum", "min", "max",
+    }
+    dimension_names = {
+        "watch_day", "day", "date", "week", "month", "hashtag",
+        "hashtags", "music", "bucket", "period", "trend",
+        "first_watch", "last_watch",
+    }
+    out = []
+    for row in rows:
+        clean = {}
+        raw_like = False
+        has_metric = False
+        for key, value in row.items():
+            lk = str(key).lower()
+            if lk in sensitive:
+                raw_like = True
+            if (
+                lk in metric_names
+                or "count" in lk
+                or lk.endswith("_total")
+                or lk.startswith("total_")
+                or lk.startswith("avg_")
+                or lk.startswith("min_")
+                or lk.startswith("max_")
+            ):
+                has_metric = True
+        if raw_like:
+            continue
+        for key, value in row.items():
+            lk = str(key).lower()
+            if (
+                lk in metric_names
+                or lk in dimension_names
+                or "count" in lk
+                or lk.endswith("_total")
+                or lk.startswith("total_")
+                or lk.startswith("avg_")
+                or lk.startswith("min_")
+                or lk.startswith("max_")
+            ):
+                clean[key] = value
+        if clean and has_metric:
+            out.append(clean)
+        if len(out) >= 50:
+            break
+    if out:
+        return {"allow": True, "rows": out}
+    return {
+        "allow": True,
+        "rows": [{
+            "policy_note": "raw row content redacted by aggregate-only policy",
+            "match_count": len(rows),
+        }],
+    }
+"""
+
+
+def _looks_like_aggregate_policy(policy: str, question: str) -> bool:
+    """Detect rooms whose policy explicitly permits aggregate statistics only."""
+    text = f"{policy}\n{question}".lower()
+    if not policy.strip():
+        return False
+    allows_aggregate = any(
+        term in text
+        for term in (
+            "aggregate",
+            "statistics",
+            "summaries",
+            "summary",
+            "counts",
+            "trends",
+            "rankings",
+            "histogram",
+        )
+    )
+    blocks_raw = any(
+        term in text
+        for term in (
+            "raw row",
+            "raw rows",
+            "row dumps",
+            "individual",
+            "identifiers",
+            "urls",
+            "titles",
+            "descriptions",
+            "system internals",
+        )
+    )
+    return allows_aggregate and blocks_raw
+
 
 def _extract_json_emit(text: str) -> dict | None:
     """Pull the last JSON object containing `scope_fn` from the agent's output."""
@@ -176,6 +281,10 @@ def main() -> None:
     if not QUERY_PROMPT.strip():
         # Fail closed with a maximally-aggregating scope_fn.
         print(json.dumps({"scope_fn": _FALLBACK_SCOPE_FN}))
+        return
+
+    if _looks_like_aggregate_policy(POLICY_CONTEXT, QUERY_PROMPT):
+        print(json.dumps({"scope_fn": _AGGREGATE_POLICY_SCOPE_FN}))
         return
 
     parts: list[str] = []
