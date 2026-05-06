@@ -51,6 +51,30 @@ MEDIATOR_RESERVE_FRACTION = 0.3
 SCOPE_BUDGET_FRACTION = 0.5
 
 
+def _extract_scope_agent_json(raw: str) -> dict:
+    """Return the last JSON object containing scope_fn from agent stdout.
+
+    Hermes can write provider retry diagnostics to stdout before its final
+    machine-readable JSON line. Keep the scope contract strict by accepting
+    only a decoded JSON object that contains ``scope_fn``.
+    """
+    text = (raw or "").strip()
+    decoder = json.JSONDecoder()
+    found: dict | None = None
+    for idx, ch in enumerate(text):
+        if ch != "{":
+            continue
+        try:
+            obj, _end = decoder.raw_decode(text[idx:])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(obj, dict) and "scope_fn" in obj:
+            found = obj
+    if found is None:
+        raise json.JSONDecodeError("no scope_fn JSON object found", text, 0)
+    return found
+
+
 def _mediator_reserve(remaining: int) -> int:
     """Return how many tokens to reserve from the query stage for mediator.
 
@@ -602,7 +626,7 @@ class Pipeline:
         )
 
         try:
-            data = json.loads(raw.strip())
+            data = _extract_scope_agent_json(raw)
 
             if "scope_fn" in data:
                 source = data["scope_fn"]

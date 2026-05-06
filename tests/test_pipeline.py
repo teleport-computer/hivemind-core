@@ -162,6 +162,52 @@ class TestRunQuery:
         assert usage["total_tokens"] == 10
 
     @pytest.mark.asyncio
+    async def test_scope_agent_accepts_noisy_stdout_before_scope_json(
+        self, monkeypatch
+    ):
+        settings = Settings(database_url="unused", llm_api_key="test")
+        agent_store = MagicMock(spec=AgentStore)
+        agent_store.get.return_value = AgentConfig(
+            agent_id="scope-noisy",
+            name="Scope Agent",
+            image="img:scope",
+        )
+        agent_store.list_file_paths.return_value = []
+        pipeline = Pipeline(settings, MagicMock(spec=Database), agent_store)
+
+        scope_fn_source = (
+            "def scope(sql, params, rows):\n"
+            "    return {'allow': True, 'rows': rows}\n"
+        )
+
+        class FakeBackend:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            async def run(self, **kwargs):
+                return (
+                    "Hermes retry log on stdout\n"
+                    + json.dumps({"scope_fn": scope_fn_source}),
+                    {"total_tokens": 0},
+                )
+
+        monkeypatch.setattr(pipeline_module, "SandboxBackend", FakeBackend)
+
+        req = QueryRequest(
+            query="What?",
+            query_agent_id="q1",
+            scope_agent_id="scope-noisy",
+        )
+        fn, source, usage = await pipeline._run_scope_agent(req, max_tokens=1000)
+
+        assert source == scope_fn_source
+        assert fn("SELECT 1", [], [{"x": 1}]) == {
+            "allow": True,
+            "rows": [{"x": 1}],
+        }
+        assert usage["total_tokens"] == 0
+
+    @pytest.mark.asyncio
     async def test_hermes_scope_agent_skips_default_query_source_bind_mount(
         self, monkeypatch
     ):
@@ -644,4 +690,3 @@ class TestQueryRequestProvider:
     def test_provider_field_round_trip(self):
         req = QueryRequest(query="hi", provider="tinfoil")
         assert req.provider == "tinfoil"
-
