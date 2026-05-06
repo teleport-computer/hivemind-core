@@ -55,17 +55,20 @@ def agents_list(as_json: bool):
     usage = _index_usage(rooms)
 
     click.echo(
-        f"{'NAME':<28} {'TYPE':<10} {'INSPECTION':<12} {'IN ROOMS':<10} AGENT_ID"
+        f"{'NAME':<28} {'TYPE':<10} {'HARNESS':<11} "
+        f"{'INSPECTION':<12} {'IN ROOMS':<10} AGENT_ID"
     )
     for a in agents:
         name = (a.get("name") or "—")[:28]
         atype = a.get("agent_type") or "—"
+        harness = a.get("harness") or "claude_code"
         inspection = a.get("inspection_mode") or "full"
         agent_id = a.get("agent_id") or ""
         n = len(usage.get(agent_id, []))
         in_rooms = "—" if n == 0 else str(n)
         click.echo(
-            f"{name:<28} {atype:<10} {inspection:<12} {in_rooms:<10} {agent_id}"
+            f"{name:<28} {atype:<10} {harness:<11} "
+            f"{inspection:<12} {in_rooms:<10} {agent_id}"
         )
 
 
@@ -112,6 +115,7 @@ def agents_get(agent_id: str, as_json: bool):
     click.echo(f"name:            {agent.get('name')}")
     click.echo(f"type:            {agent.get('agent_type') or '—'}")
     click.echo(f"image:           {agent.get('image') or '—'}")
+    click.echo(f"harness:         {agent.get('harness') or 'claude_code'}")
     click.echo(f"inspection_mode: {agent.get('inspection_mode') or 'full'}")
     if files:
         click.echo("files:")

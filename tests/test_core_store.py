@@ -14,9 +14,14 @@ from hivemind.version import APP_VERSION
 
 
 DEFAULT_AGENT_IDS = (
+    "default-index",
     "default-scope",
     "default-query",
     "default-mediator",
+    "default-index-hermes",
+    "default-scope-hermes",
+    "default-query-hermes",
+    "default-mediator-hermes",
 )
 
 
@@ -144,6 +149,70 @@ class TestDatabaseInit:
         finally:
             _drop_db(test_dsn, db_name)
 
+    def test_bootstrap_normalizes_legacy_agent_harness_values(self):
+        test_dsn = os.environ.get("HIVEMIND_TEST_DATABASE_URL", "")
+        if not test_dsn:
+            pytest.skip("HIVEMIND_TEST_DATABASE_URL not set")
+
+        db_name = f"hm_legacy_agents_{secrets.token_hex(4)}"
+        with psycopg.connect(test_dsn, autocommit=True) as conn:
+            conn.execute(f'CREATE DATABASE "{db_name}"')
+
+        legacy_dsn = _dsn_for_db(test_dsn, db_name)
+        try:
+            with psycopg.connect(legacy_dsn, autocommit=True) as conn:
+                conn.execute(
+                    """
+                    CREATE TABLE _hivemind_agents (
+                        agent_id TEXT PRIMARY KEY,
+                        name TEXT NOT NULL,
+                        description TEXT NOT NULL DEFAULT '',
+                        agent_type TEXT NOT NULL DEFAULT 'query',
+                        image TEXT NOT NULL,
+                        entrypoint TEXT,
+                        memory_mb INTEGER NOT NULL DEFAULT 256,
+                        max_llm_calls INTEGER NOT NULL DEFAULT 20,
+                        max_tokens INTEGER NOT NULL DEFAULT 100000,
+                        timeout_seconds INTEGER NOT NULL DEFAULT 120,
+                        inspection_mode TEXT NOT NULL DEFAULT 'full',
+                        harness TEXT,
+                        created_at DOUBLE PRECISION NOT NULL
+                    )
+                    """
+                )
+                conn.execute(
+                    """
+                    INSERT INTO _hivemind_agents
+                    (agent_id, name, image, harness, created_at)
+                    VALUES
+                    ('legacy-null', 'legacy null', 'img:test', NULL, 1),
+                    ('legacy-bogus', 'legacy bogus', 'img:test', 'bogus', 1)
+                    """
+                )
+
+            db = Database(legacy_dsn)
+            try:
+                rows = db.execute(
+                    "SELECT agent_id, harness FROM _hivemind_agents "
+                    "ORDER BY agent_id"
+                )
+                assert rows == [
+                    {"agent_id": "legacy-bogus", "harness": "claude_code"},
+                    {"agent_id": "legacy-null", "harness": "claude_code"},
+                ]
+                with pytest.raises(psycopg.Error):
+                    db.execute_commit(
+                        """
+                        INSERT INTO _hivemind_agents
+                        (agent_id, name, description, image, harness, created_at)
+                        VALUES ('legacy-bad-2', 'bad', '', 'img:test', 'bad', 1)
+                        """
+                    )
+            finally:
+                db.close()
+        finally:
+            _drop_db(test_dsn, db_name)
+
     def test_get_schema_excludes_internal(self, pg_db):
         schema = pg_db.get_schema(exclude_internal=True)
         for row in schema:
@@ -153,6 +222,24 @@ class TestDatabaseInit:
         schema = pg_db.get_schema(exclude_internal=False)
         table_names = {r["table_name"] for r in schema}
         assert "_hivemind_agents" in table_names
+
+    def test_agent_harness_constraint_rejects_invalid_values(self, pg_db):
+        with pytest.raises(psycopg.Error):
+            pg_db.execute_commit(
+                """
+                INSERT INTO _hivemind_agents
+                (agent_id, name, description, image, harness, created_at)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                """,
+                [
+                    f"bad-harness-{secrets.token_hex(4)}",
+                    "bad harness",
+                    "",
+                    "img:test",
+                    "bogus",
+                    1.0,
+                ],
+            )
 
 
 class TestHivemindHealth:
@@ -206,6 +293,7 @@ class TestDefaultAgentAutoload:
             database_url=test_dsn,
             llm_api_key="test",
             autoload_default_agents=True,
+            default_index_image="img/default-index:v1",
             default_scope_image="img/default-scope:v1",
             default_query_image="img/default-query:v1",
             max_llm_calls=77,
@@ -214,17 +302,77 @@ class TestDefaultAgentAutoload:
         )
         hm = Hivemind(settings)
         try:
+            assert settings.default_index_agent == "default-index"
             assert settings.default_scope_agent == "default-scope"
             assert settings.default_query_agent == "default-query"
 
+            assert hm.agent_store.get("default-index").image == "img/default-index:v1"
             assert hm.agent_store.get("default-scope").image == "img/default-scope:v1"
             assert hm.agent_store.get("default-query").image == "img/default-query:v1"
             assert hm.agent_store.get("default-scope").max_llm_calls == 77
             assert hm.agent_store.get("default-scope").max_tokens == 222_222
             assert hm.agent_store.get("default-scope").timeout_seconds == 456
 
+            assert len(hm.agent_store.list_file_paths("default-index")) == 1
             assert len(hm.agent_store.list_file_paths("default-scope")) == 1
             assert len(hm.agent_store.list_file_paths("default-query")) == 1
+        finally:
+            hm.db.close()
+            _clear_default_agents(test_dsn)
+
+    def test_hermes_defaults_autoload_with_harness(self, monkeypatch):
+        test_dsn = os.environ.get("HIVEMIND_TEST_DATABASE_URL", "")
+        if not test_dsn:
+            pytest.skip("HIVEMIND_TEST_DATABASE_URL not set")
+        _clear_default_agents(test_dsn)
+
+        class FakeRunner:
+            def __init__(self, settings):
+                self.settings = settings
+
+            def cleanup_stale_containers(self):
+                return None
+
+            def image_exists(self, image):
+                return True
+
+            def extract_image_files(self, image, **kwargs):
+                return {"agent.py": f"# {image}"}
+
+        monkeypatch.setattr(
+            "hivemind.core._create_runner",
+            lambda settings: FakeRunner(settings),
+        )
+
+        settings = Settings(
+            database_url=test_dsn,
+            llm_api_key="test",
+            autoload_default_agents=True,
+            default_index_hermes_image="img/default-index-hermes:v1",
+            default_scope_hermes_image="img/default-scope-hermes:v1",
+            default_query_hermes_image="img/default-query-hermes:v1",
+            default_mediator_hermes_image="img/default-mediator-hermes:v1",
+        )
+        hm = Hivemind(settings)
+        try:
+            assert settings.default_index_hermes_agent == "default-index-hermes"
+            assert settings.default_scope_hermes_agent == "default-scope-hermes"
+            assert settings.default_query_hermes_agent == "default-query-hermes"
+            assert (
+                settings.default_mediator_hermes_agent
+                == "default-mediator-hermes"
+            )
+
+            for agent_id in (
+                "default-index-hermes",
+                "default-scope-hermes",
+                "default-query-hermes",
+                "default-mediator-hermes",
+            ):
+                agent = hm.agent_store.get(agent_id)
+                assert agent is not None
+                assert agent.harness == "hermes"
+                assert len(hm.agent_store.list_file_paths(agent_id)) == 1
         finally:
             hm.db.close()
             _clear_default_agents(test_dsn)

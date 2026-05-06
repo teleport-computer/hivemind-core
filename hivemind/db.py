@@ -208,6 +208,27 @@ _INTERNAL_MIGRATIONS: tuple[str, ...] = (
     # image + native plugin tools).
     "ALTER TABLE _hivemind_agents "
     "ADD COLUMN IF NOT EXISTS harness TEXT NOT NULL DEFAULT 'claude_code'",
+    "ALTER TABLE _hivemind_agents "
+    "ALTER COLUMN harness SET DEFAULT 'claude_code'",
+    "UPDATE _hivemind_agents SET harness = 'claude_code' "
+    "WHERE harness IS NULL OR harness NOT IN ('claude_code', 'hermes')",
+    "ALTER TABLE _hivemind_agents "
+    "ALTER COLUMN harness SET NOT NULL",
+    """
+    DO $$
+    BEGIN
+        IF NOT EXISTS (
+            SELECT 1
+            FROM pg_constraint
+            WHERE conname = '_hivemind_agents_harness_check'
+              AND conrelid = '_hivemind_agents'::regclass
+        ) THEN
+            ALTER TABLE _hivemind_agents
+            ADD CONSTRAINT _hivemind_agents_harness_check
+            CHECK (harness IN ('claude_code', 'hermes'));
+        END IF;
+    END $$;
+    """,
     "ALTER TABLE _hivemind_query_runs "
     "ADD COLUMN IF NOT EXISTS room_id TEXT",
     "ALTER TABLE _hivemind_query_runs "

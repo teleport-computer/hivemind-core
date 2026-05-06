@@ -189,11 +189,15 @@ class SandboxBackend:
             port = await bridge.start()
             bridge_url = f"http://{self.settings.bridge_host}:{port}"
 
-            # Add bridge connection info to env
+            # Add bridge connection info to env. Server-controlled bridge,
+            # model, budget, and role values intentionally override caller
+            # env so a future upload path cannot weaken the sandbox contract.
             full_env = {
+                **env,
                 "BRIDGE_URL": bridge_url,
                 "SESSION_TOKEN": session_token,
                 "AGENT_ROLE": role,
+                "HIVEMIND_MODEL": self.llm_model,
                 "BUDGET_MAX_TOKENS": str(resolved_max_tokens),
                 "BUDGET_MAX_CALLS": str(resolved_max_calls),
                 # OpenAI SDK auto-routing
@@ -211,7 +215,6 @@ class SandboxBackend:
                     else {}
                 ),
                 **({"RUN_ID": run_id} if run_id else {}),
-                **env,
             }
 
             store = agent_store or self.agent_store

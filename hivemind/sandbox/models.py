@@ -3,7 +3,8 @@ import re
 from pydantic import BaseModel, Field, field_validator
 
 
-VALID_AGENT_TYPES = {"scope", "query", "mediator"}
+VALID_AGENT_TYPES = {"scope", "query", "index", "mediator"}
+VALID_AGENT_HARNESSES = {"claude_code", "hermes"}
 MAX_ARTIFACT_FILENAME_LENGTH = 128
 MAX_ARTIFACT_BYTES = 25 * 1024 * 1024
 _ARTIFACT_FILENAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
@@ -70,7 +71,7 @@ class AgentConfig(BaseModel):
     agent_id: str
     name: str
     description: str = ""
-    agent_type: str = "query"  # scope | query | mediator
+    agent_type: str = "query"  # scope | query | index | mediator
     image: str  # Docker image reference (e.g. "myorg/my-agent:v1")
     entrypoint: str | None = None  # Override container CMD
     memory_mb: int = Field(default=256, ge=16)  # Container memory limit
@@ -91,6 +92,15 @@ class AgentConfig(BaseModel):
     # hivemind-agent-base-hermes); the runtime injects HIVEMIND_AGENT_ROLE
     # so the in-container Hermes plugin registers role-appropriate tools.
     harness: str = "claude_code"
+
+    @field_validator("harness", mode="before")
+    @classmethod
+    def _normalize_harness(cls, value: str | None) -> str:
+        harness = str(value or "claude_code").strip().lower()
+        if harness not in VALID_AGENT_HARNESSES:
+            allowed = ", ".join(sorted(VALID_AGENT_HARNESSES))
+            raise ValueError(f"harness must be one of: {allowed}")
+        return harness
 
 
 class SandboxSettings(BaseModel):

@@ -984,6 +984,36 @@ def test_build_image_ensures_local_agent_base_when_required(tmp_path):
     mock_client.images.build.assert_called_once()
 
 
+def test_build_image_ensures_hermes_base_before_generic_base(tmp_path):
+    (tmp_path / "Dockerfile").write_text(
+        "FROM hivemind-agent-base-hermes:latest\nCOPY . /app\n"
+    )
+    (tmp_path / "agent.py").write_text("print('hello')\n")
+
+    mock_client = MagicMock()
+    mock_client.images.build.return_value = (MagicMock(), [])
+
+    settings = _make_settings()
+
+    with patch("hivemind.sandbox.docker_runner.docker") as mock_docker, patch(
+        "hivemind.agent_base_bootstrap.ensure_agent_base_hermes_image",
+        return_value=True,
+    ) as ensure_hermes_base, patch(
+        "hivemind.agent_base_bootstrap.ensure_agent_base_image",
+        return_value=True,
+    ) as ensure_claude_base:
+        mock_docker.from_env.return_value = mock_client
+        mock_docker.errors = __import__("docker").errors
+
+        runner = DockerRunner(settings)
+        tag = runner.build_image(str(tmp_path), "hivemind-agent-abc123:latest")
+
+    assert tag == "hivemind-agent-abc123:latest"
+    ensure_hermes_base.assert_called_once_with()
+    ensure_claude_base.assert_not_called()
+    mock_client.images.build.assert_called_once()
+
+
 def test_build_image_rejects_missing_dockerfile(tmp_path):
     """build_image should raise ValueError if no Dockerfile exists."""
     (tmp_path / "agent.py").write_text("print('hello')\n")

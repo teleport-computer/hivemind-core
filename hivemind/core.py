@@ -143,9 +143,11 @@ class Hivemind:
 
         # (role, harness, agent_key, image_key, fallback_agent_id)
         specs = (
+            ("index",    "claude_code", "default_index_agent",          "default_index_image",          "default-index"),
             ("scope",    "claude_code", "default_scope_agent",          "default_scope_image",          "default-scope"),
             ("query",    "claude_code", "default_query_agent",          "default_query_image",          "default-query"),
             ("mediator", "claude_code", "default_mediator_agent",       "default_mediator_image",       "default-mediator"),
+            ("index",    "hermes",      "default_index_hermes_agent",   "default_index_hermes_image",   "default-index-hermes"),
             ("scope",    "hermes",      "default_scope_hermes_agent",   "default_scope_hermes_image",   "default-scope-hermes"),
             ("query",    "hermes",      "default_query_hermes_agent",   "default_query_hermes_image",   "default-query-hermes"),
             ("mediator", "hermes",      "default_mediator_hermes_agent","default_mediator_hermes_image","default-mediator-hermes"),

@@ -1,9 +1,9 @@
 """Hivemind plugin for Hermes Agent.
 
-Importing this package triggers `hivemind_tools` to register five native
+Importing this package triggers `hivemind_tools` to register native
 tools (execute_sql, get_schema, verify_scope_fn, simulate_query,
-simulate_multi) on Hermes' global ToolRegistry. Each handler talks to
-this session's bridge over HTTP.
+simulate_multi, list_query_agent_files, read_query_agent_file) on Hermes'
+global ToolRegistry. Each handler talks to this session's bridge over HTTP.
 
 Native tool registration deliberately bypasses Hermes' MCP support —
 the MCP path is observed to be much slower per call than native

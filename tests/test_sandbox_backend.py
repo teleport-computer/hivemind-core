@@ -44,6 +44,13 @@ def _tools() -> list[Tool]:
     ]
 
 
+def test_agent_config_validates_harness():
+    assert _agent(harness="HERMES").harness == "hermes"
+    assert _agent(harness="").harness == "claude_code"
+    with pytest.raises(ValueError, match="harness must be one of"):
+        _agent(harness="bogus")
+
+
 class _BridgeStub:
     def __init__(self, *args, **kwargs):
         pass
@@ -134,6 +141,8 @@ async def test_backend_returns_output_and_usage_on_success(monkeypatch):
     assert env["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:9999"
     assert env["ANTHROPIC_API_KEY"] == run_kwargs["session_token"]
     assert env["AGENT_ROLE"] == "query"
+    assert env["HIVEMIND_MODEL"] == "model"
+    assert "HIVEMIND_AGENT_ROLE" not in env
     assert env["BUDGET_MAX_CALLS"] == "7"
     assert env["BUDGET_MAX_TOKENS"] == "900"
     assert env["CUSTOM_VAR"] == "x"
@@ -141,6 +150,59 @@ async def test_backend_returns_output_and_usage_on_success(monkeypatch):
     capped_agent = run_kwargs["agent"]
     assert capped_agent.memory_mb == 128
     assert capped_agent.timeout_seconds == 20
+
+
+@pytest.mark.asyncio
+async def test_backend_injects_hermes_role_and_protects_control_env(monkeypatch):
+    runner_instances = []
+
+    class _Runner:
+        def __init__(self, settings):
+            self.settings = settings
+            self.run_kwargs = None
+            runner_instances.append(self)
+
+        async def run_agent(self, **kwargs):
+            self.run_kwargs = kwargs
+            return ContainerResult(
+                stdout="ok\n",
+                stderr="",
+                exit_code=0,
+                timed_out=False,
+            )
+
+    _patch_runner(monkeypatch, _Runner)
+    monkeypatch.setattr(backend_module, "BridgeServer", _BridgeStub)
+
+    backend = backend_module.SandboxBackend(
+        llm_client=AsyncMock(),
+        llm_model="operator/model",
+        settings=_settings(),
+        agent=_agent(harness="hermes"),
+    )
+
+    async def on_tool_call(name: str, args: dict) -> str:
+        return "[]"
+
+    await backend.run(
+        role="scope",
+        env={
+            "BRIDGE_URL": "http://attacker",
+            "SESSION_TOKEN": "attacker-token",
+            "HIVEMIND_AGENT_ROLE": "query",
+            "HIVEMIND_MODEL": "attacker/model",
+        },
+        tools=_tools(),
+        on_tool_call=on_tool_call,
+        run_id="run-1",
+    )
+
+    env = runner_instances[0].run_kwargs["env"]
+    assert env["BRIDGE_URL"] == "http://127.0.0.1:9999"
+    assert env["SESSION_TOKEN"] == runner_instances[0].run_kwargs["session_token"]
+    assert env["HIVEMIND_AGENT_ROLE"] == "scope"
+    assert env["HIVEMIND_MODEL"] == "operator/model"
+    assert env["RUN_ID"] == "run-1"
 
 
 @pytest.mark.asyncio
