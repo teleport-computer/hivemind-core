@@ -1,3 +1,4 @@
+import json
 from unittest.mock import patch
 
 import pytest
@@ -355,6 +356,93 @@ async def test_openai_chat_completions_with_tools(bridge):
     tc = choice["message"]["tool_calls"][0]
     assert tc["function"]["name"] == "get_weather"
     assert tc["id"] == "call_abc123"
+
+
+def _parse_sse_payloads(text: str) -> list[dict | str]:
+    payloads: list[dict | str] = []
+    for line in text.splitlines():
+        if not line.startswith("data: "):
+            continue
+        raw = line.removeprefix("data: ")
+        if raw == "[DONE]":
+            payloads.append(raw)
+        else:
+            payloads.append(json.loads(raw))
+    return payloads
+
+
+@pytest.mark.asyncio
+async def test_openai_chat_completions_streams_text(bridge):
+    server, client, budget = bridge
+    headers = {"Authorization": "Bearer test-token-123"}
+    resp = await client.post(
+        "/v1/chat/completions",
+        headers=headers,
+        json={
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stream": True,
+            "stream_options": {"include_usage": True},
+        },
+    )
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("text/event-stream")
+
+    payloads = _parse_sse_payloads(resp.text)
+    deltas = [
+        p["choices"][0]["delta"]
+        for p in payloads
+        if isinstance(p, dict) and p.get("choices")
+    ]
+    assert deltas[0] == {"role": "assistant"}
+    assert any(d.get("content", "").startswith("LLM response.") for d in deltas)
+    assert any(
+        isinstance(p, dict)
+        and p.get("choices") == []
+        and p.get("usage", {}).get("total_tokens") == 150
+        for p in payloads
+    )
+    assert payloads[-1] == "[DONE]"
+
+
+@pytest.mark.asyncio
+async def test_openai_chat_completions_streams_tool_calls(bridge):
+    server, client, budget = bridge
+    headers = {"Authorization": "Bearer test-token-123"}
+    resp = await client.post(
+        "/v1/chat/completions",
+        headers=headers,
+        json={
+            "messages": [{"role": "user", "content": "What's the weather?"}],
+            "stream": True,
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "get_weather",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"location": {"type": "string"}},
+                        },
+                    },
+                }
+            ],
+        },
+    )
+    assert resp.status_code == 200
+
+    payloads = _parse_sse_payloads(resp.text)
+    chunks = [p for p in payloads if isinstance(p, dict) and p.get("choices")]
+    tool_delta = next(
+        c["choices"][0]["delta"]
+        for c in chunks
+        if c["choices"][0]["delta"].get("tool_calls")
+    )
+    tool_call = tool_delta["tool_calls"][0]
+    assert tool_call["index"] == 0
+    assert tool_call["id"] == "call_abc123"
+    assert tool_call["function"]["name"] == "get_weather"
+    assert tool_call["function"]["arguments"] == '{"location":"SF"}'
+    assert chunks[-1]["choices"][0]["finish_reason"] == "tool_calls"
 
 
 @pytest.mark.asyncio

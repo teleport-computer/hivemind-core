@@ -176,6 +176,8 @@ class OpenAIChatRequest(BaseModel):
     top_p: float | None = None
     tools: list[dict] | None = None
     tool_choice: str | dict | None = None
+    stream: bool = False
+    stream_options: dict | None = None
 
 
 class AnthropicMessagesRequest(BaseModel):

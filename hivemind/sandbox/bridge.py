@@ -407,6 +407,8 @@ class BridgeServer:
 
             Standard OpenAI SDKs route here via OPENAI_BASE_URL env var.
             Same budget enforcement and tape recording as /llm/chat.
+            Streaming requests are handled by making one internal LLM call
+            and wrapping the normalized result as OpenAI SSE chunks.
             """
             _enforce_llm_egress()
             async with bridge._llm_lock:
@@ -426,39 +428,128 @@ class BridgeServer:
 
                 result = await bridge._handle_llm_call(kwargs)
 
-                # Build OpenAI-format message
-                usage = result.get("usage", {})
-                message: dict = {"role": "assistant", "content": result.get("content", "")}
-                if result.get("reasoning"):
-                    message["reasoning"] = result["reasoning"]
-                if result.get("reasoning_content"):
-                    message["reasoning_content"] = result["reasoning_content"]
-                if result.get("reasoning_details"):
-                    message["reasoning_details"] = result["reasoning_details"]
-                if "tool_calls" in result:
-                    message["tool_calls"] = result["tool_calls"]
+            # Build OpenAI-format response after releasing the bridge lock.
+            usage = result.get("usage", {})
+            message: dict = {"role": "assistant", "content": result.get("content", "")}
+            if result.get("reasoning"):
+                message["reasoning"] = result["reasoning"]
+            if result.get("reasoning_content"):
+                message["reasoning_content"] = result["reasoning_content"]
+            if result.get("reasoning_details"):
+                message["reasoning_details"] = result["reasoning_details"]
+            if "tool_calls" in result:
+                message["tool_calls"] = result["tool_calls"]
 
-                prompt_tokens = usage.get("prompt_tokens", 0)
-                completion_tokens = usage.get("completion_tokens", 0)
+            prompt_tokens = usage.get("prompt_tokens", 0)
+            completion_tokens = usage.get("completion_tokens", 0)
+            response_id = f"chatcmpl-{uuid4().hex[:12]}"
+            created = int(time.time())
+            model = req.model or "default"
+            response = {
+                "id": response_id,
+                "object": "chat.completion",
+                "created": created,
+                "model": model,
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": message,
+                        "finish_reason": result.get("finish_reason") or "stop",
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": completion_tokens,
+                    "total_tokens": prompt_tokens + completion_tokens,
+                },
+            }
 
+            if not req.stream:
+                return response
+
+            from starlette.responses import StreamingResponse
+
+            def _chunk(delta: dict, finish_reason: str | None = None) -> dict:
                 return {
-                    "id": f"chatcmpl-{uuid4().hex[:12]}",
-                    "object": "chat.completion",
-                    "created": int(time.time()),
-                    "model": req.model or "default",
+                    "id": response_id,
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": model,
                     "choices": [
                         {
                             "index": 0,
-                            "message": message,
-                            "finish_reason": result.get("finish_reason") or "stop",
+                            "delta": delta,
+                            "finish_reason": finish_reason,
                         }
                     ],
-                    "usage": {
-                        "prompt_tokens": prompt_tokens,
-                        "completion_tokens": completion_tokens,
-                        "total_tokens": prompt_tokens + completion_tokens,
-                    },
                 }
+
+            def _format_sse(payload: dict | str) -> str:
+                if isinstance(payload, str):
+                    return f"data: {payload}\n\n"
+                data = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
+                return f"data: {data}\n\n"
+
+            async def _openai_sse_events():
+                yield _format_sse(_chunk({"role": "assistant"}))
+
+                # Hermes reads reasoning_content first, then reasoning. Avoid
+                # sending duplicate reasoning deltas when the backend populated
+                # both compatibility fields with the same text.
+                if message.get("reasoning_content"):
+                    yield _format_sse(
+                        _chunk({"reasoning_content": message["reasoning_content"]})
+                    )
+                elif message.get("reasoning"):
+                    yield _format_sse(_chunk({"reasoning": message["reasoning"]}))
+                if message.get("reasoning_details"):
+                    yield _format_sse(
+                        _chunk({"reasoning_details": message["reasoning_details"]})
+                    )
+
+                content = message.get("content") or ""
+                if content:
+                    yield _format_sse(_chunk({"content": content}))
+
+                for idx, tool_call in enumerate(message.get("tool_calls") or []):
+                    fn = tool_call.get("function") or {}
+                    yield _format_sse(
+                        _chunk(
+                            {
+                                "tool_calls": [
+                                    {
+                                        "index": idx,
+                                        "id": tool_call.get("id", f"call_{idx}"),
+                                        "type": tool_call.get("type", "function"),
+                                        "function": {
+                                            "name": fn.get("name", ""),
+                                            "arguments": fn.get("arguments", ""),
+                                        },
+                                    }
+                                ]
+                            }
+                        )
+                    )
+
+                yield _format_sse(
+                    _chunk({}, response["choices"][0]["finish_reason"])
+                )
+                yield _format_sse(
+                    {
+                        "id": response_id,
+                        "object": "chat.completion.chunk",
+                        "created": created,
+                        "model": model,
+                        "choices": [],
+                        "usage": response["usage"],
+                    }
+                )
+                yield _format_sse("[DONE]")
+
+            return StreamingResponse(
+                _openai_sse_events(),
+                media_type="text/event-stream",
+            )
 
         @app.post("/v1/messages/count_tokens", dependencies=[Depends(_check_token)])
         async def anthropic_count_tokens(req: AnthropicMessagesRequest):
