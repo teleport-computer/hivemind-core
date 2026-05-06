@@ -560,12 +560,17 @@ class Pipeline:
                 return f"Error: unknown tool '{name}'. Available: {', '.join(tool_handlers)}"
             return await asyncio.to_thread(tool_handlers[name], **args)
 
-        # iter 19 experiment: filesystem mount RE-ENABLED.
-        # Scope can read query agent source via /workspace/query-agent/ (RO).
-        # Enables the save/load-NPC workflow: read the query agent's prompt,
-        # draft a scope_fn, simulate the query agent via play.py, revise.
+        # Claude-code default scope agents can read bundled default query
+        # source via /workspace/query-agent/ (RO). Hermes scope agents use
+        # native bridge file tools instead; mounting a path from inside the
+        # core container fails on Phala because the sibling Docker daemon
+        # resolves bind sources on the CVM host, not in the core container.
         scope_volumes: dict[str, dict[str, str]] | None = None
-        if query_agent_id and query_agent_id.startswith("default-"):
+        if (
+            query_agent_id
+            and query_agent_id.startswith("default-")
+            and getattr(agent_config, "harness", "claude_code") != "hermes"
+        ):
             repo_root = Path(__file__).resolve().parent.parent
             src_dir = repo_root / "agents" / query_agent_id
             if src_dir.is_dir():
@@ -1278,4 +1283,3 @@ class Pipeline:
                 )
             except Exception:
                 logger.warning("Failed to update run %s to failed", run_id)
-

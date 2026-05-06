@@ -162,6 +162,54 @@ class TestRunQuery:
         assert usage["total_tokens"] == 10
 
     @pytest.mark.asyncio
+    async def test_hermes_scope_agent_skips_default_query_source_bind_mount(
+        self, monkeypatch
+    ):
+        settings = Settings(database_url="unused", llm_api_key="test")
+        agent_store = MagicMock(spec=AgentStore)
+        agent_store.get.return_value = AgentConfig(
+            agent_id="scope-hermes",
+            name="Scope Hermes",
+            image="img:scope-hermes",
+            harness="hermes",
+        )
+        agent_store.list_file_paths.return_value = [
+            {"path": "agent.py", "size_bytes": 12, "attestable": True}
+        ]
+        pipeline = Pipeline(settings, MagicMock(spec=Database), agent_store)
+
+        captured: dict = {}
+
+        class FakeBackend:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            async def run(self, **kwargs):
+                captured["extra_volumes"] = kwargs.get("extra_volumes")
+                return (
+                    json.dumps(
+                        {
+                            "scope_fn": (
+                                "def scope(sql, params, rows):\n"
+                                "    return {'allow': True, 'rows': rows}\n"
+                            )
+                        }
+                    ),
+                    {"total_tokens": 0},
+                )
+
+        monkeypatch.setattr(pipeline_module, "SandboxBackend", FakeBackend)
+
+        req = QueryRequest(
+            query="What?",
+            query_agent_id="default-query-hermes",
+            scope_agent_id="scope-hermes",
+        )
+        await pipeline._run_scope_agent(req, max_tokens=1000)
+
+        assert captured["extra_volumes"] is None
+
+    @pytest.mark.asyncio
     async def test_scope_agent_rejects_invalid_scope_fn(self, pg_db, monkeypatch):
         """Scope agent returning invalid scope_fn source should fail."""
         pipeline = _make_pipeline(pg_db)
@@ -596,5 +644,4 @@ class TestQueryRequestProvider:
     def test_provider_field_round_trip(self):
         req = QueryRequest(query="hi", provider="tinfoil")
         assert req.provider == "tinfoil"
-
 

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import os
+from urllib.parse import quote
 from typing import Any
 
 import httpx  # base dep of hermes-agent — no extra install needed
@@ -52,6 +53,17 @@ async def _post(path: str, payload: dict[str, Any]) -> dict[str, Any]:
         resp = await client.post(
             f"{_bridge_url()}{path}", json=payload, headers=_auth_headers()
         )
+        if resp.status_code >= 300:
+            raise RuntimeError(
+                f"bridge {path} returned {resp.status_code}: {resp.text[:500]}"
+            )
+        return resp.json()
+
+
+async def _get(path: str) -> dict[str, Any]:
+    """GET JSON from the bridge; raise on non-2xx with a short body excerpt."""
+    async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+        resp = await client.get(f"{_bridge_url()}{path}", headers=_auth_headers())
         if resp.status_code >= 300:
             raise RuntimeError(
                 f"bridge {path} returned {resp.status_code}: {resp.text[:500]}"
@@ -177,13 +189,12 @@ SIMULATE_MULTI_SCHEMA = {
     },
 }
 
-# ── Source-reading: bounded local-FS tools for the NPC-simulator workflow ──
+# ── Source-reading: bounded bridge tools for the NPC-simulator workflow ──
 #
-# The pipeline mounts the query agent's source at /workspace/query-agent/
-# (RO) for the scope container — see hivemind/pipeline.py:567-578. These
-# tools expose that mount as a narrow API instead of enabling Hermes'
-# broad `files` or `terminal` toolsets, so the scope agent can read the
-# NPC's code+prompt without gaining write/shell capabilities.
+# These tools expose the server-side agent-file store over the per-session
+# bridge instead of enabling Hermes' broad `files` or `terminal` toolsets.
+# This works in the Phala deployment where child containers cannot bind-mount
+# paths from inside the core container through the host Docker socket.
 
 QUERY_AGENT_MOUNT = "/workspace/query-agent"
 _MAX_FILE_BYTES = 200_000  # cap to keep prompt tokens bounded
@@ -278,43 +289,45 @@ async def simulate_query_handler(args: dict[str, Any], **_kw) -> str:
 
 
 async def list_query_agent_files_handler(_args: dict[str, Any], **_kw) -> str:
-    """List relative paths under QUERY_AGENT_MOUNT. Sync FS, no bridge call."""
-    import pathlib
-
-    root = pathlib.Path(QUERY_AGENT_MOUNT)
-    if not root.is_dir():
-        return f"Error: {QUERY_AGENT_MOUNT} is not mounted in this container"
+    """List query-agent source paths through the per-session bridge."""
+    agent_id = os.environ.get("QUERY_AGENT_ID", "").strip()
+    if not agent_id:
+        return "Error: QUERY_AGENT_ID is not set"
+    data = await _get(f"/sandbox/agents/{quote(agent_id, safe='')}/files")
+    files = data.get("files") or []
     paths: list[str] = []
-    for p in sorted(root.rglob("*")):
-        if p.is_file():
-            try:
-                paths.append(str(p.relative_to(root)))
-            except ValueError:
-                continue
+    for item in files:
+        if isinstance(item, dict):
+            path = item.get("path") or item.get("file_path") or ""
+        else:
+            path = str(item)
+        if path:
+            paths.append(path)
     return "\n".join(paths) if paths else "(empty)"
 
 
 async def read_query_agent_file_handler(args: dict[str, Any], **_kw) -> str:
-    """Read a file from QUERY_AGENT_MOUNT, rejecting any path traversal."""
+    """Read one query-agent source file through the per-session bridge."""
     import pathlib
 
+    agent_id = os.environ.get("QUERY_AGENT_ID", "").strip()
+    if not agent_id:
+        return "Error: QUERY_AGENT_ID is not set"
     raw_path = (args.get("path") or "").strip()
     if not raw_path:
         return "Error: path is required"
     if raw_path.startswith("/") or ".." in pathlib.PurePosixPath(raw_path).parts:
-        return f"Error: path must be relative under {QUERY_AGENT_MOUNT} (no '..' or absolute paths)"
-    root = pathlib.Path(QUERY_AGENT_MOUNT).resolve()
-    target = (root / raw_path).resolve()
+        return "Error: path must be relative (no '..' or absolute paths)"
     try:
-        target.relative_to(root)
-    except ValueError:
-        return f"Error: path escapes {QUERY_AGENT_MOUNT}"
-    if not target.is_file():
-        return f"Error: {raw_path} is not a file under {QUERY_AGENT_MOUNT}"
-    try:
-        data = target.read_bytes()[:_MAX_FILE_BYTES]
-        return data.decode("utf-8", errors="replace")
-    except OSError as e:
+        data = await _get(
+            f"/sandbox/agents/{quote(agent_id, safe='')}/files/"
+            f"{quote(raw_path, safe='')}"
+        )
+        content = data.get("content")
+        if content is None:
+            return f"Error: {raw_path} is not a readable query-agent file"
+        return str(content)[:_MAX_FILE_BYTES]
+    except Exception as e:
         return f"Error: {e}"
 
 

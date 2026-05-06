@@ -76,7 +76,7 @@ The function MUST:
   simulate_multi(candidates, prompt) — same budget as ONE simulate_query
     but runs up to 3 candidates in parallel. Use when the right strategy
     is ambiguous (row-exclusion vs value-redaction vs aggregation).
-  list_query_agent_files() — list the NPC's source files (RO mount).
+  list_query_agent_files() — list the NPC's source files.
   read_query_agent_file(path) — read one file (e.g. 'agent.py',
     'query-prompt.md') to understand exactly what the query agent will
     do under your scope_fn.
@@ -87,7 +87,7 @@ No external network. No file-write or shell tools.
 
 You are playing a security-review game. Your character:
   - CAN READ the NPC (query agent) source via list_query_agent_files +
-    read_query_agent_file. The mount is read-only — you cannot modify
+    read_query_agent_file. The source API is read-only — you cannot modify
     the query agent's code or prompt; you can only change YOUR scope_fn.
   - CAN RUN the NPC with a candidate scope_fn via simulate_query. Each
     call is a fresh query-agent run with a clean slate — no state
