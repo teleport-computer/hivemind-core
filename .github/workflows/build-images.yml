@@ -208,6 +208,31 @@ jobs:
           cache-from: type=gha,scope=default-${{ matrix.role }}-hermes
           cache-to: type=gha,mode=max,scope=default-${{ matrix.role }}-hermes
 
+      - name: Make package public
+        env:
+          GH_TOKEN: ${{ secrets.GA_GHCR_TOKEN }}
+          PACKAGE_NAME: hivemind-default-${{ matrix.role }}-hermes
+        run: |
+          set -euo pipefail
+
+          for attempt in 1 2 3 4 5 6; do
+            if gh api \
+              --method PATCH \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "/orgs/${{ github.repository_owner }}/packages/container/${PACKAGE_NAME}/visibility" \
+              -f visibility=public; then
+              echo "Package ${PACKAGE_NAME} is public."
+              exit 0
+            fi
+
+            echo "Package visibility update failed on attempt ${attempt}; retrying..."
+            sleep 10
+          done
+
+          echo "Failed to make package ${PACKAGE_NAME} public." >&2
+          exit 1
+
       - name: Print image info
         run: |
           echo "### hivemind-default-${{ matrix.role }}-hermes" >> "$GITHUB_STEP_SUMMARY"
