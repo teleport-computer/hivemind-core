@@ -71,16 +71,38 @@ class SandboxBackend:
         choice = resp.choices[0]
         msg = choice.message
         content = msg.content or ""
+        if isinstance(content, list):
+            parts: list[str] = []
+            for item in content:
+                if isinstance(item, dict):
+                    text = item.get("text") or item.get("content") or ""
+                else:
+                    text = getattr(item, "text", "") or getattr(item, "content", "")
+                if text:
+                    parts.append(str(text))
+            content = "\n".join(parts)
         # Reasoning models (Kimi-K2.6 on Tinfoil, DeepSeek-R1, etc.) return
         # chain-of-thought in a separate field and may return content=null
         # when the per-call max_tokens is exhausted by reasoning. Without
         # this fallback, the agent sees an empty assistant turn and loops
         # until the host timeout kicks in.
+        model_extra = getattr(msg, "model_extra", None) or {}
+        if not isinstance(model_extra, dict):
+            model_extra = {}
         reasoning = (
             getattr(msg, "reasoning", None)
             or getattr(msg, "reasoning_content", None)
+            or model_extra.get("reasoning")
+            or model_extra.get("reasoning_content")
             or ""
         )
+        reasoning_details = (
+            getattr(msg, "reasoning_details", None)
+            or model_extra.get("reasoning_details")
+            or None
+        )
+        if not reasoning and reasoning_details:
+            reasoning = str(reasoning_details)
         tool_calls = msg.tool_calls or []
         if not content and reasoning and not tool_calls:
             logger.info(
@@ -98,6 +120,9 @@ class SandboxBackend:
         }
         if reasoning:
             result["reasoning"] = reasoning
+            result["reasoning_content"] = reasoning
+        if reasoning_details:
+            result["reasoning_details"] = reasoning_details
 
         if tool_calls:
             result["tool_calls"] = [

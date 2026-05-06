@@ -358,6 +358,43 @@ async def test_openai_chat_completions_with_tools(bridge):
 
 
 @pytest.mark.asyncio
+async def test_openai_chat_completions_preserves_reasoning_fields():
+    async def reasoning_llm_caller(**kwargs):
+        return {
+            "content": "",
+            "reasoning": "hidden reasoning",
+            "reasoning_content": "hidden reasoning",
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+            "finish_reason": "stop",
+        }
+
+    budget = Budget(max_calls=10, max_tokens=100_000)
+    server = BridgeServer(
+        session_token="test-token-123",
+        tools=_make_tools(),
+        on_tool_call=_mock_on_tool_call,
+        llm_caller=reasoning_llm_caller,
+        budget=budget,
+        host="127.0.0.1",
+    )
+    port = await server.start()
+    client = httpx.AsyncClient(base_url=f"http://127.0.0.1:{port}")
+    try:
+        resp = await client.post(
+            "/v1/chat/completions",
+            headers={"Authorization": "Bearer test-token-123"},
+            json={"messages": [{"role": "user", "content": "Hello"}]},
+        )
+        assert resp.status_code == 200
+        message = resp.json()["choices"][0]["message"]
+        assert message["reasoning"] == "hidden reasoning"
+        assert message["reasoning_content"] == "hidden reasoning"
+    finally:
+        await client.aclose()
+        await server.stop()
+
+
+@pytest.mark.asyncio
 async def test_openai_chat_completions_auth_required(bridge):
     server, client, budget = bridge
     resp = await client.post(

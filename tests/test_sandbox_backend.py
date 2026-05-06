@@ -434,6 +434,40 @@ async def test_llm_caller_handles_deepseek_reasoning_content_field():
 
 
 @pytest.mark.asyncio
+async def test_llm_caller_handles_reasoning_from_model_extra():
+    from types import SimpleNamespace
+
+    msg = SimpleNamespace(
+        content=None,
+        tool_calls=[],
+        model_extra={"reasoning": "extra reasoning text"},
+    )
+    fake_resp = SimpleNamespace(
+        choices=[
+            SimpleNamespace(message=msg, finish_reason="stop")
+        ],
+        usage=SimpleNamespace(prompt_tokens=10, completion_tokens=5),
+    )
+
+    client = AsyncMock()
+    client.chat.completions.create = AsyncMock(return_value=fake_resp)
+
+    backend = backend_module.SandboxBackend(
+        llm_client=client,
+        llm_model="reasoning-model",
+        settings=_settings(),
+        agent=_agent(),
+    )
+    result = await backend._llm_caller(
+        messages=[{"role": "user", "content": "hi"}],
+        max_tokens=10,
+    )
+
+    assert result["content"] == "extra reasoning text"
+    assert result["reasoning"] == "extra reasoning text"
+
+
+@pytest.mark.asyncio
 async def test_llm_caller_does_not_substitute_reasoning_when_tool_calls_present():
     """If the model emits tool_calls, an empty content string is normal —
     don't overwrite it with reasoning text (would confuse the agent loop)."""

@@ -429,6 +429,12 @@ class BridgeServer:
                 # Build OpenAI-format message
                 usage = result.get("usage", {})
                 message: dict = {"role": "assistant", "content": result.get("content", "")}
+                if result.get("reasoning"):
+                    message["reasoning"] = result["reasoning"]
+                if result.get("reasoning_content"):
+                    message["reasoning_content"] = result["reasoning_content"]
+                if result.get("reasoning_details"):
+                    message["reasoning_details"] = result["reasoning_details"]
                 if "tool_calls" in result:
                     message["tool_calls"] = result["tool_calls"]
 
