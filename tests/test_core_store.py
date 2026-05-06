@@ -589,7 +589,10 @@ class TestDefaultAgentAutoload:
             agent = hm.agent_store.get("default-query-hermes")
             assert agent is not None
             assert agent.harness == "hermes"
-            assert sorted(hm.agent_store.list_file_paths(agent.agent_id)) == [
+            stored_paths = [
+                row["path"] for row in hm.agent_store.list_file_paths(agent.agent_id)
+            ]
+            assert sorted(stored_paths) == [
                 "Dockerfile",
                 "agent.py",
             ]
