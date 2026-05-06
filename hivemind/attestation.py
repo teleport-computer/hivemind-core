@@ -58,7 +58,23 @@ _state: dict[str, Any] = {
     # so recipients can verify signatures.
     "run_signer_priv": None,
     "run_signer_pub": None,
+    "disabled": False,
 }
+
+
+def disable(reason: str) -> None:
+    """Permanently disable attestation bootstrap for this process.
+
+    Used after a bounded startup attempt times out and the server chooses a
+    degraded TLS fallback. We must not later publish a successful attestation
+    for a different cert than the one uvicorn is already serving.
+    """
+    _state["ready"] = False
+    _state["reason"] = reason
+    _state["attestation"] = None
+    _state["run_signer_priv"] = None
+    _state["run_signer_pub"] = None
+    _state["disabled"] = True
 
 
 def _build_report_data_v1() -> bytes:
@@ -174,6 +190,8 @@ def bootstrap() -> None:
     Idempotent: a second call is a no-op once we're ready.
     """
     if _state.get("ready"):
+        return
+    if _state.get("disabled"):
         return
     try:
         from dstack_sdk import DstackClient  # type: ignore[import-not-found]

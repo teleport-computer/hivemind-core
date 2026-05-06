@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import secrets
+import signal
 import threading
 from contextlib import asynccontextmanager
 from uuid import uuid4
@@ -40,6 +41,48 @@ from .version import APP_VERSION
 
 logger = logging.getLogger(__name__)
 
+
+class _AttestationBootstrapTimeout(TimeoutError):
+    pass
+
+
+def _bootstrap_attestation_bounded(timeout_seconds: int) -> bool:
+    """Run attestation bootstrap with a hard wall-clock bound.
+
+    This is called on the main thread before uvicorn starts when enclave TLS
+    is enabled. A stalled dstack KMS/quote path should degrade attestation,
+    not keep the API socket closed indefinitely.
+    """
+    from . import attestation as _att
+
+    if timeout_seconds <= 0:
+        _att.bootstrap()
+        return bool(_att.get_bundle().get("ready"))
+    if threading.current_thread() is not threading.main_thread():
+        _att.bootstrap()
+        return bool(_att.get_bundle().get("ready"))
+
+    def _raise_timeout(_signum, _frame):
+        raise _AttestationBootstrapTimeout(
+            f"attestation bootstrap exceeded {timeout_seconds}s"
+        )
+
+    previous_handler = signal.getsignal(signal.SIGALRM)
+    previous_timer = signal.setitimer(signal.ITIMER_REAL, 0)
+    signal.signal(signal.SIGALRM, _raise_timeout)
+    signal.setitimer(signal.ITIMER_REAL, timeout_seconds)
+    try:
+        _att.bootstrap()
+    except _AttestationBootstrapTimeout as e:
+        _att.disable(str(e))
+        return False
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous_handler)
+        if previous_timer[0] > 0:
+            signal.setitimer(signal.ITIMER_REAL, *previous_timer)
+    return bool(_att.get_bundle().get("ready"))
+
 # Backward-compatible private helper export used by older tests/tools.
 _image_digest = _server_image_digest
 _tenant_image_tag = _server_tenant_image_tag
@@ -62,7 +105,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # a TEE so local dev boots normally.
         try:
             from . import attestation
-            await asyncio.to_thread(attestation.bootstrap)
+            await asyncio.wait_for(
+                asyncio.to_thread(attestation.bootstrap),
+                timeout=max(1, settings.attestation_bootstrap_timeout_seconds),
+            )
+        except asyncio.TimeoutError:
+            reason = (
+                "attestation bootstrap timed out during FastAPI startup "
+                f"after {settings.attestation_bootstrap_timeout_seconds}s"
+            )
+            logger.warning(reason)
+            attestation.disable(reason)
         except Exception as e:
             logger.warning("attestation bootstrap raised: %s", e)
 
@@ -636,33 +689,43 @@ def main():
         from . import attestation as _att
 
         logger.info("HIVEMIND_ENCLAVE_TLS=1 — bootstrapping TLS before listen")
-        _att.bootstrap()
+        ready = _bootstrap_attestation_bounded(
+            max(1, settings.attestation_bootstrap_timeout_seconds)
+        )
         tls = _att.get_tls_material()
         if tls is None:
-            logger.error(
-                "Enclave TLS requested but derivation failed; falling back to HTTP. "
-                "Check DSTACK_SIMULATOR_ENDPOINT / /var/run/dstack.sock."
+            from . import tls as _tls
+
+            reason = (
+                "attestation TLS derivation unavailable before listen; "
+                "serving degraded temporary TLS"
             )
+            if not ready:
+                reason = (_att.get_bundle().get("reason") or reason)
+            _att.disable(reason)
+            logger.error("%s", reason)
+            fallback = _tls.generate_ephemeral_tls_cert_and_key()
+            tls = fallback["cert_pem"], fallback["key_pem"]
         else:
-            cert_pem, key_pem = tls
-            # uvicorn wants filesystem paths. tmpfs mounts are safe inside
-            # the enclave; the cert/key are derived fresh every boot anyway.
-            tdir = tempfile.mkdtemp(prefix="hivemind-tls-")
-            cert_path = os.path.join(tdir, "cert.pem")
-            key_path = os.path.join(tdir, "key.pem")
-            with open(cert_path, "wb") as f:
-                f.write(cert_pem)
-            with open(key_path, "wb") as f:
-                f.write(key_pem)
-            os.chmod(key_path, 0o600)
-            ssl_kwargs = {
-                "ssl_certfile": cert_path,
-                "ssl_keyfile": key_path,
-            }
             logger.info(
                 "TLS cert derived from dstack-KMS; "
                 "fingerprint bound into REPORT_DATA v2"
             )
+        cert_pem, key_pem = tls
+        # uvicorn wants filesystem paths. tmpfs mounts are safe inside
+        # the enclave; the cert/key are derived fresh every boot anyway.
+        tdir = tempfile.mkdtemp(prefix="hivemind-tls-")
+        cert_path = os.path.join(tdir, "cert.pem")
+        key_path = os.path.join(tdir, "key.pem")
+        with open(cert_path, "wb") as f:
+            f.write(cert_pem)
+        with open(key_path, "wb") as f:
+            f.write(key_pem)
+        os.chmod(key_path, 0o600)
+        ssl_kwargs = {
+            "ssl_certfile": cert_path,
+            "ssl_keyfile": key_path,
+        }
 
     uvicorn.run(
         create_app(settings),

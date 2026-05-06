@@ -137,4 +137,84 @@ def derive_tls_cert_and_key(dstack: Any) -> dict[str, Any]:
     }
 
 
-__all__ = ["HIVEMIND_TLS_KEY_PATH", "derive_tls_cert_and_key"]
+def generate_ephemeral_tls_cert_and_key() -> dict[str, Any]:
+    """Return a temporary self-signed TLS cert for degraded startup.
+
+    This is intentionally not attested and must never be advertised as
+    quote-bound TLS material. It only keeps the TCP-passthrough health/API
+    surface reachable when dstack KMS/quote bootstrap is unavailable.
+    """
+    priv_key = ec.generate_private_key(ec.SECP256R1())
+    subject_name = x509.Name(
+        [
+            x509.NameAttribute(NameOID.COMMON_NAME, "hivemind-degraded"),
+            x509.NameAttribute(
+                NameOID.ORGANIZATION_NAME, "Hivemind (degraded TLS)"
+            ),
+        ]
+    )
+    now = _dt.datetime.now(_dt.timezone.utc).replace(microsecond=0)
+    serial = x509.random_serial_number()
+    builder = (
+        x509.CertificateBuilder()
+        .subject_name(subject_name)
+        .issuer_name(subject_name)
+        .public_key(priv_key.public_key())
+        .serial_number(serial)
+        .not_valid_before(now - _dt.timedelta(minutes=5))
+        .not_valid_after(now + _dt.timedelta(days=7))
+        .add_extension(
+            x509.SubjectAlternativeName(
+                [
+                    x509.DNSName("hivemind-degraded"),
+                    x509.DNSName("*.dstack-pha-prod9.phala.network"),
+                    x509.DNSName("*.dstack-pha-prod5.phala.network"),
+                    x509.DNSName("*.app.phala.network"),
+                ]
+            ),
+            critical=False,
+        )
+        .add_extension(
+            x509.BasicConstraints(ca=False, path_length=None),
+            critical=True,
+        )
+        .add_extension(
+            x509.KeyUsage(
+                digital_signature=True,
+                key_encipherment=True,
+                key_agreement=False,
+                content_commitment=False,
+                data_encipherment=False,
+                key_cert_sign=False,
+                crl_sign=False,
+                encipher_only=False,
+                decipher_only=False,
+            ),
+            critical=True,
+        )
+        .add_extension(
+            x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH]),
+            critical=False,
+        )
+    )
+    cert = builder.sign(private_key=priv_key, algorithm=_hashes.SHA256())
+    cert_der = cert.public_bytes(serialization.Encoding.DER)
+    cert_pem = cert.public_bytes(serialization.Encoding.PEM)
+    key_pem = priv_key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption(),
+    )
+    return {
+        "cert_pem": cert_pem,
+        "key_pem": key_pem,
+        "cert_der": cert_der,
+        "fingerprint": hashlib.sha256(cert_der).digest(),
+    }
+
+
+__all__ = [
+    "HIVEMIND_TLS_KEY_PATH",
+    "derive_tls_cert_and_key",
+    "generate_ephemeral_tls_cert_and_key",
+]

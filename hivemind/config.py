@@ -120,6 +120,11 @@ class Settings(BaseSettings):
     app_auth_chain_id: int = 11155111  # Ethereum Sepolia
     app_auth_rpc_url: str = "https://ethereum-sepolia-rpc.publicnode.com"
     app_auth_explorer_base_url: str = "https://sepolia.etherscan.io"
+    # A Phala/KMS stall during attestation bootstrap must not hold the
+    # control plane offline forever. If this timeout elapses, the server
+    # starts in degraded-attestation mode; production clients still fail
+    # closed unless explicitly told to allow degraded attestations.
+    attestation_bootstrap_timeout_seconds: int = 45
 
     # Default agents (Docker images) — empty = not available.
     # The claude_code-harness defaults extend hivemind-agent-base; the
