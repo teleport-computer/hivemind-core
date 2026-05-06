@@ -495,6 +495,32 @@ class TestDefaultAgentAutoload:
             hm.db.close()
             _clear_default_agents(test_dsn)
 
+    def test_bundled_default_build_failure_is_fatal(self, tmp_path):
+        source_dir = tmp_path / "default-query-hermes"
+        source_dir.mkdir()
+        (source_dir / "Dockerfile").write_text(
+            "FROM hivemind-agent-base-hermes:latest\nCOPY agent.py .\n"
+        )
+        (source_dir / "agent.py").write_text("print('hello')\n")
+
+        class FakeRunner:
+            def build_image(self, build_path, tag):
+                raise RuntimeError("base image missing")
+
+        settings = Settings(
+            llm_api_key="test",
+            bundled_agents_dir=str(tmp_path),
+        )
+        hm = object.__new__(Hivemind)
+        hm.settings = settings
+
+        with pytest.raises(RuntimeError, match="Bundled default agent build failed"):
+            hm._build_bundled_default_agent_image(
+                FakeRunner(),
+                image="hivemind-default-query-hermes:latest",
+                source_name="default-query-hermes",
+            )
+
     def test_autoload_disabled_does_not_register(self, monkeypatch):
         test_dsn = os.environ.get("HIVEMIND_TEST_DATABASE_URL", "")
         if not test_dsn:

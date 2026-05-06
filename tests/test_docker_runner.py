@@ -1014,6 +1014,38 @@ def test_build_image_ensures_hermes_base_before_generic_base(tmp_path):
     mock_client.images.build.assert_called_once()
 
 
+def test_build_image_ensures_hermes_base_from_arg_default(tmp_path):
+    (tmp_path / "Dockerfile").write_text(
+        "ARG HIVEMIND_AGENT_BASE_HERMES_IMAGE=hivemind-agent-base-hermes:latest\n"
+        "FROM ${HIVEMIND_AGENT_BASE_HERMES_IMAGE}\n"
+        "COPY . /app\n"
+    )
+    (tmp_path / "agent.py").write_text("print('hello')\n")
+
+    mock_client = MagicMock()
+    mock_client.images.build.return_value = (MagicMock(), [])
+
+    settings = _make_settings()
+
+    with patch("hivemind.sandbox.docker_runner.docker") as mock_docker, patch(
+        "hivemind.agent_base_bootstrap.ensure_agent_base_hermes_image",
+        return_value=True,
+    ) as ensure_hermes_base, patch(
+        "hivemind.agent_base_bootstrap.ensure_agent_base_image",
+        return_value=True,
+    ) as ensure_claude_base:
+        mock_docker.from_env.return_value = mock_client
+        mock_docker.errors = __import__("docker").errors
+
+        runner = DockerRunner(settings)
+        tag = runner.build_image(str(tmp_path), "hivemind-agent-abc123:latest")
+
+    assert tag == "hivemind-agent-abc123:latest"
+    ensure_hermes_base.assert_called_once_with()
+    ensure_claude_base.assert_not_called()
+    mock_client.images.build.assert_called_once()
+
+
 def test_pull_image_returns_true_on_success():
     mock_client = MagicMock()
     settings = _make_settings()

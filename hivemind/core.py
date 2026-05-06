@@ -184,11 +184,10 @@ class Hivemind:
             )
             return True
         except Exception as e:
-            logger.warning(
-                "Bundled default agent build failed for %s from %s: %s",
-                image, source_dir, e,
-            )
-            return False
+            raise RuntimeError(
+                f"Bundled default agent build failed for {image} "
+                f"from {source_dir}: {e}"
+            ) from e
 
     def _bootstrap_default_agents(self) -> None:
         """Auto-register built-in default agents using stable IDs.
@@ -233,10 +232,9 @@ class Hivemind:
                         role, harness, image,
                     )
                 elif built:
-                    logger.warning(
-                        "Bundled default %s/%s build reported success but image "
-                        "is still missing: %s",
-                        role, harness, image,
+                    raise RuntimeError(
+                        f"Bundled default {role}/{harness} build reported "
+                        f"success but image is still missing: {image}"
                     )
             if not runner.image_exists(image):
                 pulled = False

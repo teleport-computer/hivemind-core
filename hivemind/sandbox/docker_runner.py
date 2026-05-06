@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import platform
+import re
 import socket
 import subprocess
 import sys
@@ -797,16 +798,71 @@ class DockerRunner:
 
     # ── Image building ──
 
+    @staticmethod
+    def _resolve_dockerfile_var(expr: str, build_args: dict[str, str]) -> str:
+        if ":-" in expr:
+            name, default = expr.split(":-", 1)
+            return build_args.get(name, "") or default
+        if "-" in expr:
+            name, default = expr.split("-", 1)
+            return build_args.get(name, default)
+        return build_args.get(expr, "")
+
+    @classmethod
+    def _resolve_dockerfile_ref(
+        cls,
+        ref: str,
+        build_args: dict[str, str],
+    ) -> str:
+        def _braced(match: re.Match[str]) -> str:
+            return cls._resolve_dockerfile_var(match.group(1), build_args)
+
+        ref = re.sub(r"\$\{([^}]+)\}", _braced, ref)
+        return re.sub(
+            r"\$([A-Za-z_][A-Za-z0-9_]*)",
+            lambda match: build_args.get(match.group(1), ""),
+            ref,
+        )
+
+    @staticmethod
+    def _image_ref_leaf(ref: str) -> str:
+        leaf = ref.rsplit("/", 1)[-1]
+        leaf = leaf.split("@", 1)[0]
+        return leaf.split(":", 1)[0]
+
     def _ensure_agent_base_for_dockerfile(self, dockerfile: str) -> None:
+        build_args: dict[str, str] = {}
         with open(dockerfile, encoding="utf-8") as f:
             for raw_line in f:
-                parts = raw_line.strip().split()
-                if len(parts) < 2 or parts[0].upper() != "FROM":
+                line = raw_line.strip()
+                if not line or line.startswith("#"):
                     continue
-                base_ref = parts[1]
+                parts = line.split(None, 1)
+                if len(parts) < 2:
+                    continue
+                directive = parts[0].upper()
+                if directive == "ARG":
+                    arg = parts[1].split(None, 1)[0]
+                    if "=" in arg:
+                        name, value = arg.split("=", 1)
+                        build_args[name] = value
+                    else:
+                        build_args.setdefault(arg, "")
+                    continue
+                if directive != "FROM":
+                    continue
+
+                from_parts = parts[1].split()
+                while from_parts and from_parts[0].startswith("--"):
+                    from_parts.pop(0)
+                if not from_parts:
+                    continue
+
+                base_ref = self._resolve_dockerfile_ref(from_parts[0], build_args)
+                base_leaf = self._image_ref_leaf(base_ref)
                 # Match the more-specific tag first (-hermes) so it doesn't
                 # fall through to the generic claude_code branch.
-                if base_ref.startswith("hivemind-agent-base-hermes"):
+                if base_leaf == "hivemind-agent-base-hermes":
                     from ..agent_base_bootstrap import (
                         ensure_agent_base_hermes_image,
                     )
@@ -817,7 +873,7 @@ class DockerRunner:
                             "this agent Dockerfile but could not be provisioned"
                         )
                     return
-                if base_ref.startswith("hivemind-agent-base"):
+                if base_leaf == "hivemind-agent-base":
                     from ..agent_base_bootstrap import ensure_agent_base_image
 
                     if not ensure_agent_base_image():
