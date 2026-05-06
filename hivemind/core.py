@@ -1,6 +1,7 @@
 import asyncio
 import logging
 from inspect import isawaitable
+from pathlib import Path
 
 from .config import Settings
 from .db import connect
@@ -130,6 +131,63 @@ class Hivemind:
     def _build_sandbox_settings(self) -> SandboxSettings:
         return build_sandbox_settings(self.settings)
 
+    def _bundled_agents_root(self) -> Path | None:
+        candidates: list[Path] = []
+        configured = (getattr(self.settings, "bundled_agents_dir", "") or "").strip()
+        if configured:
+            candidates.append(Path(configured))
+        candidates.append(Path("/app/agents"))
+        candidates.append(Path(__file__).resolve().parents[1] / "agents")
+
+        for root in candidates:
+            if (root / "base").is_dir() or (root / "base-hermes").is_dir():
+                return root
+        return None
+
+    @staticmethod
+    def _image_leaf_name(image: str) -> str:
+        leaf = image.rsplit("/", 1)[-1]
+        leaf = leaf.split("@", 1)[0]
+        return leaf.split(":", 1)[0]
+
+    def _build_bundled_default_agent_image(
+        self,
+        runner,
+        *,
+        image: str,
+        source_name: str,
+    ) -> bool:
+        """Build a trusted built-in default-agent image from bundled source.
+
+        Uploaded agents still use the normal no-network build path. This helper
+        is only for repo-owned defaults that are copied into the production core
+        image so prod does not depend on public GHCR agent packages.
+        """
+        if self._image_leaf_name(image) not in {source_name, f"hivemind-{source_name}"}:
+            return False
+
+        root = self._bundled_agents_root()
+        if root is None:
+            return False
+
+        source_dir = root / source_name
+        if not (source_dir / "Dockerfile").is_file():
+            return False
+
+        try:
+            runner.build_image(str(source_dir), image)
+            logger.info(
+                "Built bundled default agent image %s from %s",
+                image, source_dir,
+            )
+            return True
+        except Exception as e:
+            logger.warning(
+                "Bundled default agent build failed for %s from %s: %s",
+                image, source_dir, e,
+            )
+            return False
+
     def _bootstrap_default_agents(self) -> None:
         """Auto-register built-in default agents using stable IDs.
 
@@ -161,6 +219,23 @@ class Hivemind:
 
             if runner is None:
                 runner = _create_runner(self._build_sandbox_settings())
+            if not runner.image_exists(image):
+                built = self._build_bundled_default_agent_image(
+                    runner,
+                    image=image,
+                    source_name=fallback_agent_id,
+                )
+                if built and runner.image_exists(image):
+                    logger.info(
+                        "Built default %s/%s image for autoload: %s",
+                        role, harness, image,
+                    )
+                elif built:
+                    logger.warning(
+                        "Bundled default %s/%s build reported success but image "
+                        "is still missing: %s",
+                        role, harness, image,
+                    )
             if not runner.image_exists(image):
                 pulled = False
                 pull_image = getattr(runner, "pull_image", None)

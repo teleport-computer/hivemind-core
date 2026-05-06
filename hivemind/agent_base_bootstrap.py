@@ -4,12 +4,12 @@ Agent Dockerfiles use `FROM hivemind-agent-base:latest` as a shared base.
 In CVM deployments (Phala / dstack) the daemon starts empty, so the first
 agent upload fails with `pull access denied for hivemind-agent-base`.
 
-This module is called once at server startup. It first tries to pull the
-image from GHCR; if that fails (private package, offline, etc.) it builds
-the image locally from an inlined Dockerfile that matches
-``agents/base/Dockerfile``. Embedding the Dockerfile text (rather than
-shipping the file) keeps bootstrap working in container images that omit
-``agents/`` from their COPY layers.
+This module is called once at server startup and again before Dockerfile
+builds that depend on a shared base. It first tries to pull the Claude-Code
+base from GHCR; if that fails (private package, offline, etc.) it builds the
+image locally from an inlined Dockerfile that matches ``agents/base/Dockerfile``.
+Hermes uses the bundled ``agents/base-hermes`` context when it is available
+because that base includes plugin source files.
 """
 
 from __future__ import annotations
@@ -18,6 +18,7 @@ import hashlib
 import logging
 import os
 import tempfile
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -170,29 +171,103 @@ def ensure_agent_base_image() -> bool:
 
 # ── Hermes base image ──────────────────────────────────────────────────────
 #
-# The hermes base bundles plugin Python files (agents/base-hermes/plugins/),
-# which can't be embedded as a Python string the same way the claude_code
-# inline Dockerfile is. So this bootstrap is GHCR-pull-only: if the pull
-# fails, hermes default agents skip autoload (with a warning), while
-# claude_code defaults still work. Operators who need offline-first hermes
-# bootstrap should pre-build the image into the local daemon, or stand up
-# a private registry mirror.
+# The hermes base bundles plugin Python files (agents/base-hermes/plugins/).
+# Production core images copy agents/ into /app/agents, so when GHCR is
+# private or unreachable we can still build the trusted base locally before
+# building role-specific bundled defaults.
 
 _HERMES_GHCR_IMAGE_DEFAULT = (
     "ghcr.io/teleport-computer/hivemind-agent-base-hermes:latest"
 )
 _HERMES_LOCAL_TAG = "hivemind-agent-base-hermes:latest"
+_HERMES_RECIPE_LABEL = "com.hivemind.agentbase-hermes.recipe-hash"
+
+
+def _image_label(tag: str, label: str) -> str | None:
+    """Read one label from an existing local image, if any."""
+    import docker.errors
+    try:
+        img = _client().images.get(tag)
+        return (img.attrs.get("Config", {}).get("Labels") or {}).get(label)
+    except docker.errors.ImageNotFound:
+        return None
+    except Exception as e:
+        logger.warning("agent-base bootstrap: label inspect failed: %s", e)
+        return None
+
+
+def _candidate_agents_roots() -> list[Path]:
+    roots: list[Path] = []
+    configured = os.environ.get("HIVEMIND_BUNDLED_AGENTS_DIR", "").strip()
+    if configured:
+        roots.append(Path(configured))
+    roots.append(Path("/app/agents"))
+    roots.append(Path(__file__).resolve().parents[1] / "agents")
+    return roots
+
+
+def _bundled_hermes_base_dir() -> Path | None:
+    for root in _candidate_agents_roots():
+        candidate = root / "base-hermes"
+        if (candidate / "Dockerfile").is_file():
+            return candidate
+    return None
+
+
+def _hash_build_context(path: Path) -> str:
+    h = hashlib.sha256()
+    for item in sorted(path.rglob("*")):
+        if not item.is_file():
+            continue
+        if "__pycache__" in item.parts or item.suffix == ".pyc":
+            continue
+        rel = item.relative_to(path).as_posix()
+        h.update(rel.encode())
+        h.update(b"\0")
+        h.update(item.read_bytes())
+        h.update(b"\0")
+    return h.hexdigest()[:16]
+
+
+def _build_hermes_from_bundled(source_dir: Path, recipe_hash: str) -> bool:
+    try:
+        client = _client()
+        logger.info(
+            "agent-base hermes bootstrap: building %s from %s (recipe=%s)",
+            _HERMES_LOCAL_TAG, source_dir, recipe_hash,
+        )
+        client.images.build(
+            path=str(source_dir),
+            tag=_HERMES_LOCAL_TAG,
+            rm=True,
+            forcerm=True,
+            labels={_HERMES_RECIPE_LABEL: recipe_hash},
+        )
+        logger.info("agent-base hermes bootstrap: built %s", _HERMES_LOCAL_TAG)
+        return True
+    except Exception as e:
+        logger.error("agent-base hermes bootstrap: bundled build failed: %s", e)
+        return False
 
 
 def ensure_agent_base_hermes_image() -> bool:
     """Guarantee `hivemind-agent-base-hermes:latest` is in the daemon.
 
-    Best-effort GHCR pull. Returns False (without raising) when the image
-    is missing AND the pull fails — callers should treat this as a skip
-    signal for hermes-flavored autoload, not as a hard failure.
+    Fast path: reuse a local image stamped with the current bundled recipe.
+    Otherwise try GHCR, then build from bundled source when available.
+    Returns False only when neither pull nor bundled build succeeds.
     """
-    if _image_present(_HERMES_LOCAL_TAG):
+    bundled = _bundled_hermes_base_dir()
+    recipe_hash = _hash_build_context(bundled) if bundled is not None else None
+    if recipe_hash and _image_label(_HERMES_LOCAL_TAG, _HERMES_RECIPE_LABEL) == recipe_hash:
+        logger.info(
+            "agent-base hermes bootstrap: %s already present (recipe=%s)",
+            _HERMES_LOCAL_TAG, recipe_hash,
+        )
         return True
+    if recipe_hash is None and _image_present(_HERMES_LOCAL_TAG):
+        return True
+
     source = os.environ.get(
         "HIVEMIND_AGENT_BASE_HERMES_IMAGE", _HERMES_GHCR_IMAGE_DEFAULT
     )
@@ -208,4 +283,6 @@ def ensure_agent_base_hermes_image() -> bool:
         return True
     except Exception as e:
         logger.info("agent-base hermes bootstrap: pull failed (%s)", e)
-        return False
+    if bundled is not None and recipe_hash is not None:
+        return _build_hermes_from_bundled(bundled, recipe_hash)
+    return False

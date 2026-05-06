@@ -142,6 +142,10 @@ class Settings(BaseSettings):
     default_query_hermes_image: str = ""
     default_scope_hermes_image: str = ""
     default_mediator_hermes_image: str = ""
+    # Directory containing built-in agent Docker contexts. The production
+    # core image sets this to /app/agents so default agents can be built
+    # locally when GHCR agent packages are private or unreachable.
+    bundled_agents_dir: str = ""
 
     @model_validator(mode="after")
     def _validate_security(self):

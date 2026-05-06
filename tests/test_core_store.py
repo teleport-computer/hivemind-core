@@ -414,16 +414,80 @@ class TestDefaultAgentAutoload:
             database_url=test_dsn,
             llm_api_key="test",
             autoload_default_agents=True,
-            default_query_hermes_image=(
-                "ghcr.io/teleport-computer/hivemind-default-query-hermes:latest"
-            ),
+            default_query_hermes_image="ghcr.io/example/custom-query-hermes:latest",
         )
         hm = Hivemind(settings)
         try:
-            assert calls["pull"] == [
-                "ghcr.io/teleport-computer/hivemind-default-query-hermes:latest"
-            ]
+            assert calls["pull"] == ["ghcr.io/example/custom-query-hermes:latest"]
             assert calls["extract"] == calls["pull"]
+            agent = hm.agent_store.get("default-query-hermes")
+            assert agent is not None
+            assert agent.harness == "hermes"
+        finally:
+            hm.db.close()
+            _clear_default_agents(test_dsn)
+
+    def test_autoload_builds_bundled_default_before_pull(self, monkeypatch, tmp_path):
+        test_dsn = os.environ.get("HIVEMIND_TEST_DATABASE_URL", "")
+        if not test_dsn:
+            pytest.skip("HIVEMIND_TEST_DATABASE_URL not set")
+        _clear_default_agents(test_dsn)
+
+        source_dir = tmp_path / "default-query-hermes"
+        source_dir.mkdir()
+        (source_dir / "Dockerfile").write_text(
+            "FROM hivemind-agent-base-hermes:latest\nCOPY agent.py .\n"
+        )
+        (source_dir / "agent.py").write_text("print('hello')\n")
+
+        calls = {"build": [], "pull": [], "extract": []}
+        present: set[str] = set()
+
+        class FakeRunner:
+            def __init__(self, settings):
+                self.settings = settings
+
+            def cleanup_stale_containers(self):
+                return None
+
+            def image_exists(self, image):
+                return image in present
+
+            def build_image(self, build_path, tag):
+                calls["build"].append((build_path, tag))
+                present.add(tag)
+                return tag
+
+            def pull_image(self, image):
+                calls["pull"].append(image)
+                return False
+
+            def extract_image_files(self, image, **kwargs):
+                calls["extract"].append(image)
+                return {"agent.py": f"# {image}"}
+
+        monkeypatch.setattr(
+            "hivemind.core._create_runner",
+            lambda settings: FakeRunner(settings),
+        )
+
+        settings = Settings(
+            database_url=test_dsn,
+            llm_api_key="test",
+            autoload_default_agents=True,
+            bundled_agents_dir=str(tmp_path),
+            default_query_hermes_image="hivemind-default-query-hermes:latest",
+        )
+        hm = Hivemind(settings)
+        try:
+            assert calls["build"] == [
+                (
+                    str(source_dir),
+                    "hivemind-default-query-hermes:latest",
+                )
+            ]
+            assert calls["pull"] == []
+            assert calls["extract"] == ["hivemind-default-query-hermes:latest"]
             agent = hm.agent_store.get("default-query-hermes")
             assert agent is not None
             assert agent.harness == "hermes"

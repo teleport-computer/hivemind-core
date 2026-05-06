@@ -22,6 +22,7 @@ RUN pip install --no-cache-dir --root-user-action=ignore "uv==0.9.2" \
     && rm -f /tmp/requirements.txt
 
 COPY hivemind/ ./hivemind/
+COPY agents/ ./agents/
 COPY deploy/boot.sh /app/deploy/boot.sh
 RUN pip install --no-cache-dir --root-user-action=ignore --no-deps . \
     && chmod +x /app/deploy/boot.sh

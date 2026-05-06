@@ -146,19 +146,21 @@ services:
       HIVEMIND_BILLING_ENFORCE_CREDITS: ${HIVEMIND_BILLING_ENFORCE_CREDITS:-true}
       HIVEMIND_SELF_SERVE_SIGNUP_ENABLED: ${HIVEMIND_SELF_SERVE_SIGNUP_ENABLED:-true}
 
-      # Default agents — CI builds core infrastructure plus the Hermes
-      # defaults. Claude-Code defaults remain optional/operator-provided.
+      # Default agents — the core image bundles trusted Docker contexts under
+      # /app/agents and builds local default images on first boot. This avoids
+      # depending on public GHCR agent packages inside the CVM.
       # Leave AUTOLOAD=false and upload agents via `hmctl room create`,
       # or set AUTOLOAD=true to register the configured default images.
       HIVEMIND_AUTOLOAD_DEFAULT_AGENTS: ${HIVEMIND_AUTOLOAD_DEFAULT_AGENTS:-false}
+      HIVEMIND_BUNDLED_AGENTS_DIR: ${HIVEMIND_BUNDLED_AGENTS_DIR:-/app/agents}
       HIVEMIND_DEFAULT_SCOPE_IMAGE: ${HIVEMIND_DEFAULT_SCOPE_IMAGE:-}
       HIVEMIND_DEFAULT_QUERY_IMAGE: ${HIVEMIND_DEFAULT_QUERY_IMAGE:-}
       HIVEMIND_DEFAULT_INDEX_IMAGE: ${HIVEMIND_DEFAULT_INDEX_IMAGE:-}
       HIVEMIND_DEFAULT_MEDIATOR_IMAGE: ${HIVEMIND_DEFAULT_MEDIATOR_IMAGE:-}
-      HIVEMIND_DEFAULT_INDEX_HERMES_IMAGE: ${HIVEMIND_DEFAULT_INDEX_HERMES_IMAGE:-ghcr.io/teleport-computer/hivemind-default-index-hermes:latest}
-      HIVEMIND_DEFAULT_SCOPE_HERMES_IMAGE: ${HIVEMIND_DEFAULT_SCOPE_HERMES_IMAGE:-ghcr.io/teleport-computer/hivemind-default-scope-hermes:latest}
-      HIVEMIND_DEFAULT_QUERY_HERMES_IMAGE: ${HIVEMIND_DEFAULT_QUERY_HERMES_IMAGE:-ghcr.io/teleport-computer/hivemind-default-query-hermes:latest}
-      HIVEMIND_DEFAULT_MEDIATOR_HERMES_IMAGE: ${HIVEMIND_DEFAULT_MEDIATOR_HERMES_IMAGE:-ghcr.io/teleport-computer/hivemind-default-mediator-hermes:latest}
+      HIVEMIND_DEFAULT_INDEX_HERMES_IMAGE: ${HIVEMIND_DEFAULT_INDEX_HERMES_IMAGE:-hivemind-default-index-hermes:latest}
+      HIVEMIND_DEFAULT_SCOPE_HERMES_IMAGE: ${HIVEMIND_DEFAULT_SCOPE_HERMES_IMAGE:-hivemind-default-scope-hermes:latest}
+      HIVEMIND_DEFAULT_QUERY_HERMES_IMAGE: ${HIVEMIND_DEFAULT_QUERY_HERMES_IMAGE:-hivemind-default-query-hermes:latest}
+      HIVEMIND_DEFAULT_MEDIATOR_HERMES_IMAGE: ${HIVEMIND_DEFAULT_MEDIATOR_HERMES_IMAGE:-hivemind-default-mediator-hermes:latest}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       # dstack socket — lets hivemind fetch its TDX quote + measurements
