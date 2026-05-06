@@ -189,6 +189,58 @@ class Hivemind:
                 f"from {source_dir}: {e}"
             ) from e
 
+    def _bundled_default_agent_files(
+        self,
+        *,
+        image: str,
+        source_name: str,
+        max_file_size: int = 512_000,
+        max_total_size: int = 5_000_000,
+    ) -> dict[str, str] | None:
+        """Return bundled source context for trusted local default-agent tags.
+
+        Tenant construction must not block on Docker builds. For repo-owned
+        local tags (``hivemind-default-*:latest``), store the bundled Docker
+        context directly in Postgres; the normal run path can build the image
+        from that context on first use after a CVM redeploy.
+        """
+        image_ref = image.split("@", 1)[0]
+        image_name = image_ref.rsplit(":", 1)[0]
+        if "/" in image_name:
+            return None
+        if self._image_leaf_name(image) not in {source_name, f"hivemind-{source_name}"}:
+            return None
+
+        root = self._bundled_agents_root()
+        if root is None:
+            return None
+        source_dir = root / source_name
+        if not (source_dir / "Dockerfile").is_file():
+            return None
+
+        files: dict[str, str] = {}
+        total = 0
+        skip_dirs = {"__pycache__", ".git", ".mypy_cache", ".pytest_cache"}
+        for item in sorted(source_dir.rglob("*")):
+            if not item.is_file():
+                continue
+            rel = item.relative_to(source_dir).as_posix()
+            if any(part in skip_dirs for part in item.relative_to(source_dir).parts):
+                continue
+            data = item.read_bytes()
+            if len(data) > max_file_size:
+                continue
+            total += len(data)
+            if total > max_total_size:
+                raise RuntimeError(
+                    f"Bundled default agent context too large for {source_name}"
+                )
+            try:
+                files[rel] = data.decode("utf-8")
+            except UnicodeDecodeError:
+                continue
+        return files or None
+
     def _bootstrap_default_agents(self) -> None:
         """Auto-register built-in default agents using stable IDs.
 
@@ -216,6 +268,39 @@ class Hivemind:
         for role, harness, agent_key, image_key, fallback_agent_id in specs:
             image = (getattr(self.settings, image_key, "") or "").strip()
             if not image:
+                continue
+
+            agent_id = (getattr(self.settings, agent_key, "") or "").strip()
+            if not agent_id:
+                agent_id = fallback_agent_id
+                setattr(self.settings, agent_key, agent_id)
+
+            existing = self.agent_store.get(agent_id)
+            existing_files = self.agent_store.list_file_paths(agent_id)
+            image_changed = existing is not None and existing.image != image
+            config = AgentConfig(
+                agent_id=agent_id,
+                name=fallback_agent_id,
+                description=f"Autoloaded default {role} agent ({harness} harness)",
+                agent_type=role,
+                image=image,
+                memory_mb=self.settings.container_memory_mb,
+                max_llm_calls=self.settings.max_llm_calls,
+                max_tokens=self.settings.max_tokens,
+                timeout_seconds=self.settings.agent_timeout,
+                harness=harness,
+            )
+
+            bundled_files = self._bundled_default_agent_files(
+                image=image,
+                source_name=fallback_agent_id,
+            )
+            if bundled_files is not None:
+                self.agent_store.upsert(config)
+                # Local bundled defaults commonly keep stable :latest tags, so
+                # refresh the stored source context even when the image string
+                # is unchanged.
+                self.agent_store.replace_files(agent_id, bundled_files)
                 continue
 
             if runner is None:
@@ -253,29 +338,9 @@ class Hivemind:
                         role, harness, image, image_key.upper(),
                     )
                     continue
-            agent_id = (getattr(self.settings, agent_key, "") or "").strip()
-            if not agent_id:
-                agent_id = fallback_agent_id
-                setattr(self.settings, agent_key, agent_id)
-
-            existing = self.agent_store.get(agent_id)
-            config = AgentConfig(
-                agent_id=agent_id,
-                name=fallback_agent_id,
-                description=f"Autoloaded default {role} agent ({harness} harness)",
-                agent_type=role,
-                image=image,
-                memory_mb=self.settings.container_memory_mb,
-                max_llm_calls=self.settings.max_llm_calls,
-                max_tokens=self.settings.max_tokens,
-                timeout_seconds=self.settings.agent_timeout,
-                harness=harness,
-            )
             self.agent_store.upsert(config)
 
             try:
-                existing_files = self.agent_store.list_file_paths(agent_id)
-                image_changed = existing is not None and existing.image != image
                 if existing_files and not image_changed:
                     continue
                 files = runner.extract_image_files(image)

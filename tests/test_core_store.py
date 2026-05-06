@@ -1,6 +1,7 @@
 """Tests for Hivemind core integration with Database and pipeline."""
 import os
 import secrets
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import psycopg
@@ -262,6 +263,106 @@ class TestHivemindComponents:
 
 
 class TestDefaultAgentAutoload:
+    def test_bundled_default_agent_files_reads_local_context(self, tmp_path):
+        source_dir = tmp_path / "default-query-hermes"
+        source_dir.mkdir()
+        (source_dir / "Dockerfile").write_text(
+            "FROM hivemind-agent-base-hermes:latest\nCOPY agent.py .\n"
+        )
+        (source_dir / "agent.py").write_text("print('hello')\n")
+
+        hm = object.__new__(Hivemind)
+        hm.settings = Settings(
+            llm_api_key="test",
+            bundled_agents_dir=str(tmp_path),
+        )
+
+        files = hm._bundled_default_agent_files(
+            image="hivemind-default-query-hermes:latest",
+            source_name="default-query-hermes",
+        )
+
+        assert files == {
+            "Dockerfile": "FROM hivemind-agent-base-hermes:latest\nCOPY agent.py .\n",
+            "agent.py": "print('hello')\n",
+        }
+
+    def test_bundled_default_agent_files_ignores_registry_refs(self, tmp_path):
+        source_dir = tmp_path / "default-query-hermes"
+        source_dir.mkdir()
+        (source_dir / "Dockerfile").write_text(
+            "FROM hivemind-agent-base-hermes:latest\n"
+        )
+
+        hm = object.__new__(Hivemind)
+        hm.settings = Settings(
+            llm_api_key="test",
+            bundled_agents_dir=str(tmp_path),
+        )
+
+        assert (
+            hm._bundled_default_agent_files(
+                image="ghcr.io/example/default-query-hermes:latest",
+                source_name="default-query-hermes",
+            )
+            is None
+        )
+
+    def test_autoload_refreshes_bundled_context_with_stable_tag(self, tmp_path):
+        source_dir = tmp_path / "default-query-hermes"
+        source_dir.mkdir()
+        (source_dir / "Dockerfile").write_text(
+            "FROM hivemind-agent-base-hermes:latest\nCOPY agent.py .\n"
+        )
+        (source_dir / "agent.py").write_text("print('current')\n")
+
+        class FakeStore:
+            def __init__(self):
+                self.upserts = []
+                self.replacements = []
+
+            def get(self, agent_id):
+                assert agent_id == "default-query-hermes"
+                return SimpleNamespace(
+                    image="hivemind-default-query-hermes:latest"
+                )
+
+            def list_file_paths(self, agent_id):
+                assert agent_id == "default-query-hermes"
+                return [{"path": "agent.py", "size_bytes": 20, "attestable": True}]
+
+            def upsert(self, config):
+                self.upserts.append(config)
+
+            def replace_files(self, agent_id, files):
+                self.replacements.append((agent_id, files))
+
+        store = FakeStore()
+        hm = object.__new__(Hivemind)
+        hm.settings = Settings(
+            llm_api_key="test",
+            autoload_default_agents=True,
+            bundled_agents_dir=str(tmp_path),
+            default_query_hermes_image="hivemind-default-query-hermes:latest",
+        )
+        hm.agent_store = store
+
+        hm._bootstrap_default_agents()
+
+        assert len(store.upserts) == 1
+        assert store.upserts[0].harness == "hermes"
+        assert store.replacements == [
+            (
+                "default-query-hermes",
+                {
+                    "Dockerfile": (
+                        "FROM hivemind-agent-base-hermes:latest\nCOPY agent.py .\n"
+                    ),
+                    "agent.py": "print('current')\n",
+                },
+            )
+        ]
+
     def test_autoload_registers_stable_defaults(self, monkeypatch):
         test_dsn = os.environ.get("HIVEMIND_TEST_DATABASE_URL", "")
         if not test_dsn:
@@ -427,7 +528,9 @@ class TestDefaultAgentAutoload:
             hm.db.close()
             _clear_default_agents(test_dsn)
 
-    def test_autoload_builds_bundled_default_before_pull(self, monkeypatch, tmp_path):
+    def test_autoload_stores_bundled_default_context_without_docker(
+        self, monkeypatch, tmp_path
+    ):
         test_dsn = os.environ.get("HIVEMIND_TEST_DATABASE_URL", "")
         if not test_dsn:
             pytest.skip("HIVEMIND_TEST_DATABASE_URL not set")
@@ -480,17 +583,16 @@ class TestDefaultAgentAutoload:
         )
         hm = Hivemind(settings)
         try:
-            assert calls["build"] == [
-                (
-                    str(source_dir),
-                    "hivemind-default-query-hermes:latest",
-                )
-            ]
+            assert calls["build"] == []
             assert calls["pull"] == []
-            assert calls["extract"] == ["hivemind-default-query-hermes:latest"]
+            assert calls["extract"] == []
             agent = hm.agent_store.get("default-query-hermes")
             assert agent is not None
             assert agent.harness == "hermes"
+            assert sorted(hm.agent_store.list_file_paths(agent.agent_id)) == [
+                "Dockerfile",
+                "agent.py",
+            ]
         finally:
             hm.db.close()
             _clear_default_agents(test_dsn)

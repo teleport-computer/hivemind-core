@@ -180,6 +180,7 @@ class TenantRegistry(CreditCodeRegistryMixin, BillingRegistryMixin):
         self.settings = settings
         self._lock = threading.RLock()
         self._cache: "OrderedDict[str, Hivemind]" = OrderedDict()
+        self._cache_inflight: dict[str, threading.Event] = {}
         self._cache_max = max(1, int(settings.tenant_cache_size))
         # One process-wide DEK cache, shared across tenants. Lives only
         # in RAM — restart-evicts everything, which is the seal property.
@@ -1163,6 +1164,71 @@ class TenantRegistry(CreditCodeRegistryMixin, BillingRegistryMixin):
 
     # ── Hot path: bearer → Hivemind ─────────────────────────────────
 
+    def _insert_cached_hive_locked(
+        self, tenant_id: str, hm: Hivemind
+    ) -> Hivemind:
+        existing = self._cache.get(tenant_id)
+        if existing is not None:
+            try:
+                hm.db.close()
+            except Exception:
+                pass
+            self._cache.move_to_end(tenant_id)
+            return existing
+
+        self._cache[tenant_id] = hm
+        self._cache.move_to_end(tenant_id)
+        while len(self._cache) > self._cache_max:
+            evicted_id, evicted_hm = self._cache.popitem(last=False)
+            logger.info("Evicting tenant '%s' from cache", evicted_id)
+            try:
+                evicted_hm.db.close()
+            except Exception:
+                pass
+        return hm
+
+    def _get_or_create_hive(self, tenant_id: str, db_name: str) -> Hivemind:
+        """Single-flight per-tenant Hivemind construction.
+
+        Tenant bootstrap can build Docker contexts or run migrations. If the
+        first HTTP caller times out, the worker thread continues; concurrent
+        requests should wait for that construction instead of starting another
+        identical warmup.
+        """
+        while True:
+            with self._lock:
+                hm = self._cache.get(tenant_id)
+                if hm is not None:
+                    self._cache.move_to_end(tenant_id)
+                    return hm
+                event = self._cache_inflight.get(tenant_id)
+                if event is None:
+                    event = threading.Event()
+                    self._cache_inflight[tenant_id] = event
+                    break
+            event.wait()
+
+        try:
+            hm = Hivemind(
+                self.settings,
+                tenant_db=db_name,
+                tenant_id=tenant_id,
+                sealer=self.sealer,
+                billing_meter=self,
+            )
+        except Exception:
+            with self._lock:
+                self._cache_inflight.pop(tenant_id, None)
+                event.set()
+            raise
+
+        with self._lock:
+            try:
+                return self._insert_cached_hive_locked(tenant_id, hm)
+            finally:
+                self._cache_inflight.pop(tenant_id, None)
+                event.set()
+
     def for_tenant(self, tenant_id: str) -> Hivemind | None:
         """Admin-side: load a tenant's Hivemind by tenant_id (no api_key).
 
@@ -1178,34 +1244,7 @@ class TenantRegistry(CreditCodeRegistryMixin, BillingRegistryMixin):
         if not rows or rows[0]["suspended"]:
             return None
         db_name = rows[0]["db_name"]
-        with self._lock:
-            hm = self._cache.get(tenant_id)
-            if hm is not None:
-                self._cache.move_to_end(tenant_id)
-                return hm
-        hm = Hivemind(
-            self.settings, tenant_db=db_name, tenant_id=tenant_id,
-            sealer=self.sealer, billing_meter=self,
-        )
-        with self._lock:
-            existing = self._cache.get(tenant_id)
-            if existing is not None:
-                try:
-                    hm.db.close()
-                except Exception:
-                    pass
-                self._cache.move_to_end(tenant_id)
-                return existing
-            self._cache[tenant_id] = hm
-            self._cache.move_to_end(tenant_id)
-            while len(self._cache) > self._cache_max:
-                evicted_id, evicted_hm = self._cache.popitem(last=False)
-                logger.info("Evicting tenant '%s' from cache", evicted_id)
-                try:
-                    evicted_hm.db.close()
-                except Exception:
-                    pass
-        return hm
+        return self._get_or_create_hive(tenant_id, db_name)
 
     def resolve_any(self, token: str) -> Caller | None:
         """Bearer token → ``Caller``, regardless of role.
@@ -1371,17 +1410,7 @@ class TenantRegistry(CreditCodeRegistryMixin, BillingRegistryMixin):
         tenant_id = row["id"]
         db_name = row["db_name"]
 
-        with self._lock:
-            hm = self._cache.get(tenant_id)
-            if hm is not None:
-                self._cache.move_to_end(tenant_id)
-                return tenant_id, hm
-
-        # Construct outside the lock — bootstrap can take a moment.
-        hm = Hivemind(
-            self.settings, tenant_db=db_name, tenant_id=tenant_id,
-            sealer=self.sealer, billing_meter=self,
-        )
+        hm = self._get_or_create_hive(tenant_id, db_name)
         try:
             import asyncio
             asyncio.get_running_loop()
@@ -1391,23 +1420,4 @@ class TenantRegistry(CreditCodeRegistryMixin, BillingRegistryMixin):
             # await, or never — fine for short-lived clients.
             pass
 
-        with self._lock:
-            existing = self._cache.get(tenant_id)
-            if existing is not None:
-                # Another thread raced us. Close our extra instance.
-                try:
-                    hm.db.close()
-                except Exception:
-                    pass
-                self._cache.move_to_end(tenant_id)
-                return tenant_id, existing
-            self._cache[tenant_id] = hm
-            self._cache.move_to_end(tenant_id)
-            while len(self._cache) > self._cache_max:
-                evicted_id, evicted_hm = self._cache.popitem(last=False)
-                logger.info("Evicting tenant '%s' from cache", evicted_id)
-                try:
-                    evicted_hm.db.close()
-                except Exception:
-                    pass
         return tenant_id, hm

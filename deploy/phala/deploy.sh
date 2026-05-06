@@ -376,6 +376,14 @@ sync_hermes_default_agents() {
     local env_file="$1"
     sync_env_value "${env_file}" HIVEMIND_AUTOLOAD_DEFAULT_AGENTS true
     sync_env_value "${env_file}" HIVEMIND_BUNDLED_AGENTS_DIR /app/agents
+    sync_env_value "${env_file}" HIVEMIND_DEFAULT_INDEX_AGENT \
+        default-index-hermes
+    sync_env_value "${env_file}" HIVEMIND_DEFAULT_SCOPE_AGENT \
+        default-scope-hermes
+    sync_env_value "${env_file}" HIVEMIND_DEFAULT_QUERY_AGENT \
+        default-query-hermes
+    sync_env_value "${env_file}" HIVEMIND_DEFAULT_MEDIATOR_AGENT \
+        default-mediator-hermes
     sync_env_value "${env_file}" HIVEMIND_DEFAULT_INDEX_HERMES_IMAGE \
         hivemind-default-index-hermes:latest
     sync_env_value "${env_file}" HIVEMIND_DEFAULT_SCOPE_HERMES_IMAGE \
