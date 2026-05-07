@@ -160,8 +160,16 @@ def test_scope_prompt_preserves_policy_allowed_aggregate_rows():
     source = (ROOT / "agents/default-scope-hermes/agent.py").read_text()
 
     assert "Pattern A — pass already-safe aggregate rows through" in source
+    assert "aggregate result aliases are often invented by the query" in source
     assert "Do NOT replace an allowed aggregate table" in source
     assert "skip simulation and emit after verify_scope_fn" in source
+
+
+def test_query_prompt_retries_allowed_aggregate_aliases():
+    source = (ROOT / "agents/default-query-hermes/agent.py").read_text()
+
+    assert "If a first aggregate SQL comes back as only a policy marker" in source
+    assert "retry with a narrower aggregate-only SQL/alias shape" in source
 
 
 def test_mediator_agent_uses_ai_agent_for_safe_aggregate_output(monkeypatch, capsys):

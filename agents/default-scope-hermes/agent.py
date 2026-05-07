@@ -153,8 +153,58 @@ results on dimensions explicitly allowed by POLICY. These are not raw
 individual records. Preserve allowed dimension values and count-like
 fields subject to any k-anonymity/top-N limits in POLICY.
 
+Important: aggregate result aliases are often invented by the query
+agent and may not appear in get_schema. Treat count-like aliases as
+metrics: `count`, `n`, `total`, `row_count`, `match_count`, any key
+containing `count`, any key ending `_total`, and any key starting
+`total_`, `min_`, `max_`, `avg_`, or `sum_`. Treat bucket-like aliases
+as dimensions when POLICY allows aggregate statistics/trends/rankings:
+`day`, `date`, `week`, `month`, `year`, `bucket`, `period`, `category`,
+`topic`, `group`, and keys ending `_day`, `_date`, `_week`, `_month`,
+or `_year`.
+
 Do NOT replace an allowed aggregate table with placeholder text or a
 single `match_count` row. That destroys the answer.
+
+Generic aggregate-preserving sketch:
+
+    def scope(sql, params, rows):
+        if not rows:
+            return {"allow": True, "rows": []}
+        raw_markers = {
+            "id", "user_id", "viewer_id", "email", "phone", "url",
+            "title", "description", "content", "body", "message",
+            "token", "secret", "password", "api_key",
+        }
+        out = []
+        for row in rows:
+            clean = {}
+            has_metric = False
+            raw_like = False
+            for key, value in row.items():
+                lk = str(key).lower()
+                if lk in raw_markers or lk.endswith("_id"):
+                    raw_like = True
+                metric = (
+                    lk in ("count", "n", "total", "row_count", "match_count")
+                    or "count" in lk
+                    or lk.endswith("_total")
+                    or lk.startswith(("total_", "min_", "max_", "avg_", "sum_"))
+                )
+                dimension = (
+                    lk in ("day", "date", "week", "month", "year", "bucket",
+                           "period", "category", "topic", "group")
+                    or lk.endswith(("_day", "_date", "_week", "_month", "_year"))
+                )
+                if metric:
+                    has_metric = True
+                if metric or dimension:
+                    clean[key] = value
+            if clean and has_metric and not raw_like:
+                out.append(clean)
+        if out:
+            return {"allow": True, "rows": out[:50]}
+        return {"allow": True, "rows": [{"match_count": len(rows)}]}
 
 ## Pattern B — redact identifying fields but keep useful structure
 When rows are useful but specific values carry protected content, remove

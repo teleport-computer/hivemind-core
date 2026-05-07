@@ -74,7 +74,14 @@ Workflow:
 1. Read the scope_fn source (provided below the question).
 2. Call get_schema if you need column-level detail.
 3. Write SQL that fits the scope_fn's allow pattern.
-4. Synthesize a clear answer, respecting what scope_fn did to the rows.
+4. If the user asks for an aggregate that POLICY allows, return only
+   aggregate metrics and allowed dimensions. Use clear aggregate aliases
+   such as count/total/n, *_count, *_day, *_date, *_month, min_*, max_*.
+5. If a first aggregate SQL comes back as only a policy marker or
+   match_count, do not immediately say the answer is inaccessible. Re-read
+   scope_fn and retry with a narrower aggregate-only SQL/alias shape that
+   the scope_fn preserves. Give up only after 2-3 scoped SQL attempts fail.
+6. Synthesize a clear answer, respecting what scope_fn did to the rows.
 
 Rules:
 - Use parameterized queries (%s placeholders) to prevent SQL injection.
