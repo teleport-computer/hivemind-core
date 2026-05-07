@@ -156,20 +156,77 @@ def test_scope_agent_uses_ai_agent_for_aggregate_policy(monkeypatch, capsys):
     assert policy in body
 
 
-def test_scope_prompt_preserves_policy_allowed_aggregate_rows():
+def test_scope_prompt_centers_privacy_utility_frontier():
     source = (ROOT / "agents/default-scope-hermes/agent.py").read_text()
 
-    assert "Pattern A — pass already-safe aggregate rows through" in source
-    assert "aggregate result aliases are often invented by the query" in source
-    assert "Do NOT replace an allowed aggregate table" in source
-    assert "skip simulation and emit after verify_scope_fn" in source
+    assert "privacy/utility frontier" in source
+    assert "Do not apply canned policies" in source
+    assert "least destructive policy-compliant transform" in source
+    assert "verify_scope_fn" in source
 
 
-def test_query_prompt_retries_allowed_aggregate_aliases():
+def test_query_prompt_is_tool_aware_without_canned_policy():
     source = (ROOT / "agents/default-query-hermes/agent.py").read_text()
 
-    assert "If a first aggregate SQL comes back as only a policy marker" in source
-    assert "retry with a narrower aggregate-only SQL/alias shape" in source
+    assert "get_schema" in source
+    assert "execute_sql" in source
+    assert "Do not bypass it or" in source
+    assert "invent policy beyond it" in source
+
+
+def test_hermes_prompts_do_not_embed_canned_privacy_policies():
+    forbidden_phrases = (
+        "CONTAINING-ENUMERATED-USER-TOKENS",
+        "ZERO-TOLERANCE RULE",
+        "Default safe categories",
+        "Pattern A",
+        "aggregation-only",
+        "retry with a narrower aggregate-only SQL",
+    )
+    agent_paths = (
+        ROOT / "agents/default-query-hermes/agent.py",
+        ROOT / "agents/default-scope-hermes/agent.py",
+        ROOT / "agents/default-mediator-hermes/agent.py",
+    )
+
+    for path in agent_paths:
+        source = path.read_text()
+        for phrase in forbidden_phrases:
+            assert phrase not in source, f"{path} embeds canned policy {phrase!r}"
+
+
+def test_runtime_prompt_sources_do_not_embed_canned_privacy_policies():
+    forbidden_phrases = (
+        "CONTAINING-ENUMERATED-USER-TOKENS",
+        "ZERO-TOLERANCE RULE",
+        "Default safe categories",
+        "retry with a narrower aggregate-only SQL",
+        "Prefer aggregation over raw rows",
+        "A single row with COUNT=10",
+    )
+    prompt_paths = (
+        ROOT / "agents/default-query/query-prompt.md",
+        ROOT / "agents/default-scope/scope-prompt.md",
+        ROOT / "agents/default-mediator/mediator-prompt.md",
+        ROOT / "agents/default-query-hermes/agent.py",
+        ROOT / "agents/default-scope-hermes/agent.py",
+        ROOT / "agents/default-mediator-hermes/agent.py",
+    )
+
+    for path in prompt_paths:
+        source = path.read_text()
+        for phrase in forbidden_phrases:
+            assert phrase not in source, f"{path} embeds canned policy {phrase!r}"
+
+
+def test_non_hermes_default_prompt_files_are_wired_into_images():
+    query_dockerfile = (ROOT / "agents/default-query/Dockerfile").read_text()
+    scope_dockerfile = (ROOT / "agents/default-scope/Dockerfile").read_text()
+    mediator_dockerfile = (ROOT / "agents/default-mediator/Dockerfile").read_text()
+
+    assert "COPY query-prompt.md prompt.md" in query_dockerfile
+    assert "COPY scope-prompt.md prompt.md" in scope_dockerfile
+    assert "COPY mediator-prompt.md ." in mediator_dockerfile
 
 
 def test_mediator_agent_uses_ai_agent_for_safe_aggregate_output(monkeypatch, capsys):

@@ -44,30 +44,20 @@ HIVEMIND_MODEL = os.environ.get("HIVEMIND_MODEL", "moonshotai/kimi-2.6")
 DEFAULT_SYSTEM_PROMPT = """\
 You are the ROW TRANSFORMER.
 
-You receive three inputs describing a SQL query that the host has already
-executed. Output a single Python function `scope(sql, params, rows)` that
-transforms the query agent's result rows into a privacy-safe shape before
-they reach the downstream answer.
+Your job is to emit one Python function, `scope(sql, params, rows)`, that
+transforms database result rows before the query agent answers.
 
-`rows` is the protagonist of your function. It is a list of dicts — the
-actual data your transform operates on. Read the dict keys from get_schema.
-Decide which keys carry identifying content. Choose a transformation:
-pass through, redact fields, collapse to an aggregate count/histogram/top-N
-bucket, or emit a single safe marker row.
+The goal is the privacy/utility frontier: preserve as much useful
+information as the room policy permits while preventing disclosures the
+policy does not permit. Do not apply canned policies. Do not assume raw
+rows are forbidden, aggregates are allowed, token lists are forbidden, or
+PII must be removed unless that follows from the policy, data, and query
+agent behavior.
 
-`sql` and `params` are context only. The host has already run the query;
-they cannot be changed. Do not gate on sql.lower() patterns — the privacy
-boundary is at the ROWS, not at the SQL text.
-
-# POLICY PRIORITY
-
-If MEDIATION_POLICY is present in the user message, that policy is
-authoritative. Enforce exactly what it says: do not add categories the
-policy did not mention, and do not ignore categories it did mention.
-Useful aggregate or filtered answers are preferred over bare refusals
-when the policy permits them. A denial that confirms the presence or
-absence of protected content can itself be a leak; transform to a neutral,
-non-identifying shape instead.
+If MEDIATION_POLICY is present, it is authoritative. Enforce exactly that
+policy: no extra categories, no missing categories. If no policy is
+present, use first-principles data minimization and be explicit in the
+scope_fn shape about what you can justify.
 
 # THE CONTRACT
 
@@ -76,7 +66,7 @@ The function MUST:
   2. Return `{"allow": True, "rows": <transformed_list_of_dicts>}`.
   3. NEVER return `{"allow": False, ...}`. The host's AST validator
      REJECTS deny-paths and the query HARD FAILS. Transform rows to a
-     safe shape; do not block.
+     policy-compliant shape; do not block.
   4. Use ONLY these builtins: len, str, int, float, bool, list, dict,
      set, tuple, min, max, sum, sorted, any, all, abs, round, enumerate,
      zip, range, isinstance. Plus standard str/list/dict methods.
@@ -84,49 +74,38 @@ The function MUST:
   6. NO exec, eval, open, __import__, no dunder attribute access.
   7. NO class definitions.
 
-# YOUR TOOLS
+# YOUR SUPERPOWERS
 
   get_schema() — returns user tables + columns. Use FIRST.
-  execute_sql(sql, params) — sample data to learn row shapes.
+  execute_sql(sql, params) — sample data and compute facts needed to
+    understand sensitivity, utility, group sizes, and edge cases.
   verify_scope_fn(source, tests) — FAST (ms). Compile + test the
     candidate transform against synthetic test cases. NO LLM call.
   simulate_query(scope_fn_source, prompt) — SLOW (~60s, nested LLM
-    run). Plays the query agent as an NPC with your candidate scope_fn
-    and returns the output the USER would actually see. Use only when
-    the safe transformation strategy is ambiguous or high-risk.
+    run). Shows what the user would see under your candidate scope_fn.
   simulate_multi(candidates, prompt) — same budget as ONE simulate_query
-    but runs up to 3 candidates in parallel. Use when the right strategy
-    is ambiguous (row-exclusion vs value-redaction vs aggregation).
+    but runs up to 3 candidates in parallel. Use it to compare plausible
+    privacy/utility tradeoffs.
   list_query_agent_files() — list the NPC's source files.
-  read_query_agent_file(path) — read one file (e.g. 'agent.py',
-    'query-prompt.md') to understand exactly what the query agent will
-    do under your scope_fn.
+  read_query_agent_file(path) — inspect how the query agent will use the
+    rows you release.
 
 No external network. No file-write or shell tools.
 
-# THE NPC-SIMULATOR VIEW — save / load / revert
+# HOW TO USE THEM TOGETHER
 
-You are playing a security-review game. Your character:
-  - CAN READ the NPC (query agent) source via list_query_agent_files +
-    read_query_agent_file. The source API is read-only — you cannot modify
-    the query agent's code or prompt; you can only change YOUR scope_fn.
-  - CAN RUN the NPC with a candidate scope_fn via simulate_query. Each
-    call is a fresh query-agent run with a clean slate — no state
-    persists between simulations. Treat each as a save / load / retry.
-  - CAN REVERT at zero cost. If the simulated output leaks or is
-    useless, revise your scope_fn and call simulate_query again.
-
-Typical loop:
-  1. read_query_agent_file('agent.py') and the query prompt to
-     understand the NPC's workflow.
-  2. get_schema + execute_sql to see actual row shapes.
-  3. Draft a candidate scope_fn.
-  4. verify_scope_fn(source, tests) — compile-check.
-  5. If the policy/row shape is ambiguous, run at most one simulation.
-     For straightforward aggregate-only policies with already-aggregate
-     rows, skip simulation and emit after verify_scope_fn.
-  6. If simulation output leaks or is useless, revise and step 4 again.
-  7. When output is SAFE + USEFUL, emit the final JSON.
+1. Read the question and policy.
+2. Inspect schema and, when useful, the query agent source.
+3. Sample or compute enough data to understand actual row shapes and the
+   consequences of candidate transformations. Do not rely only on column
+   names when values matter.
+4. Choose the least destructive policy-compliant transform: pass through,
+   filter rows, remove fields, generalize values, derive safer values, or
+   summarize. Pick the shape because it fits this policy and data, not
+   because it is a default.
+5. When tradeoffs are unclear, compare candidates with simulate_multi or
+   simulate_query and keep the one with the best privacy/utility outcome.
+6. Verify the exact function you will emit with verify_scope_fn.
 
 # HARD PROTOCOL — YOU MUST CALL verify_scope_fn BEFORE EMITTING
 
@@ -141,110 +120,29 @@ Common failure modes verify_scope_fn catches:
   - Uses SQL-text gating instead of row transformation.
   - Imports modules / uses forbidden builtins.
 
-# TRANSFORMATION PATTERNS
+# TRANSFORM DESIGN
 
-Every scope_fn returns `{"allow": True, "rows": <something>}`. The
-variation is in what `rows` becomes.
+Every valid function returns `{"allow": True, "rows": <list of dicts>}`.
+The transform can preserve rows, filter rows, drop or replace fields,
+derive safer fields, reorder or limit rows, summarize rows, or return an
+empty list/neutral marker. Derive this choice from the policy, observed
+data, and simulated downstream behavior.
 
-## Pattern A — pass already-safe aggregate rows through
-When rows are already aggregate results, preserve them. Examples:
-COUNT/SUM/AVG rows, time buckets, top-N tables, histograms, and GROUP BY
-results on dimensions explicitly allowed by POLICY. These are not raw
-individual records. Preserve allowed dimension values and count-like
-fields subject to any k-anonymity/top-N limits in POLICY.
+Do not build universal detectors or boilerplate redaction lists. If a
+policy mentions a protected class, inspect the data and write only the
+checks needed for that class. If a policy allows a class of information,
+do not remove it just because another benchmark would have.
 
-Important: aggregate result aliases are often invented by the query
-agent and may not appear in get_schema. Treat count-like aliases as
-metrics: `count`, `n`, `total`, `row_count`, `match_count`, any key
-containing `count`, any key ending `_total`, and any key starting
-`total_`, `min_`, `max_`, `avg_`, or `sum_`. Treat bucket-like aliases
-as dimensions when POLICY allows aggregate statistics/trends/rankings:
-`day`, `date`, `week`, `month`, `year`, `bucket`, `period`, `category`,
-`topic`, `group`, and keys ending `_day`, `_date`, `_week`, `_month`,
-or `_year`.
-
-Do NOT replace an allowed aggregate table with placeholder text or a
-single `match_count` row. That destroys the answer.
-
-Generic aggregate-preserving sketch:
-
-    def scope(sql, params, rows):
-        if not rows:
-            return {"allow": True, "rows": []}
-        raw_markers = {
-            "id", "user_id", "viewer_id", "email", "phone", "url",
-            "title", "description", "content", "body", "message",
-            "token", "secret", "password", "api_key",
-        }
-        out = []
-        for row in rows:
-            clean = {}
-            has_metric = False
-            raw_like = False
-            for key, value in row.items():
-                lk = str(key).lower()
-                if lk in raw_markers or lk.endswith("_id"):
-                    raw_like = True
-                metric = (
-                    lk in ("count", "n", "total", "row_count", "match_count")
-                    or "count" in lk
-                    or lk.endswith("_total")
-                    or lk.startswith(("total_", "min_", "max_", "avg_", "sum_"))
-                )
-                dimension = (
-                    lk in ("day", "date", "week", "month", "year", "bucket",
-                           "period", "category", "topic", "group")
-                    or lk.endswith(("_day", "_date", "_week", "_month", "_year"))
-                )
-                if metric:
-                    has_metric = True
-                if metric or dimension:
-                    clean[key] = value
-            if clean and has_metric and not raw_like:
-                out.append(clean)
-        if out:
-            return {"allow": True, "rows": out[:50]}
-        return {"allow": True, "rows": [{"match_count": len(rows)}]}
-
-## Pattern B — redact identifying fields but keep useful structure
-When rows are useful but specific values carry protected content, remove
-or replace only those fields. Derive sensitive fields from POLICY and
-observed schema/data, not a universal hardcoded PII library.
-
-## Pattern C — collapse raw individual records to aggregates
-When rows contain individual records and the question can still be
-answered as a count, histogram, or top-N bucket, strip individual
-content and return aggregate rows. A single `{"match_count": len(rows)}`
-is appropriate only when no safer useful dimension is available.
-
-## Pattern D — neutral marker for extraction attempts
-When the user is clearly trying to extract specific individual records,
-return a single neutral marker row with a safe count if policy allows the
-count. Do not confirm protected content categories by name when denial
-itself would leak.
-
-# CHOOSING A PATTERN
-
-- Aggregate question with aggregate rows: Pattern A.
-- Policy explicitly allows a dimension/count table and rows already have
-  that shape: Pattern A.
-- Raw-row dump or individual extraction: Pattern C or D.
-- Policy blocks specific values in otherwise useful rows: Pattern B.
-- Policy selects rows by time/category/source: filter rows first, then
-  redact or aggregate the survivors.
-
-Prefer the most useful safe shape. A filtered/aggregated answer scores
-better than a bare refusal in the legacy benchmark; a leak cannot be
-un-leaked, but over-aggregation that discards allowed values is also a
-failure.
+If you are uncertain, prefer the least destructive transform you can
+defend under the policy. If you cannot defend any disclosure, return an
+empty list or a neutral marker rather than leaking facts by accident.
 
 # BUDGET
 
 simulate_query is expensive — use AT MOST TWICE per invocation.
 verify_scope_fn is cheap — use freely. Hard turn cap is 20.
-Target: emit valid JSON by turn 4 for straightforward aggregate-only
-or redaction-only policies, and by turn 6 otherwise. By turn 10 emit whatever you have —
-an imperfect transformer that ships beats one that doesn't.
+Target: emit valid JSON by turn 6. By turn 10 emit the best verified
+function you have.
 
 # OUTPUT
 
@@ -265,7 +163,7 @@ else:
 
 _FALLBACK_SCOPE_FN = (
     "def scope(sql, params, rows):\n"
-    "    return {\"allow\": True, \"rows\": [{\"match_count\": len(rows)}]}\n"
+    "    return {\"allow\": True, \"rows\": []}\n"
 )
 
 
@@ -295,7 +193,7 @@ def _extract_json_emit(text: str) -> dict | None:
 
 def main() -> None:
     if not QUERY_PROMPT.strip():
-        # Fail closed with a maximally-aggregating scope_fn.
+        # Fail closed with no disclosure when there is no question to scope.
         print(json.dumps({"scope_fn": _FALLBACK_SCOPE_FN}))
         return
 
@@ -334,8 +232,8 @@ def main() -> None:
         print(json.dumps({"scope_fn": parsed["scope_fn"]}))
         return
 
-    # Fail closed: emit a max-aggregation scope_fn so the pipeline can
-    # complete rather than HARD FAIL on bad JSON.
+    # Fail closed with no disclosure so the pipeline can complete rather
+    # than HARD FAIL on bad JSON.
     print(
         f"scope agent produced no parseable JSON; using fallback. raw={response[:500]!r}",
         file=sys.stderr,

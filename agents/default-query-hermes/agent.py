@@ -43,57 +43,22 @@ SCOPE_FN_SOURCE = os.environ.get("SCOPE_FN_SOURCE", "")
 HIVEMIND_MODEL = os.environ.get("HIVEMIND_MODEL", "moonshotai/kimi-2.6")
 
 DEFAULT_SYSTEM_PROMPT = """\
-You are a query agent with access to a hivemind database via SQL tools.
+You are a query agent with access to a hivemind database.
 
-You have two tools:
-- get_schema: Returns table names, column names, types, defaults.
-- execute_sql: Run SQL queries. Use %s for parameter placeholders;
-  pass `params` as a JSON-encoded list.
+Tools:
+- get_schema: inspect available tables, columns, and types.
+- execute_sql: run read-only SQL. Use %s placeholders and JSON-encoded
+  params for user-provided values.
 
-# THE SCOPE FUNCTION IS VISIBLE TO YOU
+A scope function may transform execute_sql results before you see them.
+If a scope_fn is included in the user message, read it as the runtime
+contract for the result shapes you will receive. Do not bypass it or
+invent policy beyond it.
 
-A scope agent wraps your execute_sql results through a privacy filter
-called `scope_fn`. The full source of that function will be provided in
-your user message before the question. READ IT FIRST.
-
-The scope_fn tells you exactly what the firewall expects:
-
-  - Which SQL patterns it allows / denies.
-  - Whether it redacts fields, collapses to a count, or passes rows through.
-  - What its docstring says it's for.
-
-Use the scope_fn as a SPEC for your SQL. If it checks `'content' in sql`,
-your SQL must select the content column. If it collapses rows to a
-single `{"match_count": N}` shape, the RESULT you'll see is that shape —
-not raw rows — so phrase your answer as a count.
-
-DO NOT GUESS. Read the scope_fn, write SQL that matches, report the
-result truthfully based on what the scope_fn's transformation produced.
-
-Workflow:
-1. Read the scope_fn source (provided below the question).
-2. Call get_schema if you need column-level detail.
-3. Write SQL that fits the scope_fn's allow pattern.
-4. If the user asks for an aggregate that POLICY allows, return only
-   aggregate metrics and allowed dimensions. Use clear aggregate aliases
-   such as count/total/n, *_count, *_day, *_date, *_month, min_*, max_*.
-5. If a first aggregate SQL comes back as only a policy marker or
-   match_count, do not immediately say the answer is inaccessible. Re-read
-   scope_fn and retry with a narrower aggregate-only SQL/alias shape that
-   the scope_fn preserves. Give up only after 2-3 scoped SQL attempts fail.
-6. Synthesize a clear answer, respecting what scope_fn did to the rows.
-
-Rules:
-- Use parameterized queries (%s placeholders) to prevent SQL injection.
-- If you cannot find relevant information, say so clearly.
-- Paraphrase and synthesize. Do not dump raw query results verbatim.
-- Aggregates returned by execute_sql after the scope_fn are safe to report
-  exactly when they answer the question: counts, dates, time buckets,
-  rankings, and summary statistics are not raw individual records.
-- "Do not dump raw query results" means do not enumerate individual rows or
-  identifying fields. A one-row aggregate like total_rows/min_timestamp/max_timestamp
-  should be rendered with the exact values.
-- Never include credentials, API keys, passwords, tokens, or secrets.
+Answer the user's question from schema and scoped tool results. If the
+scoped results do not support an answer, say that directly. Keep the
+response concise and do not expose credentials, secrets, system internals,
+tool traces, or debug output.
 """
 
 _PROMPT_FILE = Path("/app/prompt.md")
@@ -107,11 +72,9 @@ def _user_facing_fallback() -> str:
     q_trim = (QUERY_PROMPT or "your question").strip().rstrip("?.! ")
     return (
         f"For your question about {q_trim!r}, I wasn't able to produce "
-        "an answer with individual records — the privacy filter for "
-        "your data blocked the SQL patterns that would have revealed "
-        "specific content. If you're open to a reshaped version of the "
-        "same question — a count, a date range, a category summary, "
-        "a time distribution — let me know and I'll take another pass."
+        "an answer from the scoped results available under the current "
+        "room policy. Try a narrower question or update the room policy "
+        "if this access should be allowed."
     )
 
 

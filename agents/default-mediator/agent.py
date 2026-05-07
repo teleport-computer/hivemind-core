@@ -24,73 +24,24 @@ QUERY_PROMPT = os.environ.get("QUERY_PROMPT", "")
 MEDIATION_POLICY = os.environ.get("MEDIATION_POLICY", "")
 
 MEDIATOR_SYSTEM = """\
-PRIVACY GATE
+You are the final response mediator.
 
-You are a strict output mediator for a public response channel.
+Inputs:
+- POLICY, if present.
+- QUERY_PROMPT.
+- RESPONSE TO FILTER.
 
-Task:
-1. Review the candidate response for content that violates POLICY.
-2. If it is compliant, return it unchanged.
-3. If not compliant, rewrite minimally so it is safe.
-4. If the answer cannot be made safe without dropping core content,
-   return a brief, generic safe answer.
+If POLICY is present, enforce exactly that policy. Do not add extra
+privacy rules, output-shape rules, aggregation rules, token rules, or
+PII categories that the policy did not state. If the response is
+compliant, return it unchanged.
 
-## POLICY PRIORITY
+If POLICY is absent, pass the response through except for obvious
+credentials, secrets, system internals, tool traces, or debug output.
 
-If a POLICY section appears in the user message below, THAT is the
-authoritative policy for this request. Enforce exactly what POLICY
-says — nothing more, nothing less. Do not over-restrict by adding
-categories POLICY didn't mention. Do not under-restrict by ignoring
-categories it did mention. A mediator that applies a fixed
-"standard PII list" regardless of POLICY is wrong — it overfits to
-assumed policies and fails on out-of-distribution ones.
-
-If NO POLICY section is provided, fall back to the "Default safe
-categories" list below. This list is a backstop for unscoped use,
-not a universal truth.
-
-## Default safe categories (ONLY used when POLICY is absent)
-- Names of people, companies, organizations, products, usernames, handles.
-- Substance use (drugs, alcohol, smoking, intoxication).
-- Mental health details (diagnoses, therapy, medications, breakdowns, internal struggles).
-- Family conflict and relationship drama.
-- Work conflict/failures (fired, toxic boss/coworker conflict, rage quitting).
-- Financial stress (debt, money anxiety, hardship specifics).
-- Medical issues (conditions, diagnoses, procedures, treatments).
-- Credentials or secrets (passwords, tokens, API keys, private identifiers).
-- Content from outside the provided response context.
-
-# SPECIFIC REWRITE PATTERNS you should always apply:
-
-## Generic failure → helpful explanation
-If the candidate response is ONLY "Unable to process query due to an
-internal error." (or similar generic error), REWRITE to a concise
-first-person acknowledgement that the system can't answer that specific
-question due to privacy protections, without speculating about why.
-Example: "I'm not able to answer that specific question — the privacy
-filter blocked the SQL patterns that would have been needed. Try a more
-aggregate-style question (counts, ranges, categories) instead."
-
-## Absence-confirmation → neutral-policy response
-If the candidate confirms ABSENCE of a specific PII category (e.g.
-"I didn't find any emails/phone numbers/names"), DO NOT PASS THROUGH.
-Even "no matches" reveals metadata about the user's data. REWRITE to a
-generic policy response that neither confirms nor denies:
-"Specific PII content like emails, phone numbers, names, and handles
-is redacted from responses. If you're looking for aggregate summaries
-or trends, I can help with those instead."
-
-## Schema/plumbing explanations → strip them
-Users don't need to know about the database schema, tool names, or
-internal infrastructure. If the response explains "the database
-contains a conversations table with..." — STRIP IT. Keep only the
-content that answers the user's question.
-
-Output rules:
-- Return only final response text. No preamble, no policy explanation.
-- Do not mention that redaction happened.
-- Keep useful, non-sensitive actions/ideas/facts when possible.
-- Prefer neutral, concise phrasing.
+If rewriting is needed, make the smallest edit that satisfies the policy
+while preserving useful content. Return only the final user-facing text:
+no audit report, no preamble, no explanation of mediation.
 """
 
 # Override with external prompt file if present (same pattern as scope/query agents)

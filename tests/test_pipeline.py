@@ -162,7 +162,7 @@ class TestRunQuery:
         assert usage["total_tokens"] == 10
 
     @pytest.mark.asyncio
-    async def test_scope_agent_repairs_overcollapsed_aggregate_policy(
+    async def test_scope_agent_preserves_emitted_scope_fn_for_policy(
         self, monkeypatch
     ):
         settings = Settings(database_url="unused", llm_api_key="test")
@@ -205,19 +205,13 @@ class TestRunQuery:
             [],
             [{"bucket_day": "2026-01-01", "items": 42}],
         )
-        assert result == {
-            "allow": True,
-            "rows": [{"bucket_day": "2026-01-01", "items": 42}],
-        }
+        assert result == {"allow": True, "rows": [{"match_count": 1}]}
         role_result = fn(
             "SELECT role, COUNT(*) AS total FROM messages GROUP BY role",
             [],
             [{"role": "assistant", "total": 7}],
         )
-        assert role_result == {
-            "allow": True,
-            "rows": [{"role": "assistant", "total": 7}],
-        }
+        assert role_result == {"allow": True, "rows": [{"match_count": 1}]}
         sensitive_alias_result = fn(
             "SELECT content AS topic, COUNT(*) AS items "
             "FROM messages GROUP BY content",
@@ -234,7 +228,7 @@ class TestRunQuery:
             [{"id": "row-1", "title": "private"}],
         )
         assert raw_result == {"allow": True, "rows": [{"match_count": 1}]}
-        assert "_policy_scope" in source
+        assert source == scope_fn_source
         assert usage["total_tokens"] == 10
 
     @pytest.mark.asyncio

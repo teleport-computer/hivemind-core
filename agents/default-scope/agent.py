@@ -768,10 +768,44 @@ reasoning about rows instead of reasoning about the recipient.
 """
         SYSTEM_PROMPT = SYSTEM_PROMPT[:_s] + _new_workflow + SYSTEM_PROMPT[_e:]
 
+SIMPLE_SYSTEM_PROMPT = """\
+You are the row transformer.
+
+Your job is to emit one Python function, `scope(sql, params, rows)`, that
+transforms database result rows before the query agent answers.
+
+The goal is the privacy/utility frontier: preserve as much useful
+information as the room policy permits while preventing disclosures the
+policy does not permit. Do not apply canned policies. Do not assume raw
+rows are forbidden, aggregates are allowed, token lists are forbidden, or
+PII must be removed unless that follows from the policy, data, and query
+agent behavior.
+
+If POLICY is present, it is authoritative. Enforce exactly that policy:
+no extra categories, no missing categories. If no policy is present, use
+first-principles data minimization and be explicit in the scope function
+shape about what you can justify.
+
+Use your tools together: inspect schema, sample or compute facts from the
+data, inspect the query agent when useful, compare candidate transforms
+with simulation when tradeoffs are unclear, and verify the exact function
+before emitting.
+
+The function must have signature exactly `def scope(sql, params, rows):`,
+return `{"allow": True, "rows": <list_of_dicts>}`, and avoid imports,
+exec, eval, open, dunder access, classes, and unavailable builtins. The
+host rejects deny paths, so transform rows instead.
+
+Your final message must be exactly one JSON object:
+{"scope_fn": "def scope(sql, params, rows):\\n    ..."}
+"""
+
 # Override with external prompt file if present (CLI-fused agents)
 _PROMPT_FILE = Path("/app/prompt.md")
 if _PROMPT_FILE.exists():
     SYSTEM_PROMPT = _PROMPT_FILE.read_text()
+else:
+    SYSTEM_PROMPT = SIMPLE_SYSTEM_PROMPT
 
 
 def _looks_like_scope_source(src: str) -> bool:
@@ -1184,17 +1218,12 @@ async def main() -> None:
             f"{POLICY_CONTEXT}\n"
             "---\n\n"
             "Translate the policy above into concrete row transformations. "
-            "Examples:\n"
-            "  - 'last 30 days only' → filter rows where the date column "
-            "is >= (today - 30 days), hardcode the cutoff string if needed "
-            "based on the max date you observe via execute_sql.\n"
-            "  - 'aggregate only, no individual content' → Pattern C "
-            "(collapse to {match_count: len(rows)}) for any raw-row query.\n"
-            "  - 'strip code blocks / credentials' → Pattern B redacting "
-            "fields that contain triple-backtick fences, API key patterns, "
-            "etc.\n"
-            "  - 'block topic X' → filter out rows where the content/title "
-            "column matches X, or collapse to an opaque count.\n"
+            "Use the least destructive shape that satisfies this policy: "
+            "pass through, filter rows, remove fields, generalize values, "
+            "derive safer fields, summarize, or return no rows when no "
+            "disclosure can be justified. Do not add protections or "
+            "allowances that are not grounded in the policy and observed "
+            "data.\n"
         )
 
     # Run the scope session. First attempt uses the normal user_prompt;
@@ -1226,9 +1255,9 @@ async def main() -> None:
         print(json.dumps(parsed))
         return
 
-    # Emit-failure after all retries exhausted. Fall back to a safe
-    # marker scope_fn so the query agent and mediator can produce a
-    # clear "content redacted by policy" response rather than garbage.
+    # Emit-failure after all retries exhausted. Fall back to no disclosure
+    # so the query agent and mediator can produce a policy-safe response
+    # rather than garbage.
     print(
         f"[scope-agent] PATH=emit-failure attempt={attempt_label} "
         f"REASON={outcome[:200]}",
@@ -1240,17 +1269,12 @@ async def main() -> None:
             {
                 "scope_fn": (
                     # Never-deny compliant fallback: when the scope agent
-                    # itself fails to produce a scope_fn, emit a safe
-                    # transformer that collapses any rows to a neutral
-                    # marker. The host's AST validator rejects allow=False,
-                    # so this is the only legal fallback shape.
+                    # itself fails to produce a scope_fn, emit a transformer
+                    # that releases no rows. The host's AST validator
+                    # rejects allow=False, so this is the legal fail-closed
+                    # shape.
                     "def scope(sql, params, rows):\n"
-                    "    return {'allow': True, "
-                    "'rows': [{"
-                    "'policy_note': 'scope agent failed — content "
-                    "redacted by safe fallback', "
-                    "'match_count': len(rows)"
-                    "}]}"
+                    "    return {'allow': True, 'rows': []}"
                 )
             }
         )

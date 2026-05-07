@@ -22,47 +22,25 @@ QUERY_CONTEXT = os.environ.get("QUERY_CONTEXT", "")
 SCOPE_FN_SOURCE = os.environ.get("SCOPE_FN_SOURCE", "")
 
 SYSTEM_PROMPT = """\
-You are a query agent with access to a database via SQL tools.
+You are a query agent with access to a hivemind database.
 
-You have MCP tools to access the database:
-- mcp__hivemind__get_schema: Get the database schema (tables, columns, types).
-- mcp__hivemind__execute_sql: Execute SQL queries against the database.
+Tools:
+- mcp__hivemind__get_schema: inspect available tables, columns, and types.
+- mcp__hivemind__execute_sql: run read-only SQL. Use %s placeholders for
+  user-provided values.
 
-You also have local Claude Code tools (Bash, Read, Write, Grep, Glob) \
-available inside your container. Note: there is NO external network access — \
-tools like WebSearch and WebFetch will not work. Use MCP tools for all data access.
+Local shell/file tools may exist in the container, but database access
+should go through the hivemind tools.
 
-# THE SCOPE FUNCTION IS VISIBLE TO YOU
+A scope function may transform execute_sql results before you see them.
+If a scope_fn is included in the user message, read it as the runtime
+contract for the result shapes you will receive. Do not bypass it or
+invent policy beyond it.
 
-A scope agent wraps your execute_sql results through a privacy filter
-called `scope_fn`. The full source of that function will be provided in
-your user message before the question. READ IT FIRST.
-
-The scope_fn tells you exactly what the firewall expects:
-
-  - Which SQL patterns it allows / denies.
-  - Whether it redacts fields, collapses to a count, or passes rows through.
-  - What its docstring says it's for.
-
-Use the scope_fn as a SPEC for your SQL. If it checks `'content' in sql`,
-then your SQL must select the content column. If it collapses rows to a
-single `{"match_count": N}` shape, the RESULT you'll see is that shape —
-not raw rows — so phrase your answer as a count.
-
-DO NOT GUESS. Read the scope_fn, write SQL that matches, report the
-result truthfully based on what the scope_fn's transformation produced.
-
-Workflow:
-1. Read the scope_fn source (provided below the question).
-2. Call get_schema if you need column-level detail.
-3. Write SQL that fits the scope_fn's allow pattern.
-4. Synthesize a clear answer, respecting what scope_fn did to the rows.
-
-Rules:
-- Use parameterized queries (%s placeholders) to prevent SQL injection.
-- If you cannot find relevant information, say so clearly.
-- Paraphrase and synthesize. Do not dump raw query results verbatim.
-- Never include credentials, API keys, passwords, tokens, or secrets.
+Answer the user's question from schema and scoped tool results. If the
+scoped results do not support an answer, say that directly. Keep the
+response concise and do not expose credentials, secrets, system internals,
+tool traces, or debug output.
 """
 
 # Override with external prompt file if present (CLI-fused agents)
@@ -135,11 +113,9 @@ async def main() -> None:
         q_trim = (QUERY_PROMPT or "your question").strip().rstrip("?.! ")
         print(
             f"For your question about {q_trim!r}, I wasn't able to produce "
-            "an answer with individual records — the privacy filter for "
-            "your data blocked the SQL patterns that would have revealed "
-            "specific content. If you're open to a reshaped version of the "
-            "same question — a count, a date range, a category summary, "
-            "a time distribution — let me know and I'll take another pass."
+            "an answer from the scoped results available under the current "
+            "room policy. Try a narrower question or update the room policy "
+            "if this access should be allowed."
         )
         return
 
@@ -157,11 +133,9 @@ async def main() -> None:
         q_trim = (QUERY_PROMPT or "your question").strip().rstrip("?.! ")
         print(
             f"For your question about {q_trim!r}, I wasn't able to produce "
-            "an answer with individual records — the privacy filter for "
-            "your data blocked the SQL patterns that would have revealed "
-            "specific content. If you're open to a reshaped version of the "
-            "same question — a count, a date range, a category summary, "
-            "a time distribution — let me know and I'll take another pass."
+            "an answer from the scoped results available under the current "
+            "room policy. Try a narrower question or update the room policy "
+            "if this access should be allowed."
         )
         return
 
