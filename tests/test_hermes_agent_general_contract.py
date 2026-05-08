@@ -445,6 +445,167 @@ def test_query_agent_schema_error_response_uses_scoped_sql_fallback(
     assert "Direct SQL fallback used" in captured.err
 
 
+def test_query_agent_direct_sql_planner_repairs_alias_errors(
+    monkeypatch,
+    capsys,
+):
+    monkeypatch.setenv(
+        "QUERY_PROMPT",
+        "Which day had the highest number of watches? Return watch_day and videos.",
+    )
+    monkeypatch.setenv(
+        "SCOPE_FN_SOURCE",
+        "def scope(sql, params, rows):\n"
+        "    return {\"allow\": True, \"rows\": rows}\n",
+    )
+    mod, _calls = _load_agent(
+        monkeypatch,
+        "agents/default-query-hermes/agent.py",
+        "default_query_hermes_planner_alias_repair_contract_test",
+        response=(
+            "I can't answer this question because the watch_day column does "
+            "not exist. Did you mean watched_at?"
+        ),
+    )
+
+    planner_calls = 0
+
+    def fake_post_json(path, payload, *, timeout=90.0):
+        nonlocal planner_calls
+        if path == "/tools/get_schema":
+            return {
+                "result": json.dumps(
+                    [
+                        {
+                            "table_name": "events",
+                            "column_name": "watched_at",
+                            "data_type": "timestamp",
+                        }
+                    ]
+                )
+            }
+        if path == "/v1/chat/completions":
+            planner_calls += 1
+            if planner_calls == 1:
+                planner_prompt = payload["messages"][0]["content"]
+                assert "Requested output field names may be aliases" in planner_prompt
+                return {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": json.dumps(
+                                    {"error": "column watch_day does not exist"}
+                                )
+                            }
+                        }
+                    ]
+            }
+
+            repair_prompt = payload["messages"][-1]["content"]
+            assert "sql alias" in repair_prompt.lower()
+            assert "derive date/day" in repair_prompt.lower()
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "content": json.dumps(
+                                {
+                                    "sql": (
+                                        "SELECT DATE(watched_at) AS watch_day, "
+                                        "COUNT(*)::int AS videos FROM events "
+                                        "GROUP BY 1 ORDER BY 2 DESC LIMIT 1"
+                                    ),
+                                    "params": [],
+                                }
+                            )
+                        }
+                    }
+                ]
+            }
+        if path == "/tools/execute_sql":
+            return {
+                "result": json.dumps(
+                    [{"watch_day": "2026-04-15", "videos": 482237}]
+                )
+            }
+        raise AssertionError(f"unexpected bridge path {path}")
+
+    monkeypatch.setattr(mod, "_post_json", fake_post_json)
+
+    mod.main()
+
+    captured = capsys.readouterr()
+    assert planner_calls == 2
+    assert captured.out.startswith("["), captured.err
+    assert json.loads(captured.out) == [
+        {"watch_day": "2026-04-15", "videos": 482237}
+    ]
+    assert "Direct SQL fallback used" in captured.err
+
+
+def test_query_agent_unresolved_response_fails_closed_when_fallback_fails(
+    monkeypatch,
+    capsys,
+):
+    monkeypatch.setenv(
+        "QUERY_PROMPT",
+        "Which day had the highest number of watches? Return watch_day and videos.",
+    )
+    monkeypatch.setenv(
+        "SCOPE_FN_SOURCE",
+        "def scope(sql, params, rows):\n"
+        "    return {\"allow\": True, \"rows\": rows}\n",
+    )
+    mod, _calls = _load_agent(
+        monkeypatch,
+        "agents/default-query-hermes/agent.py",
+        "default_query_hermes_unresolved_fail_closed_contract_test",
+        response=(
+            "I can't answer this question because the watch_day column does "
+            "not exist. Did you mean watched_at?"
+        ),
+    )
+
+    def fake_post_json(path, payload, *, timeout=90.0):
+        if path == "/tools/get_schema":
+            return {
+                "result": json.dumps(
+                    [
+                        {
+                            "table_name": "events",
+                            "column_name": "watched_at",
+                            "data_type": "timestamp",
+                        }
+                    ]
+                )
+            }
+        if path == "/v1/chat/completions":
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "content": json.dumps(
+                                {"error": "column watch_day does not exist"}
+                            )
+                        }
+                    }
+                ]
+            }
+        if path == "/tools/execute_sql":
+            raise AssertionError("planner error must not execute SQL")
+        raise AssertionError(f"unexpected bridge path {path}")
+
+    monkeypatch.setattr(mod, "_post_json", fake_post_json)
+
+    mod.main()
+
+    captured = capsys.readouterr()
+    assert "I wasn't able to produce an answer" in captured.out
+    assert "column does not exist" not in captured.out
+    assert "Did you mean" not in captured.out
+    assert "Direct SQL fallback failed" in captured.err
+
+
 def test_scope_agent_uses_ai_agent_for_aggregate_policy(monkeypatch, capsys):
     scope_fn = (
         "def scope(sql, params, rows):\n"

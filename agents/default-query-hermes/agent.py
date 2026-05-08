@@ -126,8 +126,28 @@ Rules:
 - Do not include semicolons or multiple statements.
 - Use %s placeholders for params.
 - Compute requested aggregates in SQL.
+- Requested output field names may be aliases, not physical columns. Do not
+  return an error just because a requested output name is absent from the
+  schema.
+- For day/date bucket questions, derive the bucket from an existing date,
+  datetime, or timestamp column and alias it to the requested output name.
+- For count-like requested outputs, use COUNT(*) and alias it to the requested
+  output name.
 - The runtime scope function will filter or transform rows after execution;
   do not invent additional privacy policy in this planner.
+"""
+_DIRECT_SQL_REPAIR_PROMPT = """\
+Your previous response was not usable.
+
+If the error was about a requested output name missing from the schema, treat
+that name as a SQL alias instead of a required physical column. Derive date/day
+buckets from existing date, datetime, or timestamp columns when the question
+asks for a day/date. Use COUNT(*) for count-like aggregate outputs. Return a
+safe SELECT JSON object, or return {{"error": "..."}} only if the available
+physical columns cannot support the computation.
+
+Previous error:
+{error}
 """
 _MAX_PLANNER_CONTEXT_CHARS = 60_000
 _SELECT_START_RE = re.compile(r"^\s*(select|with)\b", re.IGNORECASE | re.DOTALL)
@@ -272,15 +292,35 @@ def _build_sql_planner_messages(body: str, schema: str) -> list[dict[str, str]]:
     ]
 
 
+def _plan_direct_sql(body: str, schema: str) -> dict[str, Any]:
+    messages = _build_sql_planner_messages(body, schema)
+    last_error = ""
+    for attempt in range(2):
+        planner_text = _llm_chat(messages)
+        plan = _extract_json_object(planner_text)
+        if not plan.get("error"):
+            return plan
+
+        last_error = str(plan["error"])
+        if attempt == 0:
+            messages = [
+                *messages,
+                {"role": "assistant", "content": json.dumps(plan)},
+                {
+                    "role": "user",
+                    "content": _DIRECT_SQL_REPAIR_PROMPT.format(error=last_error),
+                },
+            ]
+
+    raise RuntimeError(last_error or "planner returned an error")
+
+
 def _run_direct_sql_fallback(body: str) -> str | None:
     if not SCOPE_FN_SOURCE.strip():
         return None
 
     schema = _call_tool("get_schema", {})
-    planner_text = _llm_chat(_build_sql_planner_messages(body, schema))
-    plan = _extract_json_object(planner_text)
-    if plan.get("error"):
-        raise RuntimeError(str(plan["error"]))
+    plan = _plan_direct_sql(body, schema)
 
     sql = _normalize_select_sql(str(plan.get("sql") or ""))
     params = plan.get("params") or []
@@ -373,6 +413,8 @@ def main() -> None:
         if answer := _try_direct_sql_fallback(planner_body, "unresolved AIAgent response"):
             print(answer)
             return
+        print(_user_facing_fallback())
+        return
 
     print(response)
 
