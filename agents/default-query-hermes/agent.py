@@ -96,6 +96,18 @@ _HERMES_FAILURE_MARKERS = (
     "maximum iterations",
     "temporarily unavailable due to rate limiting",
 )
+_UNRESOLVED_RESPONSE_MARKERS = (
+    "would you like me to",
+    "should i try",
+    "i can try",
+    "cannot fulfill this request directly",
+    "can't fulfill this request directly",
+    "i cannot answer this directly",
+    "i can't answer this directly",
+    "i do not have enough information",
+    "i don't have enough information",
+    "try finding",
+)
 _DIRECT_SQL_SYSTEM_PROMPT = """\
 You convert a database question into one safe PostgreSQL SELECT.
 
@@ -123,6 +135,11 @@ _MUTATING_SQL_RE = re.compile(
 def _looks_like_runtime_failure(text: str) -> bool:
     lower = (text or "").lower()
     return any(marker in lower for marker in _HERMES_FAILURE_MARKERS)
+
+
+def _looks_like_unresolved_response(text: str) -> bool:
+    lower = (text or "").lower()
+    return any(marker in lower for marker in _UNRESOLVED_RESPONSE_MARKERS)
 
 
 def _user_facing_fallback() -> str:
@@ -346,6 +363,11 @@ def main() -> None:
             return
         print(_user_facing_fallback())
         return
+    if _looks_like_unresolved_response(response):
+        print(f"Unresolved AIAgent response: {response[:500]}", file=sys.stderr)
+        if answer := _try_direct_sql_fallback(planner_body, "unresolved AIAgent response"):
+            print(answer)
+            return
 
     print(response)
 
