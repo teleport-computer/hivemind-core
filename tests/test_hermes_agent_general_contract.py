@@ -15,10 +15,11 @@ def _load_agent(
     rel_path: str,
     module_name: str,
     *,
-    response: str,
+    response: str | list[str],
     chat_stdout: str = "",
 ):
     calls = {"inits": [], "chats": []}
+    responses = list(response) if isinstance(response, list) else [response]
     fake_run_agent = types.ModuleType("run_agent")
 
     class AIAgent:
@@ -29,7 +30,8 @@ def _load_agent(
             calls["chats"].append(body)
             if chat_stdout:
                 print(chat_stdout)
-            return response
+            idx = min(len(calls["chats"]) - 1, len(responses) - 1)
+            return responses[idx]
 
     fake_run_agent.AIAgent = AIAgent
     monkeypatch.setitem(sys.modules, "run_agent", fake_run_agent)
@@ -83,8 +85,7 @@ def test_query_agent_uses_ai_agent_for_benchmark_like_aggregate_prompt(
     )
     monkeypatch.setenv(
         "SCOPE_FN_SOURCE",
-        "def scope(sql, params, rows):\n"
-        "    return {\"allow\": True, \"rows\": rows}\n",
+        'def scope(sql, params, rows):\n    return {"allow": True, "rows": rows}\n',
     )
     mod, calls = _load_agent(
         monkeypatch,
@@ -174,6 +175,57 @@ def test_query_agent_redirects_ai_agent_stdout_diagnostics(monkeypatch, capsys):
     assert "Response truncated" in captured.err
 
 
+def test_query_agent_retries_unresolved_tool_error_without_direct_sql_fallback(
+    monkeypatch,
+    capsys,
+):
+    monkeypatch.setenv("QUERY_PROMPT", "Which day had the most rows?")
+    monkeypatch.setenv(
+        "SCOPE_FN_SOURCE",
+        'def scope(sql, params, rows):\n    return {"allow": True, "rows": rows}\n',
+    )
+    mod, calls = _load_agent(
+        monkeypatch,
+        "agents/default-query-hermes/agent.py",
+        "default_query_hermes_retry_tool_error_contract_test",
+        response=[
+            "I encountered an error executing your request. "
+            "The strftime function with %Y is not supported.",
+            '[{"watch_day": "2026-04-15", "videos": 482237}]',
+        ],
+    )
+
+    mod.main()
+
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == [{"watch_day": "2026-04-15", "videos": 482237}]
+    assert len(calls["chats"]) == 2
+    retry_body = calls["chats"][1]
+    assert "RECOVERY INSTRUCTION" in retry_body
+    assert "PostgreSQL SELECT" in retry_body
+    assert "strftime" in retry_body
+
+
+def test_query_agent_retries_empty_response_without_direct_sql_fallback(
+    monkeypatch,
+    capsys,
+):
+    monkeypatch.setenv("QUERY_PROMPT", "How many records are present?")
+    mod, calls = _load_agent(
+        monkeypatch,
+        "agents/default-query-hermes/agent.py",
+        "default_query_hermes_retry_empty_contract_test",
+        response=["", "42"],
+    )
+
+    mod.main()
+
+    captured = capsys.readouterr()
+    assert captured.out.strip() == "42"
+    assert len(calls["chats"]) == 2
+    assert "previous attempt did not produce a usable final answer" in calls["chats"][1]
+
+
 def test_query_agent_runtime_failure_uses_scoped_sql_fallback(
     monkeypatch,
     capsys,
@@ -185,8 +237,7 @@ def test_query_agent_runtime_failure_uses_scoped_sql_fallback(
     )
     monkeypatch.setenv(
         "SCOPE_FN_SOURCE",
-        "def scope(sql, params, rows):\n"
-        "    return {\"allow\": True, \"rows\": rows}\n",
+        'def scope(sql, params, rows):\n    return {"allow": True, "rows": rows}\n',
     )
     mod, _calls = _load_agent(
         monkeypatch,
@@ -212,7 +263,7 @@ def test_query_agent_runtime_failure_uses_scoped_sql_fallback(
                             "table_name": "other_events",
                             "column_name": "created_at",
                             "data_type": "timestamp",
-                        }
+                        },
                     ]
                 )
             }
@@ -263,8 +314,7 @@ def test_query_agent_direct_sql_fallback_disabled_by_default(
     monkeypatch.setenv("QUERY_PROMPT", "How many records are present?")
     monkeypatch.setenv(
         "SCOPE_FN_SOURCE",
-        "def scope(sql, params, rows):\n"
-        "    return {\"allow\": True, \"rows\": rows}\n",
+        'def scope(sql, params, rows):\n    return {"allow": True, "rows": rows}\n',
     )
     mod, _calls = _load_agent(
         monkeypatch,
@@ -293,8 +343,7 @@ def test_query_agent_scoped_sql_fallback_rejects_mutating_sql(
     monkeypatch.setenv("QUERY_PROMPT", "How many records are present?")
     monkeypatch.setenv(
         "SCOPE_FN_SOURCE",
-        "def scope(sql, params, rows):\n"
-        "    return {\"allow\": True, \"rows\": rows}\n",
+        'def scope(sql, params, rows):\n    return {"allow": True, "rows": rows}\n',
     )
     mod, _calls = _load_agent(
         monkeypatch,
@@ -311,9 +360,7 @@ def test_query_agent_scoped_sql_fallback_rejects_mutating_sql(
                 "choices": [
                     {
                         "message": {
-                            "content": json.dumps(
-                                {"sql": "DELETE FROM events", "params": []}
-                            )
+                            "content": json.dumps({"sql": "DELETE FROM events", "params": []})
                         }
                     }
                 ]
@@ -342,8 +389,7 @@ def test_query_agent_unresolved_non_answer_uses_scoped_sql_fallback(
     )
     monkeypatch.setenv(
         "SCOPE_FN_SOURCE",
-        "def scope(sql, params, rows):\n"
-        "    return {\"allow\": True, \"rows\": rows}\n",
+        'def scope(sql, params, rows):\n    return {"allow": True, "rows": rows}\n',
     )
     mod, _calls = _load_agent(
         monkeypatch,
@@ -369,7 +415,7 @@ def test_query_agent_unresolved_non_answer_uses_scoped_sql_fallback(
                             "table_name": "other_events",
                             "column_name": "created_at",
                             "data_type": "timestamp",
-                        }
+                        },
                     ]
                 )
             }
@@ -393,11 +439,7 @@ def test_query_agent_unresolved_non_answer_uses_scoped_sql_fallback(
                 ]
             }
         if path == "/tools/execute_sql":
-            return {
-                "result": json.dumps(
-                    [{"watch_day": "2026-04-15", "videos": 482237}]
-                )
-            }
+            return {"result": json.dumps([{"watch_day": "2026-04-15", "videos": 482237}])}
         raise AssertionError(f"unexpected bridge path {path}")
 
     monkeypatch.setattr(mod, "_post_json", fake_post_json)
@@ -405,9 +447,7 @@ def test_query_agent_unresolved_non_answer_uses_scoped_sql_fallback(
     mod.main()
 
     captured = capsys.readouterr()
-    assert json.loads(captured.out) == [
-        {"watch_day": "2026-04-15", "videos": 482237}
-    ]
+    assert json.loads(captured.out) == [{"watch_day": "2026-04-15", "videos": 482237}]
     assert "Unresolved AIAgent response" in captured.err
     assert "Direct SQL fallback used" in captured.err
 
@@ -423,17 +463,13 @@ def test_query_agent_schema_error_response_uses_scoped_sql_fallback(
     )
     monkeypatch.setenv(
         "SCOPE_FN_SOURCE",
-        "def scope(sql, params, rows):\n"
-        "    return {\"allow\": True, \"rows\": rows}\n",
+        'def scope(sql, params, rows):\n    return {"allow": True, "rows": rows}\n',
     )
     mod, _calls = _load_agent(
         monkeypatch,
         "agents/default-query-hermes/agent.py",
         "default_query_hermes_schema_error_fallback_contract_test",
-        response=(
-            'SQL error: column "watch_day" does not exist. '
-            "Perhaps you meant watched_at."
-        ),
+        response=('SQL error: column "watch_day" does not exist. Perhaps you meant watched_at.'),
     )
 
     def fake_post_json(path, payload, *, timeout=90.0):
@@ -474,11 +510,7 @@ def test_query_agent_schema_error_response_uses_scoped_sql_fallback(
                 ]
             }
         if path == "/tools/execute_sql":
-            return {
-                "result": json.dumps(
-                    [{"watch_day": "2026-04-15", "videos": 482237}]
-                )
-            }
+            return {"result": json.dumps([{"watch_day": "2026-04-15", "videos": 482237}])}
         raise AssertionError(f"unexpected bridge path {path}")
 
     monkeypatch.setattr(mod, "_post_json", fake_post_json)
@@ -486,9 +518,7 @@ def test_query_agent_schema_error_response_uses_scoped_sql_fallback(
     mod.main()
 
     captured = capsys.readouterr()
-    assert json.loads(captured.out) == [
-        {"watch_day": "2026-04-15", "videos": 482237}
-    ]
+    assert json.loads(captured.out) == [{"watch_day": "2026-04-15", "videos": 482237}]
     assert "Unresolved AIAgent response" in captured.err
     assert "Direct SQL fallback used" in captured.err
 
@@ -504,8 +534,7 @@ def test_query_agent_direct_sql_planner_repairs_alias_errors(
     )
     monkeypatch.setenv(
         "SCOPE_FN_SOURCE",
-        "def scope(sql, params, rows):\n"
-        "    return {\"allow\": True, \"rows\": rows}\n",
+        'def scope(sql, params, rows):\n    return {"allow": True, "rows": rows}\n',
     )
     mod, _calls = _load_agent(
         monkeypatch,
@@ -547,13 +576,11 @@ def test_query_agent_direct_sql_planner_repairs_alias_errors(
                     "choices": [
                         {
                             "message": {
-                                "content": json.dumps(
-                                    {"error": "column watch_day does not exist"}
-                                )
+                                "content": json.dumps({"error": "column watch_day does not exist"})
                             }
                         }
                     ]
-            }
+                }
 
             repair_prompt = payload["messages"][-1]["content"]
             assert "sql alias" in repair_prompt.lower()
@@ -577,11 +604,7 @@ def test_query_agent_direct_sql_planner_repairs_alias_errors(
                 ]
             }
         if path == "/tools/execute_sql":
-            return {
-                "result": json.dumps(
-                    [{"watch_day": "2026-04-15", "videos": 482237}]
-                )
-            }
+            return {"result": json.dumps([{"watch_day": "2026-04-15", "videos": 482237}])}
         raise AssertionError(f"unexpected bridge path {path}")
 
     monkeypatch.setattr(mod, "_post_json", fake_post_json)
@@ -591,9 +614,7 @@ def test_query_agent_direct_sql_planner_repairs_alias_errors(
     captured = capsys.readouterr()
     assert planner_calls == 2
     assert captured.out.startswith("["), captured.err
-    assert json.loads(captured.out) == [
-        {"watch_day": "2026-04-15", "videos": 482237}
-    ]
+    assert json.loads(captured.out) == [{"watch_day": "2026-04-15", "videos": 482237}]
     assert "Direct SQL fallback used" in captured.err
 
 
@@ -608,8 +629,7 @@ def test_query_agent_direct_sql_uses_schema_top_date_count_template(
     )
     monkeypatch.setenv(
         "SCOPE_FN_SOURCE",
-        "def scope(sql, params, rows):\n"
-        "    return {\"allow\": True, \"rows\": rows}\n",
+        'def scope(sql, params, rows):\n    return {"allow": True, "rows": rows}\n',
     )
     mod, _calls = _load_agent(
         monkeypatch,
@@ -648,9 +668,7 @@ def test_query_agent_direct_sql_uses_schema_top_date_count_template(
                 "choices": [
                     {
                         "message": {
-                            "content": json.dumps(
-                                {"error": "column watch_day does not exist"}
-                            )
+                            "content": json.dumps({"error": "column watch_day does not exist"})
                         }
                     }
                 ]
@@ -662,11 +680,7 @@ def test_query_agent_direct_sql_uses_schema_top_date_count_template(
                 'COUNT(*)::bigint AS "videos" FROM "events" '
                 "GROUP BY 1 ORDER BY 2 DESC LIMIT 1"
             )
-            return {
-                "result": json.dumps(
-                    [{"watch_day": "2026-04-15", "videos": 482237}]
-                )
-            }
+            return {"result": json.dumps([{"watch_day": "2026-04-15", "videos": 482237}])}
         raise AssertionError(f"unexpected bridge path {path}")
 
     monkeypatch.setattr(mod, "_post_json", fake_post_json)
@@ -675,9 +689,7 @@ def test_query_agent_direct_sql_uses_schema_top_date_count_template(
 
     captured = capsys.readouterr()
     assert planner_calls == 1
-    assert json.loads(captured.out) == [
-        {"watch_day": "2026-04-15", "videos": 482237}
-    ]
+    assert json.loads(captured.out) == [{"watch_day": "2026-04-15", "videos": 482237}]
     assert "Direct SQL fallback used" in captured.err
 
 
@@ -692,8 +704,7 @@ def test_query_agent_unresolved_response_fails_closed_when_fallback_fails(
     )
     monkeypatch.setenv(
         "SCOPE_FN_SOURCE",
-        "def scope(sql, params, rows):\n"
-        "    return {\"allow\": True, \"rows\": rows}\n",
+        'def scope(sql, params, rows):\n    return {"allow": True, "rows": rows}\n',
     )
     mod, _calls = _load_agent(
         monkeypatch,
@@ -723,9 +734,7 @@ def test_query_agent_unresolved_response_fails_closed_when_fallback_fails(
                 "choices": [
                     {
                         "message": {
-                            "content": json.dumps(
-                                {"error": "column watch_day does not exist"}
-                            )
+                            "content": json.dumps({"error": "column watch_day does not exist"})
                         }
                     }
                 ]
@@ -756,8 +765,7 @@ def test_query_agent_generic_refusal_uses_scoped_sql_fallback(
     )
     monkeypatch.setenv(
         "SCOPE_FN_SOURCE",
-        "def scope(sql, params, rows):\n"
-        "    return {\"allow\": True, \"rows\": rows}\n",
+        'def scope(sql, params, rows):\n    return {"allow": True, "rows": rows}\n',
     )
     mod, _calls = _load_agent(
         monkeypatch,
@@ -803,11 +811,7 @@ def test_query_agent_generic_refusal_uses_scoped_sql_fallback(
                 ]
             }
         if path == "/tools/execute_sql":
-            return {
-                "result": json.dumps(
-                    [{"watch_day": "2026-04-15", "videos": 482237}]
-                )
-            }
+            return {"result": json.dumps([{"watch_day": "2026-04-15", "videos": 482237}])}
         raise AssertionError(f"unexpected bridge path {path}")
 
     monkeypatch.setattr(mod, "_post_json", fake_post_json)
@@ -815,9 +819,7 @@ def test_query_agent_generic_refusal_uses_scoped_sql_fallback(
     mod.main()
 
     captured = capsys.readouterr()
-    assert json.loads(captured.out) == [
-        {"watch_day": "2026-04-15", "videos": 482237}
-    ]
+    assert json.loads(captured.out) == [{"watch_day": "2026-04-15", "videos": 482237}]
     assert "Unresolved AIAgent response" in captured.err
     assert "Direct SQL fallback used" in captured.err
 
@@ -825,7 +827,7 @@ def test_query_agent_generic_refusal_uses_scoped_sql_fallback(
 def test_scope_agent_uses_ai_agent_for_aggregate_policy(monkeypatch, capsys):
     scope_fn = (
         "def scope(sql, params, rows):\n"
-        "    return {\"allow\": True, \"rows\": [{\"match_count\": len(rows)}]}\n"
+        '    return {"allow": True, "rows": [{"match_count": len(rows)}]}\n'
     )
     policy = (
         "Allowed: aggregate statistics and trends. Not allowed: raw row "
@@ -862,10 +864,7 @@ def test_scope_agent_uses_ai_agent_for_aggregate_policy(monkeypatch, capsys):
 
 
 def test_scope_agent_extracts_fenced_json_with_scope_dict_literal(monkeypatch, capsys):
-    scope_fn = (
-        "def scope(sql, params, rows):\n"
-        "    return {\"allow\": True, \"rows\": rows}\n"
-    )
+    scope_fn = 'def scope(sql, params, rows):\n    return {"allow": True, "rows": rows}\n'
     monkeypatch.setenv("QUERY_PROMPT", "Return aggregate statistics only.")
     monkeypatch.setenv("POLICY_CONTEXT", "Allowed: aggregate statistics.")
     mod, _calls = _load_agent(
@@ -883,14 +882,8 @@ def test_scope_agent_extracts_fenced_json_with_scope_dict_literal(monkeypatch, c
 
 
 def test_scope_agent_extracts_last_scope_json_after_diagnostics(monkeypatch, capsys):
-    rejected_scope_fn = (
-        "def scope(sql, params, rows):\n"
-        "    return {\"allow\": True, \"rows\": []}\n"
-    )
-    final_scope_fn = (
-        "def scope(sql, params, rows):\n"
-        "    return {\"allow\": True, \"rows\": rows}\n"
-    )
+    rejected_scope_fn = 'def scope(sql, params, rows):\n    return {"allow": True, "rows": []}\n'
+    final_scope_fn = 'def scope(sql, params, rows):\n    return {"allow": True, "rows": rows}\n'
     monkeypatch.setenv("QUERY_PROMPT", "Return aggregate statistics only.")
     mod, _calls = _load_agent(
         monkeypatch,
@@ -912,10 +905,7 @@ def test_scope_agent_extracts_last_scope_json_after_diagnostics(monkeypatch, cap
 
 
 def test_scope_agent_redirects_ai_agent_stdout_diagnostics(monkeypatch, capsys):
-    scope_fn = (
-        "def scope(sql, params, rows):\n"
-        "    return {\"allow\": True, \"rows\": rows}\n"
-    )
+    scope_fn = 'def scope(sql, params, rows):\n    return {"allow": True, "rows": rows}\n'
     monkeypatch.setenv("QUERY_PROMPT", "Return aggregate statistics only.")
     mod, _calls = _load_agent(
         monkeypatch,
@@ -934,6 +924,7 @@ def test_scope_agent_redirects_ai_agent_stdout_diagnostics(monkeypatch, capsys):
 
 
 def test_scope_agent_aggregate_fallback_preserves_aggregate_rows(monkeypatch, capsys):
+    monkeypatch.setenv("HIVEMIND_SCOPE_AGGREGATE_FALLBACK", "1")
     monkeypatch.setenv(
         "QUERY_PROMPT",
         "Which bucket has the highest count? Return bucket and total only.",
@@ -964,7 +955,36 @@ def test_scope_agent_aggregate_fallback_preserves_aggregate_rows(monkeypatch, ca
     }
 
 
+def test_scope_agent_aggregate_fallback_disabled_by_default(monkeypatch, capsys):
+    monkeypatch.setenv(
+        "QUERY_PROMPT",
+        "Which bucket has the highest count? Return bucket and total only.",
+    )
+    monkeypatch.setenv(
+        "POLICY_CONTEXT",
+        "Allowed: aggregate statistics and summaries. Not allowed: raw row dumps.",
+    )
+    mod, _calls = _load_agent(
+        monkeypatch,
+        "agents/default-scope-hermes/agent.py",
+        "default_scope_hermes_fallback_disabled_contract_test",
+        response="not json",
+    )
+
+    mod.main()
+
+    emitted = json.loads(capsys.readouterr().out)
+    fn = compile_scope_fn(emitted["scope_fn"])
+    result = fn(
+        "SELECT bucket, COUNT(*)::int AS total FROM events GROUP BY bucket",
+        [],
+        [{"bucket": "2026-04-15", "total": 482237}],
+    )
+    assert result == {"allow": True, "rows": []}
+
+
 def test_scope_agent_aggregate_fallback_does_not_release_raw_rows(monkeypatch, capsys):
+    monkeypatch.setenv("HIVEMIND_SCOPE_AGGREGATE_FALLBACK", "1")
     monkeypatch.setenv("QUERY_PROMPT", "Dump five raw records with user ids.")
     monkeypatch.setenv(
         "POLICY_CONTEXT",
@@ -993,10 +1013,8 @@ def test_scope_agent_replaces_static_empty_rows_for_allowed_aggregate(
     monkeypatch,
     capsys,
 ):
-    empty_scope_fn = (
-        "def scope(sql, params, rows):\n"
-        "    return {\"allow\": True, \"rows\": []}\n"
-    )
+    monkeypatch.setenv("HIVEMIND_SCOPE_AGGREGATE_FALLBACK", "1")
+    empty_scope_fn = 'def scope(sql, params, rows):\n    return {"allow": True, "rows": []}\n'
     monkeypatch.setenv(
         "QUERY_PROMPT",
         "Which bucket has the highest count? Return bucket and total only.",

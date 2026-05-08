@@ -89,21 +89,19 @@ else:
 
 
 _NO_REASONING_CONFIG = {"enabled": False, "effort": "none"}
-_NO_REASONING_OVERRIDES = {
-    "extra_body": {"reasoning": {"effort": "none", "exclude": True}}
-}
+_NO_REASONING_OVERRIDES = {"extra_body": {"reasoning": {"effort": "none", "exclude": True}}}
+_ENABLE_AGGREGATE_FALLBACK = os.environ.get(
+    "HIVEMIND_SCOPE_AGGREGATE_FALLBACK", ""
+).strip().lower() in {"1", "true", "yes", "on"}
 
 
-_EMPTY_FALLBACK_SCOPE_FN = (
-    "def scope(sql, params, rows):\n"
-    "    return {\"allow\": True, \"rows\": []}\n"
-)
+_EMPTY_FALLBACK_SCOPE_FN = 'def scope(sql, params, rows):\n    return {"allow": True, "rows": []}\n'
 
 _AGGREGATE_FALLBACK_SCOPE_FN = (
     "def scope(sql, params, rows):\n"
     "    sql_l = str(sql).lower()\n"
     "    aggregate_sql = False\n"
-    "    for marker in (\"group by\", \"count(\", \"sum(\", \"avg(\", \"min(\", \"max(\"):\n"
+    '    for marker in ("group by", "count(", "sum(", "avg(", "min(", "max("):\n'
     "        if marker in sql_l:\n"
     "            aggregate_sql = True\n"
     "    safe = []\n"
@@ -116,7 +114,7 @@ _AGGREGATE_FALLBACK_SCOPE_FN = (
     "                        has_metric = True\n"
     "                if has_metric:\n"
     "                    safe.append(dict(row))\n"
-    "    return {\"allow\": True, \"rows\": safe}\n"
+    '    return {"allow": True, "rows": safe}\n'
 )
 
 
@@ -162,11 +160,11 @@ def _aggregate_fallback_is_policy_appropriate() -> bool:
 
 def _statically_erases_rows(source: str) -> bool:
     compact = re.sub(r"\s+", "", source)
-    return "\"rows\":[]" in compact or "'rows':[]" in compact
+    return '"rows":[]' in compact or "'rows':[]" in compact
 
 
 def _fallback_scope_fn_source() -> str:
-    if _aggregate_fallback_is_policy_appropriate():
+    if _ENABLE_AGGREGATE_FALLBACK and _aggregate_fallback_is_policy_appropriate():
         return _AGGREGATE_FALLBACK_SCOPE_FN
     return _EMPTY_FALLBACK_SCOPE_FN
 
@@ -306,7 +304,8 @@ def main() -> None:
     parsed = _extract_json_emit(response)
     if parsed and isinstance(parsed.get("scope_fn"), str) and parsed["scope_fn"].strip():
         if (
-            _aggregate_fallback_is_policy_appropriate()
+            _ENABLE_AGGREGATE_FALLBACK
+            and _aggregate_fallback_is_policy_appropriate()
             and _statically_erases_rows(parsed["scope_fn"])
         ):
             print(

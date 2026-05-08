@@ -53,14 +53,20 @@ You answer questions with scoped database tools.
 
 Tools:
 - get_schema: inspect tables, columns, and types.
-- execute_sql: run read-only SQL. Use %s placeholders and params as an array.
+- execute_sql: run read-only PostgreSQL SQL. Use %s placeholders and params as an array.
 
 A scope function may transform execute_sql results before you see them.
 If a scope_fn is included in the user message, read it as the runtime
 contract for the result shapes you will receive. Do not bypass it or invent policy beyond it.
 
 Use get_schema before SQL unless the provided scope_fn already gives every
-needed table and column. Compute requested statistics in SQL. For row-level
+needed table and column. The database is PostgreSQL: use PostgreSQL syntax
+such as DATE(column), date_trunc, casts with ::type, and %s placeholders.
+Do not use SQLite/MySQL-only functions such as strftime.
+
+Compute requested statistics in SQL. If execute_sql returns an error, revise
+the SQL and retry instead of asking the user to provide schema or formatting.
+Continue after tool results until you have a final answer. For row-level
 questions, request row-level data and let scope_fn apply the room policy.
 
 Answer only from scoped tool results. If they do not support an answer, say so.
@@ -76,13 +82,10 @@ else:
 
 
 _NO_REASONING_CONFIG = {"enabled": False, "effort": "none"}
-_NO_REASONING_OVERRIDES = {
-    "extra_body": {"reasoning": {"effort": "none", "exclude": True}}
-}
-_ENABLE_DIRECT_SQL_FALLBACK = (
-    os.environ.get("HIVEMIND_QUERY_DIRECT_SQL_FALLBACK", "").strip().lower()
-    in {"1", "true", "yes", "on"}
-)
+_NO_REASONING_OVERRIDES = {"extra_body": {"reasoning": {"effort": "none", "exclude": True}}}
+_ENABLE_DIRECT_SQL_FALLBACK = os.environ.get(
+    "HIVEMIND_QUERY_DIRECT_SQL_FALLBACK", ""
+).strip().lower() in {"1", "true", "yes", "on"}
 _HERMES_FAILURE_MARKERS = (
     "api call failed",
     "budget exhausted",
@@ -118,6 +121,10 @@ _UNRESOLVED_RESPONSE_MARKERS = (
     "does not allow me to determine",
     "my capabilities are limited",
     "cannot access raw data",
+    "encountered an error executing",
+    "error executing your request",
+    "not supported",
+    "provide a supported",
     "try finding",
     "does not exist",
     "perhaps you meant",
@@ -518,6 +525,79 @@ def _try_direct_sql_fallback(body: str, reason: str) -> str | None:
     return None
 
 
+def _run_ai_agent(body: str) -> str:
+    base_url = os.environ["BRIDGE_URL"].rstrip("/") + "/v1"
+    api_key = os.environ["SESSION_TOKEN"]
+
+    agent = AIAgent(
+        base_url=base_url,
+        api_key=api_key,
+        provider="custom",
+        model=HIVEMIND_MODEL,
+        # Match agents/default-query/agent.py:113 — tool-heavy workflows
+        # destabilize at higher turn counts; cap to fail fast.
+        max_iterations=6,
+        enabled_toolsets=["hivemind"],
+        ephemeral_system_prompt=SYSTEM_PROMPT,
+        skip_context_files=True,
+        skip_memory=True,
+        quiet_mode=True,
+        save_trajectories=False,
+        max_tokens=1024,
+        reasoning_config=_NO_REASONING_CONFIG,
+        request_overrides=_NO_REASONING_OVERRIDES,
+    )
+    with redirect_stdout(sys.stderr):
+        return agent.chat(body) or ""
+
+
+def _retry_body(body: str, reason: str, previous_response: str) -> str:
+    previous = (previous_response or "").strip()
+    if len(previous) > 2000:
+        previous = previous[:2000] + "\n[truncated]"
+    return (
+        f"{body}\n\n"
+        "RECOVERY INSTRUCTION:\n"
+        f"The previous attempt did not produce a usable final answer: {reason}.\n"
+        "Continue the task using the available tools. Inspect schema if needed, "
+        "write PostgreSQL SELECT statements, and if execute_sql returns an "
+        "error, correct the SQL and retry. Do not ask the user for schema, "
+        "columns, or date formats that can be discovered with tools.\n\n"
+        f"PREVIOUS RESPONSE:\n{previous}"
+    )
+
+
+def _retry_ai_agent_if_fallback_disabled(
+    body: str,
+    *,
+    reason: str,
+    previous_response: str = "",
+) -> str | None:
+    if _ENABLE_DIRECT_SQL_FALLBACK:
+        return None
+    try:
+        retry_response = _run_ai_agent(_retry_body(body, reason, previous_response))
+    except Exception as e:
+        print(f"AIAgent retry error after {reason}: {e}", file=sys.stderr)
+        return None
+    if not retry_response or not retry_response.strip():
+        print(f"AIAgent retry produced empty response after {reason}.", file=sys.stderr)
+        return None
+    if _looks_like_runtime_failure(retry_response):
+        print(
+            f"AIAgent retry runtime failure after {reason}: {retry_response[:500]}",
+            file=sys.stderr,
+        )
+        return None
+    if _looks_like_unresolved_response(retry_response):
+        print(
+            f"AIAgent retry unresolved after {reason}: {retry_response[:500]}",
+            file=sys.stderr,
+        )
+        return None
+    return retry_response
+
+
 def main() -> None:
     if not QUERY_PROMPT.strip():
         print("No question provided.")
@@ -538,30 +618,8 @@ def main() -> None:
             f"{body}"
         )
 
-    base_url = os.environ["BRIDGE_URL"].rstrip("/") + "/v1"
-    api_key = os.environ["SESSION_TOKEN"]
-
     try:
-        agent = AIAgent(
-            base_url=base_url,
-            api_key=api_key,
-            provider="custom",
-            model=HIVEMIND_MODEL,
-            # Match agents/default-query/agent.py:113 — tool-heavy workflows
-            # destabilize at higher turn counts; cap to fail fast.
-            max_iterations=6,
-            enabled_toolsets=["hivemind"],
-            ephemeral_system_prompt=SYSTEM_PROMPT,
-            skip_context_files=True,
-            skip_memory=True,
-            quiet_mode=True,
-            save_trajectories=False,
-            max_tokens=1024,
-            reasoning_config=_NO_REASONING_CONFIG,
-            request_overrides=_NO_REASONING_OVERRIDES,
-        )
-        with redirect_stdout(sys.stderr):
-            response = agent.chat(body)
+        response = _run_ai_agent(body)
     except Exception as e:
         print(f"AIAgent error: {e}", file=sys.stderr)
         if answer := _try_direct_sql_fallback(planner_body, "AIAgent error"):
@@ -571,6 +629,13 @@ def main() -> None:
         return
 
     if not response or not response.strip():
+        if answer := _retry_ai_agent_if_fallback_disabled(
+            body,
+            reason="empty AIAgent response",
+            previous_response=response or "",
+        ):
+            print(answer)
+            return
         if answer := _try_direct_sql_fallback(planner_body, "empty AIAgent response"):
             print(answer)
             return
@@ -585,6 +650,13 @@ def main() -> None:
         return
     if _looks_like_unresolved_response(response):
         print(f"Unresolved AIAgent response: {response[:500]}", file=sys.stderr)
+        if answer := _retry_ai_agent_if_fallback_disabled(
+            body,
+            reason="unresolved AIAgent response",
+            previous_response=response,
+        ):
+            print(answer)
+            return
         if answer := _try_direct_sql_fallback(planner_body, "unresolved AIAgent response"):
             print(answer)
             return
