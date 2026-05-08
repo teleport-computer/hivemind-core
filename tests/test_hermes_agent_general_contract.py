@@ -206,6 +206,11 @@ def test_query_agent_runtime_failure_uses_scoped_sql_fallback(
                             "table_name": "events",
                             "column_name": "watched_at",
                             "data_type": "timestamp",
+                        },
+                        {
+                            "table_name": "other_events",
+                            "column_name": "created_at",
+                            "data_type": "timestamp",
                         }
                     ]
                 )
@@ -327,6 +332,11 @@ def test_query_agent_unresolved_non_answer_uses_scoped_sql_fallback(
                             "table_name": "events",
                             "column_name": "watched_at",
                             "data_type": "timestamp",
+                        },
+                        {
+                            "table_name": "other_events",
+                            "column_name": "created_at",
+                            "data_type": "timestamp",
                         }
                     ]
                 )
@@ -402,7 +412,12 @@ def test_query_agent_schema_error_response_uses_scoped_sql_fallback(
                             "table_name": "events",
                             "column_name": "watched_at",
                             "data_type": "timestamp",
-                        }
+                        },
+                        {
+                            "table_name": "other_events",
+                            "column_name": "created_at",
+                            "data_type": "timestamp",
+                        },
                     ]
                 )
             }
@@ -480,7 +495,12 @@ def test_query_agent_direct_sql_planner_repairs_alias_errors(
                             "table_name": "events",
                             "column_name": "watched_at",
                             "data_type": "timestamp",
-                        }
+                        },
+                        {
+                            "table_name": "other_events",
+                            "column_name": "created_at",
+                            "data_type": "timestamp",
+                        },
                     ]
                 )
             }
@@ -537,6 +557,89 @@ def test_query_agent_direct_sql_planner_repairs_alias_errors(
     captured = capsys.readouterr()
     assert planner_calls == 2
     assert captured.out.startswith("["), captured.err
+    assert json.loads(captured.out) == [
+        {"watch_day": "2026-04-15", "videos": 482237}
+    ]
+    assert "Direct SQL fallback used" in captured.err
+
+
+def test_query_agent_direct_sql_uses_schema_top_date_count_template(
+    monkeypatch,
+    capsys,
+):
+    monkeypatch.setenv(
+        "QUERY_PROMPT",
+        "Which day had the highest number of watches in events? Return watch_day and videos.",
+    )
+    monkeypatch.setenv(
+        "SCOPE_FN_SOURCE",
+        "def scope(sql, params, rows):\n"
+        "    return {\"allow\": True, \"rows\": rows}\n",
+    )
+    mod, _calls = _load_agent(
+        monkeypatch,
+        "agents/default-query-hermes/agent.py",
+        "default_query_hermes_schema_template_contract_test",
+        response=(
+            "I apologize, but I cannot fulfill this request. The available "
+            "data does not allow me to determine the requested aggregate."
+        ),
+    )
+
+    planner_calls = 0
+
+    def fake_post_json(path, payload, *, timeout=90.0):
+        nonlocal planner_calls
+        if path == "/tools/get_schema":
+            return {
+                "result": json.dumps(
+                    [
+                        {
+                            "table_name": "events",
+                            "column_name": "watched_at",
+                            "data_type": "timestamp without time zone",
+                        },
+                        {
+                            "table_name": "other_events",
+                            "column_name": "created_at",
+                            "data_type": "timestamp without time zone",
+                        },
+                    ]
+                )
+            }
+        if path == "/v1/chat/completions":
+            planner_calls += 1
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "content": json.dumps(
+                                {"error": "column watch_day does not exist"}
+                            )
+                        }
+                    }
+                ]
+            }
+        if path == "/tools/execute_sql":
+            sql = payload["arguments"]["sql"]
+            assert sql == (
+                'SELECT DATE("watched_at") AS "watch_day", '
+                'COUNT(*)::bigint AS "videos" FROM "events" '
+                "GROUP BY 1 ORDER BY 2 DESC LIMIT 1"
+            )
+            return {
+                "result": json.dumps(
+                    [{"watch_day": "2026-04-15", "videos": 482237}]
+                )
+            }
+        raise AssertionError(f"unexpected bridge path {path}")
+
+    monkeypatch.setattr(mod, "_post_json", fake_post_json)
+
+    mod.main()
+
+    captured = capsys.readouterr()
+    assert planner_calls == 1
     assert json.loads(captured.out) == [
         {"watch_day": "2026-04-15", "videos": 482237}
     ]

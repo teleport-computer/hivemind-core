@@ -163,6 +163,18 @@ _MUTATING_SQL_RE = re.compile(
     r"\b(insert|update|delete|drop|alter|create|truncate|grant|revoke|copy|call|do)\b",
     re.IGNORECASE,
 )
+_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_TOP_COUNT_TERMS = (
+    "highest",
+    "largest",
+    "biggest",
+    "maximum",
+    "max",
+    "most",
+    "top",
+)
+_COUNT_TERMS = ("count", "counts", "number of", "how many", "total")
+_DATE_BUCKET_TERMS = ("day", "date", "daily", "per day", "by day")
 
 
 def _looks_like_runtime_failure(text: str) -> bool:
@@ -276,6 +288,143 @@ def _normalize_select_sql(sql: str) -> str:
     return normalized
 
 
+def _quote_ident(name: str) -> str:
+    if not _IDENTIFIER_RE.match(name):
+        raise ValueError(f"unsafe SQL identifier {name!r}")
+    return f'"{name}"'
+
+
+def _identifier_mentioned(name: str, text: str) -> bool:
+    lower = name.lower()
+    return lower in text or lower.replace("_", " ") in text
+
+
+def _schema_rows(schema: str) -> list[dict[str, Any]]:
+    try:
+        parsed = json.loads(schema)
+    except json.JSONDecodeError:
+        return []
+
+    if isinstance(parsed, dict):
+        if isinstance(parsed.get("columns"), list):
+            parsed = parsed["columns"]
+        elif isinstance(parsed.get("schema"), list):
+            parsed = parsed["schema"]
+        elif isinstance(parsed.get("tables"), list):
+            rows: list[dict[str, Any]] = []
+            for table in parsed["tables"]:
+                if not isinstance(table, dict):
+                    continue
+                table_name = table.get("table_name") or table.get("name")
+                columns = table.get("columns") or []
+                if not isinstance(columns, list):
+                    continue
+                for column in columns:
+                    if isinstance(column, dict):
+                        row = dict(column)
+                        row.setdefault("table_name", table_name)
+                        rows.append(row)
+                    elif isinstance(column, str):
+                        rows.append({"table_name": table_name, "column_name": column})
+            return rows
+        else:
+            return []
+
+    if not isinstance(parsed, list):
+        return []
+    return [row for row in parsed if isinstance(row, dict)]
+
+
+def _safe_aliases_from_question(body: str) -> tuple[str, str]:
+    aliases: list[str] = []
+    match = re.search(
+        r"\breturn\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?:,|and)\s*([A-Za-z_][A-Za-z0-9_]*)",
+        body,
+        re.IGNORECASE,
+    )
+    if match:
+        aliases = [match.group(1).lower(), match.group(2).lower()]
+
+    date_alias = "day"
+    count_alias = "count"
+    for alias in aliases:
+        if not _IDENTIFIER_RE.match(alias):
+            continue
+        if any(term in alias for term in ("day", "date")):
+            date_alias = alias
+        else:
+            count_alias = alias
+    return date_alias, count_alias
+
+
+def _try_top_date_count_plan(body: str, schema: str) -> dict[str, Any] | None:
+    lower = body.lower()
+    if not all(
+        any(term in lower for term in terms)
+        for terms in (_TOP_COUNT_TERMS, _COUNT_TERMS, _DATE_BUCKET_TERMS)
+    ):
+        return None
+
+    rows = _schema_rows(schema)
+    tables: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        table = str(row.get("table_name") or row.get("table") or "").strip()
+        column = str(row.get("column_name") or row.get("name") or "").strip()
+        if not table or not column:
+            continue
+        if not (_IDENTIFIER_RE.match(table) and _IDENTIFIER_RE.match(column)):
+            continue
+        tables.setdefault(table, []).append(row)
+
+    candidates: list[tuple[int, str, dict[str, Any]]] = []
+    for table, columns in tables.items():
+        table_mentioned = _identifier_mentioned(table, lower)
+        if not table_mentioned and len(tables) > 1:
+            continue
+        for column in columns:
+            column_name = str(column.get("column_name") or column.get("name") or "")
+            data_type = str(column.get("data_type") or column.get("type") or "").lower()
+            column_lower = column_name.lower()
+            date_like = (
+                "timestamp" in data_type
+                or "date" in data_type
+                or "time" in data_type
+                or "date" in column_lower
+                or "day" in column_lower
+                or column_lower.endswith("_at")
+            )
+            if not date_like:
+                continue
+
+            score = 0
+            if table_mentioned:
+                score += 8
+            if _identifier_mentioned(column_name, lower):
+                score += 5
+            if "timestamp" in data_type or "datetime" in data_type:
+                score += 4
+            elif "date" in data_type:
+                score += 3
+            if column_lower.endswith("_at"):
+                score += 2
+            if "date" in column_lower or "day" in column_lower:
+                score += 1
+            candidates.append((score, table, column))
+
+    if not candidates:
+        return None
+
+    _score, table, column = max(candidates, key=lambda item: item[0])
+    column_name = str(column.get("column_name") or column.get("name") or "")
+    date_alias, count_alias = _safe_aliases_from_question(body)
+    sql = (
+        f"SELECT DATE({_quote_ident(column_name)}) AS {_quote_ident(date_alias)}, "
+        f"COUNT(*)::bigint AS {_quote_ident(count_alias)} "
+        f"FROM {_quote_ident(table)} GROUP BY 1 ORDER BY 2 DESC LIMIT 1"
+    )
+    return {"sql": sql, "params": []}
+
+
 def _format_scoped_sql_result(result: str) -> str:
     parsed = json.loads(result)
     if isinstance(parsed, dict) and parsed.get("error"):
@@ -304,13 +453,24 @@ def _plan_direct_sql(body: str, schema: str) -> dict[str, Any]:
     messages = _build_sql_planner_messages(body, schema)
     last_error = ""
     for attempt in range(2):
-        planner_text = _llm_chat(messages)
-        plan = _extract_json_object(planner_text)
+        try:
+            planner_text = _llm_chat(messages)
+            plan = _extract_json_object(planner_text)
+        except Exception as e:
+            last_error = str(e)
+            if attempt == 0:
+                if plan := _try_top_date_count_plan(body, schema):
+                    return plan
+            else:
+                break
+            plan = {"error": last_error}
         if not plan.get("error"):
             return plan
 
         last_error = str(plan["error"])
         if attempt == 0:
+            if plan := _try_top_date_count_plan(body, schema):
+                return plan
             messages = [
                 *messages,
                 {"role": "assistant", "content": json.dumps(plan)},
