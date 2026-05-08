@@ -194,6 +194,37 @@ async def test_tool_call(bridge):
 
 
 @pytest.mark.asyncio
+async def test_bridge_telemetry_records_llm_tool_calls_and_tool_dispatch(bridge):
+    server, client, budget = bridge
+    headers = {"Authorization": "Bearer test-token-123"}
+    tool_defs = [t.to_openai_def() for t in _make_tools()]
+
+    resp = await client.post(
+        "/v1/chat/completions",
+        headers=headers,
+        json={
+            "messages": [{"role": "user", "content": "Use a tool"}],
+            "tools": tool_defs,
+        },
+    )
+    assert resp.status_code == 200
+
+    resp = await client.post(
+        "/tools/get_schema",
+        headers=headers,
+        json={"arguments": {}},
+    )
+    assert resp.status_code == 200
+
+    telemetry = server.get_telemetry()
+    assert telemetry["llm_calls"] == 1
+    assert telemetry["llm_calls_with_tools"] == 1
+    assert telemetry["llm_tool_call_counts"] == {"get_weather": 1}
+    assert telemetry["tool_call_counts"] == {"get_schema": 1}
+    assert telemetry["finish_reasons"] == {"tool_calls": 1}
+
+
+@pytest.mark.asyncio
 async def test_tool_call_unknown(bridge):
     server, client, budget = bridge
     headers = {"Authorization": "Bearer test-token-123"}

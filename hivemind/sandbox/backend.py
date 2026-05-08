@@ -304,11 +304,17 @@ class SandboxBackend:
                     output = "(Agent produced no output)"
 
             tape_data = bridge.get_recorded_tape() if return_tape else None
+            usage_summary = budget.summary()
+            get_telemetry = getattr(bridge, "get_telemetry", None)
+            if callable(get_telemetry):
+                telemetry = get_telemetry()
+                if telemetry:
+                    usage_summary["bridge"] = telemetry
 
             if return_budget_summary and return_tape:
-                return output, budget.summary(), tape_data
+                return output, usage_summary, tape_data
             elif return_budget_summary:
-                return output, budget.summary()
+                return output, usage_summary
             elif return_tape:
                 return output, tape_data
             return output

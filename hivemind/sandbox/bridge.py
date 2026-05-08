@@ -283,6 +283,55 @@ class BridgeServer:
         if replay_tape:
             self._replay_tape = Tape.from_json(replay_tape)
             self._replay_tape.enable_replay()
+        self._llm_call_count = 0
+        self._llm_calls_with_tools = 0
+        self._llm_tool_call_names: list[str] = []
+        self._tool_call_names: list[str] = []
+        self._finish_reasons: dict[str, int] = {}
+
+    @staticmethod
+    def _count_names(names: list[str]) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for name in names:
+            counts[name] = counts.get(name, 0) + 1
+        return counts
+
+    @staticmethod
+    def _offered_tool_names(tools: list[dict] | None) -> list[str]:
+        names: list[str] = []
+        for tool in tools or []:
+            if not isinstance(tool, dict):
+                continue
+            fn = tool.get("function")
+            name = fn.get("name") if isinstance(fn, dict) else tool.get("name")
+            if isinstance(name, str) and name:
+                names.append(name)
+        return names
+
+    @staticmethod
+    def _result_tool_call_names(result: dict) -> list[str]:
+        names: list[str] = []
+        for call in result.get("tool_calls") or []:
+            if not isinstance(call, dict):
+                continue
+            fn = call.get("function") or {}
+            name = fn.get("name")
+            if isinstance(name, str) and name:
+                names.append(name)
+        return names
+
+    def _record_llm_telemetry(self, kwargs: dict, result: dict) -> None:
+        self._llm_call_count += 1
+        if self._offered_tool_names(kwargs.get("tools")):
+            self._llm_calls_with_tools += 1
+        self._llm_tool_call_names.extend(self._result_tool_call_names(result))
+        finish_reason = str(result.get("finish_reason") or "unknown")
+        self._finish_reasons[finish_reason] = (
+            self._finish_reasons.get(finish_reason, 0) + 1
+        )
+
+    def _record_tool_call(self, tool_name: str) -> None:
+        self._tool_call_names.append(tool_name)
 
     async def _handle_llm_call(self, kwargs: dict) -> dict:
         """Shared LLM call handler with tape replay/record and budget enforcement.
@@ -299,6 +348,7 @@ class BridgeServer:
             if cached is not None:
                 # Record to new tape but do NOT charge budget
                 self._recording_tape.record(req_hash, kwargs, cached)
+                self._record_llm_telemetry(kwargs, cached)
                 return cached
 
         # Live call — enforce budget.
@@ -330,6 +380,7 @@ class BridgeServer:
             prompt_tokens=usage.get("prompt_tokens", 0),
             completion_tokens=usage.get("completion_tokens", 0),
         )
+        self._record_llm_telemetry(kwargs, result)
 
         # Record to tape
         self._recording_tape.record(req_hash, kwargs, result)
@@ -339,6 +390,22 @@ class BridgeServer:
     def get_recorded_tape(self) -> list[dict]:
         """Return the tape recorded during this session, serialized for JSON transport."""
         return self._recording_tape.to_json()
+
+    def get_telemetry(self) -> dict:
+        """Return non-sensitive execution telemetry for persisted run usage.
+
+        This intentionally records only tool names/counts and finish reasons,
+        not prompts, arguments, SQL, rows, or model text.
+        """
+        return {
+            "llm_calls": self._llm_call_count,
+            "llm_calls_with_tools": self._llm_calls_with_tools,
+            "llm_tool_call_count": len(self._llm_tool_call_names),
+            "llm_tool_call_counts": self._count_names(self._llm_tool_call_names),
+            "tool_call_count": len(self._tool_call_names),
+            "tool_call_counts": self._count_names(self._tool_call_names),
+            "finish_reasons": dict(self._finish_reasons),
+        }
 
     def _build_app(self) -> FastAPI:
         app = FastAPI(title="Hivemind Sandbox Bridge", docs_url=None, redoc_url=None)
@@ -646,6 +713,7 @@ class BridgeServer:
                 tool_name,
                 args_size,
             )
+            bridge._record_tool_call(tool_name)
             if tool_name not in bridge.tools:
                 return BridgeToolResponse(
                     result="",

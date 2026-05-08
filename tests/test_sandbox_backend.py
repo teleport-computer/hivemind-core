@@ -103,6 +103,9 @@ async def test_backend_returns_output_and_usage_on_success(monkeypatch):
             bridge_events["stopped"] += 1
             return None
 
+        def get_telemetry(self):
+            return {"llm_calls": 0, "tool_call_counts": {"list": 1}}
+
     _patch_runner(monkeypatch, _Runner)
     monkeypatch.setattr(backend_module, "BridgeServer", _Bridge)
 
@@ -131,6 +134,7 @@ async def test_backend_returns_output_and_usage_on_success(monkeypatch):
     assert usage["max_calls"] == 7
     assert usage["total_tokens"] == 0
     assert usage["max_tokens"] == 900
+    assert usage["bridge"] == {"llm_calls": 0, "tool_call_counts": {"list": 1}}
     assert bridge_events == {"started": 1, "stopped": 1}
 
     run_kwargs = runner_instances[0].run_kwargs

@@ -86,16 +86,17 @@ EXECUTE_SQL_SCHEMA = {
     "description": (
         "Execute a SQL query against the hivemind database. Returns JSON "
         "rows for SELECT, or {rowcount: N} for writes. Use %s for "
-        "parameter placeholders. `params` is a JSON-encoded list."
+        "parameter placeholders."
     ),
     "parameters": {
         "type": "object",
         "properties": {
             "sql": {"type": "string", "description": "The SQL query to run."},
             "params": {
-                "type": "string",
-                "description": "JSON array of parameters for %s placeholders.",
-                "default": "[]",
+                "type": "array",
+                "items": {},
+                "description": "Query parameters for %s placeholders.",
+                "default": [],
             },
         },
         "required": ["sql"],

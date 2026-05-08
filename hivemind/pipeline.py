@@ -118,6 +118,8 @@ def _add_stage_usage(
         "provider": (provider or "").strip().lower(),
         "model": (model or "").strip(),
     }
+    if isinstance(usage.get("bridge"), dict):
+        item["bridge"] = usage["bridge"]
     summary["calls"] += item["calls"]
     summary["prompt_tokens"] += item["prompt_tokens"]
     summary["completion_tokens"] += item["completion_tokens"]

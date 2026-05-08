@@ -53,7 +53,7 @@ You answer questions with scoped database tools.
 
 Tools:
 - get_schema: inspect tables, columns, and types.
-- execute_sql: run read-only SQL. Use %s placeholders and JSON-encoded params.
+- execute_sql: run read-only SQL. Use %s placeholders and params as an array.
 
 A scope function may transform execute_sql results before you see them.
 If a scope_fn is included in the user message, read it as the runtime
@@ -79,6 +79,10 @@ _NO_REASONING_CONFIG = {"enabled": False, "effort": "none"}
 _NO_REASONING_OVERRIDES = {
     "extra_body": {"reasoning": {"effort": "none", "exclude": True}}
 }
+_ENABLE_DIRECT_SQL_FALLBACK = (
+    os.environ.get("HIVEMIND_QUERY_DIRECT_SQL_FALLBACK", "").strip().lower()
+    in {"1", "true", "yes", "on"}
+)
 _HERMES_FAILURE_MARKERS = (
     "api call failed",
     "budget exhausted",
@@ -500,6 +504,9 @@ def _run_direct_sql_fallback(body: str) -> str | None:
 
 
 def _try_direct_sql_fallback(body: str, reason: str) -> str | None:
+    if not _ENABLE_DIRECT_SQL_FALLBACK:
+        print(f"Direct SQL fallback disabled after {reason}.", file=sys.stderr)
+        return None
     try:
         answer = _run_direct_sql_fallback(body)
     except Exception as e:

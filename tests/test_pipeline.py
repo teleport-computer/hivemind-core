@@ -8,7 +8,7 @@ import hivemind.pipeline as pipeline_module
 from hivemind.config import Settings
 from hivemind.db import Database
 from hivemind.models import QueryRequest, StoreRequest
-from hivemind.pipeline import Pipeline
+from hivemind.pipeline import Pipeline, _add_stage_usage, _new_usage_summary
 from hivemind.sandbox.agents import AgentStore
 from hivemind.sandbox.models import AgentConfig
 
@@ -34,6 +34,30 @@ def _mock_default_scope(pipeline: Pipeline) -> None:
             {"total_tokens": 0},
         )
     )
+
+
+def test_add_stage_usage_preserves_bridge_telemetry():
+    summary = _new_usage_summary(max_tokens=100)
+    _add_stage_usage(
+        summary,
+        "query",
+        {
+            "calls": 1,
+            "prompt_tokens": 10,
+            "completion_tokens": 5,
+            "total_tokens": 15,
+            "bridge": {
+                "llm_tool_call_counts": {"execute_sql": 1},
+                "tool_call_counts": {"execute_sql": 1},
+            },
+        },
+        provider="openrouter",
+        model="test/model",
+    )
+
+    stage = summary["stages"]["query"]
+    assert stage["bridge"]["llm_tool_call_counts"] == {"execute_sql": 1}
+    assert stage["bridge"]["tool_call_counts"] == {"execute_sql": 1}
 
 
 @pytest.fixture
