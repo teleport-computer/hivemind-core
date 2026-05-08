@@ -16,6 +16,7 @@ def _load_agent(
     module_name: str,
     *,
     response: str,
+    chat_stdout: str = "",
 ):
     calls = {"inits": [], "chats": []}
     fake_run_agent = types.ModuleType("run_agent")
@@ -26,6 +27,8 @@ def _load_agent(
 
         def chat(self, body):
             calls["chats"].append(body)
+            if chat_stdout:
+                print(chat_stdout)
             return response
 
     fake_run_agent.AIAgent = AIAgent
@@ -153,6 +156,24 @@ def test_query_agent_does_not_emit_hermes_runtime_diagnostics(monkeypatch, capsy
     assert "Hermes runtime failure" in captured.err
 
 
+def test_query_agent_redirects_ai_agent_stdout_diagnostics(monkeypatch, capsys):
+    monkeypatch.setenv("QUERY_PROMPT", "What is the answer?")
+    mod, _calls = _load_agent(
+        monkeypatch,
+        "agents/default-query-hermes/agent.py",
+        "default_query_hermes_stdout_diagnostic_contract_test",
+        response="final answer",
+        chat_stdout="⚠️  Response truncated (finish_reason='length')",
+    )
+
+    mod.main()
+
+    captured = capsys.readouterr()
+    assert captured.out.strip() == "final answer"
+    assert "Response truncated" not in captured.out
+    assert "Response truncated" in captured.err
+
+
 def test_scope_agent_uses_ai_agent_for_aggregate_policy(monkeypatch, capsys):
     scope_fn = (
         "def scope(sql, params, rows):\n"
@@ -240,6 +261,28 @@ def test_scope_agent_extracts_last_scope_json_after_diagnostics(monkeypatch, cap
     captured = capsys.readouterr()
     assert json.loads(captured.out) == {"scope_fn": final_scope_fn}
     assert "using fallback" not in captured.err
+
+
+def test_scope_agent_redirects_ai_agent_stdout_diagnostics(monkeypatch, capsys):
+    scope_fn = (
+        "def scope(sql, params, rows):\n"
+        "    return {\"allow\": True, \"rows\": rows}\n"
+    )
+    monkeypatch.setenv("QUERY_PROMPT", "Return aggregate statistics only.")
+    mod, _calls = _load_agent(
+        monkeypatch,
+        "agents/default-scope-hermes/agent.py",
+        "default_scope_hermes_stdout_diagnostic_contract_test",
+        response=json.dumps({"scope_fn": scope_fn}),
+        chat_stdout="⚠️  Response truncated (finish_reason='length')",
+    )
+
+    mod.main()
+
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == {"scope_fn": scope_fn}
+    assert "Response truncated" not in captured.out
+    assert "Response truncated" in captured.err
 
 
 def test_scope_agent_aggregate_fallback_preserves_aggregate_rows(monkeypatch, capsys):
@@ -466,3 +509,24 @@ def test_mediator_agent_does_not_emit_hermes_runtime_diagnostics(monkeypatch, ca
     assert "Budget exhausted" not in captured.out
     assert captured.out.strip() == "Unable to process response due to an internal error."
     assert "Hermes runtime failure" in captured.err
+
+
+def test_mediator_agent_redirects_ai_agent_stdout_diagnostics(monkeypatch, capsys):
+    raw = "watch_day: 2026-04-15\nvideos: 482237"
+    monkeypatch.setenv("RAW_OUTPUT", raw)
+    monkeypatch.setenv("QUERY_PROMPT", "Which day had the highest count?")
+    monkeypatch.setenv("MEDIATION_POLICY", "Allowed: aggregate statistics.")
+    mod, _calls = _load_agent(
+        monkeypatch,
+        "agents/default-mediator-hermes/agent.py",
+        "default_mediator_hermes_stdout_diagnostic_contract_test",
+        response=raw,
+        chat_stdout="⚠️  Response truncated (finish_reason='length')",
+    )
+
+    mod.main()
+
+    captured = capsys.readouterr()
+    assert captured.out.strip() == raw
+    assert "Response truncated" not in captured.out
+    assert "Response truncated" in captured.err

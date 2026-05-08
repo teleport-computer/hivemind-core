@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import os
 import sys
+from contextlib import redirect_stdout
 from pathlib import Path
 
 _PLUGINS_DIR = os.environ.get("HERMES_BUNDLED_PLUGINS", "/opt/hivemind/plugins")
@@ -139,7 +140,8 @@ def main() -> None:
             reasoning_config=_NO_REASONING_CONFIG,
             request_overrides=_NO_REASONING_OVERRIDES,
         )
-        response = agent.chat(body)
+        with redirect_stdout(sys.stderr):
+            response = agent.chat(body)
     except Exception as e:
         print(f"AIAgent error: {e}", file=sys.stderr)
         # Fail closed on the user-facing channel.
