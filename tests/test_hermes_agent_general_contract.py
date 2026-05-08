@@ -178,6 +178,7 @@ def test_query_agent_runtime_failure_uses_scoped_sql_fallback(
     monkeypatch,
     capsys,
 ):
+    monkeypatch.setenv("HIVEMIND_QUERY_DIRECT_SQL_FALLBACK", "1")
     monkeypatch.setenv(
         "QUERY_PROMPT",
         "Which day had the highest number of watches? Return day and count only.",
@@ -255,10 +256,40 @@ def test_query_agent_runtime_failure_uses_scoped_sql_fallback(
     ]
 
 
+def test_query_agent_direct_sql_fallback_disabled_by_default(
+    monkeypatch,
+    capsys,
+):
+    monkeypatch.setenv("QUERY_PROMPT", "How many records are present?")
+    monkeypatch.setenv(
+        "SCOPE_FN_SOURCE",
+        "def scope(sql, params, rows):\n"
+        "    return {\"allow\": True, \"rows\": rows}\n",
+    )
+    mod, _calls = _load_agent(
+        monkeypatch,
+        "agents/default-query-hermes/agent.py",
+        "default_query_hermes_fallback_disabled_contract_test",
+        response="InternalServerError: provider failed",
+    )
+
+    def fake_post_json(path, payload, *, timeout=90.0):
+        raise AssertionError(f"fallback should not call bridge path {path}")
+
+    monkeypatch.setattr(mod, "_post_json", fake_post_json)
+
+    mod.main()
+
+    captured = capsys.readouterr()
+    assert "I wasn't able to produce an answer" in captured.out
+    assert "Direct SQL fallback disabled" in captured.err
+
+
 def test_query_agent_scoped_sql_fallback_rejects_mutating_sql(
     monkeypatch,
     capsys,
 ):
+    monkeypatch.setenv("HIVEMIND_QUERY_DIRECT_SQL_FALLBACK", "1")
     monkeypatch.setenv("QUERY_PROMPT", "How many records are present?")
     monkeypatch.setenv(
         "SCOPE_FN_SOURCE",
@@ -304,6 +335,7 @@ def test_query_agent_unresolved_non_answer_uses_scoped_sql_fallback(
     monkeypatch,
     capsys,
 ):
+    monkeypatch.setenv("HIVEMIND_QUERY_DIRECT_SQL_FALLBACK", "1")
     monkeypatch.setenv(
         "QUERY_PROMPT",
         "Which day had the highest number of watches? Return watch_day and videos.",
@@ -384,6 +416,7 @@ def test_query_agent_schema_error_response_uses_scoped_sql_fallback(
     monkeypatch,
     capsys,
 ):
+    monkeypatch.setenv("HIVEMIND_QUERY_DIRECT_SQL_FALLBACK", "1")
     monkeypatch.setenv(
         "QUERY_PROMPT",
         "Which day had the highest number of watches? Return watch_day and videos.",
@@ -464,6 +497,7 @@ def test_query_agent_direct_sql_planner_repairs_alias_errors(
     monkeypatch,
     capsys,
 ):
+    monkeypatch.setenv("HIVEMIND_QUERY_DIRECT_SQL_FALLBACK", "1")
     monkeypatch.setenv(
         "QUERY_PROMPT",
         "Which day had the highest number of watches? Return watch_day and videos.",
@@ -567,6 +601,7 @@ def test_query_agent_direct_sql_uses_schema_top_date_count_template(
     monkeypatch,
     capsys,
 ):
+    monkeypatch.setenv("HIVEMIND_QUERY_DIRECT_SQL_FALLBACK", "1")
     monkeypatch.setenv(
         "QUERY_PROMPT",
         "Which day had the highest number of watches in events? Return watch_day and videos.",
@@ -650,6 +685,7 @@ def test_query_agent_unresolved_response_fails_closed_when_fallback_fails(
     monkeypatch,
     capsys,
 ):
+    monkeypatch.setenv("HIVEMIND_QUERY_DIRECT_SQL_FALLBACK", "1")
     monkeypatch.setenv(
         "QUERY_PROMPT",
         "Which day had the highest number of watches? Return watch_day and videos.",
@@ -713,6 +749,7 @@ def test_query_agent_generic_refusal_uses_scoped_sql_fallback(
     monkeypatch,
     capsys,
 ):
+    monkeypatch.setenv("HIVEMIND_QUERY_DIRECT_SQL_FALLBACK", "1")
     monkeypatch.setenv(
         "QUERY_PROMPT",
         "Which day had the highest number of watches? Return watch_day and videos.",
