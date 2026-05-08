@@ -358,6 +358,48 @@ async def test_openai_chat_completions_with_tools(bridge):
     assert tc["id"] == "call_abc123"
 
 
+@pytest.mark.asyncio
+async def test_openai_chat_completions_forwards_extra_body():
+    captured = {}
+
+    async def llm_caller(**kwargs):
+        captured.update(kwargs)
+        return {
+            "content": "OK",
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+            "finish_reason": "stop",
+        }
+
+    budget = Budget(max_calls=10, max_tokens=100_000)
+    server = BridgeServer(
+        session_token="tok",
+        tools=_make_tools(),
+        on_tool_call=_mock_on_tool_call,
+        llm_caller=llm_caller,
+        budget=budget,
+        host="127.0.0.1",
+    )
+    port = await server.start()
+    client = httpx.AsyncClient(base_url=f"http://127.0.0.1:{port}")
+
+    try:
+        resp = await client.post(
+            "/v1/chat/completions",
+            headers={"Authorization": "Bearer tok"},
+            json={
+                "messages": [{"role": "user", "content": "Hello"}],
+                "reasoning": {"effort": "none", "exclude": True},
+            },
+        )
+        assert resp.status_code == 200
+        assert captured["extra_body"] == {
+            "reasoning": {"effort": "none", "exclude": True}
+        }
+    finally:
+        await client.aclose()
+        await server.stop()
+
+
 def _parse_sse_payloads(text: str) -> list[dict | str]:
     payloads: list[dict | str] = []
     for line in text.splitlines():

@@ -1,6 +1,6 @@
 import re
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 VALID_AGENT_TYPES = {"scope", "query", "index", "mediator"}
@@ -169,6 +169,8 @@ class BridgeToolResponse(BaseModel):
 class OpenAIChatRequest(BaseModel):
     """OpenAI-compatible request for POST /v1/chat/completions on the bridge."""
 
+    model_config = ConfigDict(extra="allow")
+
     model: str | None = None
     messages: list[dict]
     max_tokens: int | None = Field(default=4096, ge=1)
@@ -176,6 +178,8 @@ class OpenAIChatRequest(BaseModel):
     top_p: float | None = None
     tools: list[dict] | None = None
     tool_choice: str | dict | None = None
+    extra_body: dict | None = None
+    reasoning: dict | None = None
     stream: bool = False
     stream_options: dict | None = None
 

@@ -396,6 +396,45 @@ async def test_llm_caller_prefers_real_content_over_reasoning():
 
 
 @pytest.mark.asyncio
+async def test_llm_caller_forwards_extra_body_to_provider():
+    from openai.types.chat.chat_completion import ChatCompletion
+
+    raw = {
+        "id": "chatcmpl-test",
+        "object": "chat.completion",
+        "created": 0,
+        "model": "model",
+        "choices": [
+            {
+                "index": 0,
+                "message": {"role": "assistant", "content": "OK"},
+                "finish_reason": "stop",
+            }
+        ],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+    }
+    fake_resp = ChatCompletion.model_validate(raw)
+
+    client = AsyncMock()
+    client.chat.completions.create = AsyncMock(return_value=fake_resp)
+
+    backend = backend_module.SandboxBackend(
+        llm_client=client, llm_model="model", settings=_settings(), agent=_agent()
+    )
+    result = await backend._llm_caller(
+        messages=[{"role": "user", "content": "hi"}],
+        max_tokens=200,
+        extra_body={"reasoning": {"effort": "none", "exclude": True}},
+    )
+
+    assert result["content"] == "OK"
+    client.chat.completions.create.assert_awaited_once()
+    assert client.chat.completions.create.await_args.kwargs["extra_body"] == {
+        "reasoning": {"effort": "none", "exclude": True}
+    }
+
+
+@pytest.mark.asyncio
 async def test_llm_caller_handles_deepseek_reasoning_content_field():
     """DeepSeek-style providers expose chain-of-thought as `reasoning_content`
     instead of `reasoning`. Both should be honored."""

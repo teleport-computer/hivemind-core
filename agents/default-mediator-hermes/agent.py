@@ -46,12 +46,12 @@ privacy rules, output-shape rules, aggregation rules, token rules, or
 PII categories that the policy did not state. If the response is
 compliant, return it unchanged.
 
-If POLICY is absent, pass the response through except for obvious
-credentials, secrets, system internals, tool traces, or debug output.
+If POLICY is absent, pass the response through except for obvious credentials,
+secrets, system internals, tool traces, or debug output.
 
-If rewriting is needed, make the smallest edit that satisfies the policy
-while preserving useful content. Return only the final user-facing text:
-no audit report, no preamble, no explanation of mediation.
+If rewriting is needed, make the smallest policy-compliant edit. Return only
+the final user-facing text: no audit report, preamble, or commentary. Keep it
+concise.
 """
 
 _PROMPT_FILE = Path("/app/prompt.md")
@@ -61,9 +61,48 @@ else:
     SYSTEM_PROMPT = DEFAULT_SYSTEM_PROMPT
 
 
+_NO_REASONING_CONFIG = {"enabled": False, "effort": "none"}
+_NO_REASONING_OVERRIDES = {
+    "extra_body": {"reasoning": {"effort": "none", "exclude": True}}
+}
+_HERMES_FAILURE_MARKERS = (
+    "api call failed",
+    "budget exhausted",
+    "error code: 429",
+    "http 429",
+    "http 500",
+    "http 404",
+    "internalservererror",
+    "notfounderror",
+    "max retries",
+    "request debug dump",
+    "response truncated",
+    "requesting continuation",
+    "iteration budget exhausted",
+    "maximum iterations",
+    "temporarily unavailable due to rate limiting",
+)
+
+
+def _looks_like_runtime_failure(text: str) -> bool:
+    lower = (text or "").lower()
+    return any(marker in lower for marker in _HERMES_FAILURE_MARKERS)
+
+
+def _mediator_internal_error() -> str:
+    return "Unable to process response due to an internal error."
+
+
 def main() -> None:
     if not RAW_OUTPUT.strip():
         print("")
+        return
+    if _looks_like_runtime_failure(RAW_OUTPUT):
+        print("query agent emitted Hermes runtime diagnostics; failing closed", file=sys.stderr)
+        print(
+            "Unable to complete the request because the model provider or "
+            "agent runtime failed before producing a usable answer."
+        )
         return
 
     parts: list[str] = []
@@ -96,15 +135,23 @@ def main() -> None:
             skip_memory=True,
             quiet_mode=True,
             save_trajectories=False,
+            max_tokens=512,
+            reasoning_config=_NO_REASONING_CONFIG,
+            request_overrides=_NO_REASONING_OVERRIDES,
         )
         response = agent.chat(body)
     except Exception as e:
         print(f"AIAgent error: {e}", file=sys.stderr)
         # Fail closed on the user-facing channel.
-        print("Unable to process response due to an internal error.")
+        print(_mediator_internal_error())
         return
 
-    print(response or "Unable to process response due to an internal error.")
+    if not response or _looks_like_runtime_failure(response):
+        print(f"Hermes runtime failure from mediator: {(response or '')[:500]}", file=sys.stderr)
+        print(_mediator_internal_error())
+        return
+
+    print(response)
 
 
 if __name__ == "__main__":

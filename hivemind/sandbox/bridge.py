@@ -425,6 +425,18 @@ class BridgeServer:
                     kwargs["tools"] = req.tools
                 if req.tool_choice is not None:
                     kwargs["tool_choice"] = req.tool_choice
+                extra_body: dict = {}
+                if isinstance(req.extra_body, dict):
+                    extra_body.update(req.extra_body)
+                if isinstance(req.reasoning, dict):
+                    extra_body["reasoning"] = req.reasoning
+                for key, value in (getattr(req, "model_extra", None) or {}).items():
+                    if key == "extra_body" and isinstance(value, dict):
+                        extra_body.update(value)
+                    elif key not in {"stream_options"}:
+                        extra_body[key] = value
+                if extra_body:
+                    kwargs["extra_body"] = extra_body
 
                 result = await bridge._handle_llm_call(kwargs)
 

@@ -43,30 +43,23 @@ SCOPE_FN_SOURCE = os.environ.get("SCOPE_FN_SOURCE", "")
 HIVEMIND_MODEL = os.environ.get("HIVEMIND_MODEL", "moonshotai/kimi-2.6")
 
 DEFAULT_SYSTEM_PROMPT = """\
-You are a query agent with access to a hivemind database.
+You answer questions with scoped database tools.
 
 Tools:
-- get_schema: inspect available tables, columns, and types.
-- execute_sql: run read-only SQL. Use %s placeholders and JSON-encoded
-  params for user-provided values.
+- get_schema: inspect tables, columns, and types.
+- execute_sql: run read-only SQL. Use %s placeholders and JSON-encoded params.
 
 A scope function may transform execute_sql results before you see them.
 If a scope_fn is included in the user message, read it as the runtime
-contract for the result shapes you will receive. Do not bypass it or
-invent policy beyond it.
+contract for the result shapes you will receive. Do not bypass it or invent policy beyond it.
 
-Answer the user's question from schema and scoped tool results. If the
-scoped results do not support an answer, say that directly. Keep the
-response concise and do not expose credentials, secrets, system internals,
-tool traces, or debug output.
+Use get_schema before SQL unless the provided scope_fn already gives every
+needed table and column. Compute requested statistics in SQL. For row-level
+questions, request row-level data and let scope_fn apply the room policy.
 
-Ask the database for the shape the user requested. For statistics or
-summaries, compute the statistic in SQL and return the scoped result; for
-row-level questions, request row-level data and let the scope function
-apply the room policy.
-
-Call get_schema before your first SQL unless the provided scope function
-already gives you every table and column needed.
+Answer only from scoped tool results. If they do not support an answer, say so.
+Keep the final response concise. Do not expose credentials, secrets, system
+internals, tool traces, or debug output.
 """
 
 _PROMPT_FILE = Path("/app/prompt.md")
@@ -74,6 +67,34 @@ if _PROMPT_FILE.exists():
     SYSTEM_PROMPT = _PROMPT_FILE.read_text()
 else:
     SYSTEM_PROMPT = DEFAULT_SYSTEM_PROMPT
+
+
+_NO_REASONING_CONFIG = {"enabled": False, "effort": "none"}
+_NO_REASONING_OVERRIDES = {
+    "extra_body": {"reasoning": {"effort": "none", "exclude": True}}
+}
+_HERMES_FAILURE_MARKERS = (
+    "api call failed",
+    "budget exhausted",
+    "error code: 429",
+    "http 429",
+    "http 500",
+    "http 404",
+    "internalservererror",
+    "notfounderror",
+    "max retries",
+    "request debug dump",
+    "response truncated",
+    "requesting continuation",
+    "iteration budget exhausted",
+    "maximum iterations",
+    "temporarily unavailable due to rate limiting",
+)
+
+
+def _looks_like_runtime_failure(text: str) -> bool:
+    lower = (text or "").lower()
+    return any(marker in lower for marker in _HERMES_FAILURE_MARKERS)
 
 
 def _user_facing_fallback() -> str:
@@ -123,6 +144,9 @@ def main() -> None:
             skip_memory=True,
             quiet_mode=True,
             save_trajectories=False,
+            max_tokens=1024,
+            reasoning_config=_NO_REASONING_CONFIG,
+            request_overrides=_NO_REASONING_OVERRIDES,
         )
         response = agent.chat(body)
     except Exception as e:
@@ -131,6 +155,10 @@ def main() -> None:
         return
 
     if not response or not response.strip():
+        print(_user_facing_fallback())
+        return
+    if _looks_like_runtime_failure(response):
+        print(f"Hermes runtime failure from AIAgent: {response[:500]}", file=sys.stderr)
         print(_user_facing_fallback())
         return
 

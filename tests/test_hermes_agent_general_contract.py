@@ -100,6 +100,12 @@ def test_query_agent_uses_ai_agent_for_benchmark_like_aggregate_prompt(
     assert "scope agent has produced this privacy filter" in body
     assert "def scope(sql, params, rows)" in body
     assert "Room policy: aggregate statistics are allowed" in body
+    init_kwargs = calls["inits"][0]["kwargs"]
+    assert init_kwargs["reasoning_config"] == {"enabled": False, "effort": "none"}
+    assert init_kwargs["request_overrides"]["extra_body"]["reasoning"] == {
+        "effort": "none",
+        "exclude": True,
+    }
 
 
 def test_query_agent_uses_ai_agent_for_raw_dump_attack(monkeypatch, capsys):
@@ -123,6 +129,28 @@ def test_query_agent_uses_ai_agent_for_raw_dump_attack(monkeypatch, capsys):
     assert captured.out.strip() == "policy-aware refusal from agent"
     assert len(calls["inits"]) == 1
     assert len(calls["chats"]) == 1
+
+
+def test_query_agent_does_not_emit_hermes_runtime_diagnostics(monkeypatch, capsys):
+    monkeypatch.setenv("QUERY_PROMPT", "What is the answer?")
+    mod, _calls = _load_agent(
+        monkeypatch,
+        "agents/default-query-hermes/agent.py",
+        "default_query_hermes_runtime_diagnostic_contract_test",
+        response=(
+            "⚠️  Response truncated (finish_reason='length')\n"
+            "I reached the maximum iterations. Error: Error code: 429 - "
+            "{'detail': 'Budget exhausted'}"
+        ),
+    )
+
+    mod.main()
+
+    captured = capsys.readouterr()
+    assert "Response truncated" not in captured.out
+    assert "Budget exhausted" not in captured.out
+    assert "I wasn't able to produce an answer" in captured.out
+    assert "Hermes runtime failure" in captured.err
 
 
 def test_scope_agent_uses_ai_agent_for_aggregate_policy(monkeypatch, capsys):
@@ -156,6 +184,12 @@ def test_scope_agent_uses_ai_agent_for_aggregate_policy(monkeypatch, capsys):
     body = calls["chats"][0]
     assert "MEDIATION_POLICY" in body
     assert policy in body
+    init_kwargs = calls["inits"][0]["kwargs"]
+    assert init_kwargs["reasoning_config"] == {"enabled": False, "effort": "none"}
+    assert init_kwargs["request_overrides"]["extra_body"]["reasoning"] == {
+        "effort": "none",
+        "exclude": True,
+    }
 
 
 def test_scope_agent_extracts_fenced_json_with_scope_dict_literal(monkeypatch, capsys):
@@ -304,13 +338,10 @@ def test_scope_agent_replaces_static_empty_rows_for_allowed_aggregate(
 def test_scope_prompt_centers_privacy_utility_frontier():
     source = (ROOT / "agents/default-scope-hermes/agent.py").read_text()
 
-    assert "privacy/utility frontier" in source
+    assert "privacy/utility tradeoff" in source
     assert "Do not apply canned policies" in source
-    assert "least destructive policy-compliant transform" in source
-    assert "When policy allows a" in source
-    assert "preserve that class" in source
-    assert "already aggregate/statistical results" in source
-    assert "domain-specific aliases" in source
+    assert "least destructive compliant transform" in source
+    assert "Preserve allowed information" in source
     assert "verify_scope_fn" in source
 
 
@@ -321,8 +352,8 @@ def test_query_prompt_is_tool_aware_without_canned_policy():
     assert "execute_sql" in source
     assert "Do not bypass it or" in source
     assert "invent policy beyond it" in source
-    assert "Ask the database for the shape" in source
-    assert "Call get_schema before your first SQL" in source
+    assert "Compute requested statistics in SQL" in source
+    assert "Use get_schema before SQL" in source
 
 
 def test_hermes_prompts_do_not_embed_canned_privacy_policies():
@@ -405,3 +436,33 @@ def test_mediator_agent_uses_ai_agent_for_safe_aggregate_output(monkeypatch, cap
     body = calls["chats"][0]
     assert f"POLICY:\n{policy}" in body
     assert f"RESPONSE TO FILTER:\n{raw}" in body
+    init_kwargs = calls["inits"][0]["kwargs"]
+    assert init_kwargs["reasoning_config"] == {"enabled": False, "effort": "none"}
+    assert init_kwargs["request_overrides"]["extra_body"]["reasoning"] == {
+        "effort": "none",
+        "exclude": True,
+    }
+
+
+def test_mediator_agent_does_not_emit_hermes_runtime_diagnostics(monkeypatch, capsys):
+    monkeypatch.setenv("RAW_OUTPUT", "watch_day: 2026-04-15\nvideos: 482237")
+    monkeypatch.setenv("QUERY_PROMPT", "Which day had the highest count?")
+    monkeypatch.setenv("MEDIATION_POLICY", "Allowed: aggregate statistics.")
+    mod, _calls = _load_agent(
+        monkeypatch,
+        "agents/default-mediator-hermes/agent.py",
+        "default_mediator_hermes_runtime_diagnostic_contract_test",
+        response=(
+            "⚠️  Response truncated (finish_reason='length')\n"
+            "I reached the maximum iterations. Error: Error code: 429 - "
+            "{'detail': 'Budget exhausted'}"
+        ),
+    )
+
+    mod.main()
+
+    captured = capsys.readouterr()
+    assert "Response truncated" not in captured.out
+    assert "Budget exhausted" not in captured.out
+    assert captured.out.strip() == "Unable to process response due to an internal error."
+    assert "Hermes runtime failure" in captured.err

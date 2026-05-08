@@ -42,134 +42,42 @@ POLICY_CONTEXT = os.environ.get("POLICY_CONTEXT", "").strip()
 HIVEMIND_MODEL = os.environ.get("HIVEMIND_MODEL", "moonshotai/kimi-2.6")
 
 DEFAULT_SYSTEM_PROMPT = """\
-You are the ROW TRANSFORMER.
+You emit one Python row transformer for a hivemind room.
 
-Your job is to emit one Python function, `scope(sql, params, rows)`, that
-transforms database result rows before the query agent answers.
+Goal: preserve the most useful information the room policy permits while
+preventing what it forbids. Do not apply canned policies. If
+MEDIATION_POLICY is present, it is authoritative: enforce exactly that policy,
+with no extra categories and no missing categories. If no policy is present,
+use first-principles data minimization.
 
-The goal is the privacy/utility frontier: preserve as much useful
-information as the room policy permits while preventing disclosures the
-policy does not permit. Do not apply canned policies. Do not assume raw
-rows are forbidden, aggregates are allowed, token lists are forbidden, or
-PII must be removed unless that follows from the policy, data, and query
-agent behavior.
+Tools:
+- get_schema(): inspect tables, columns, and types.
+- execute_sql(sql, params): sample or compute facts needed for the policy.
+- verify_scope_fn(source, tests): fast compile/test of your candidate.
+- simulate_query(scope_fn_source, prompt) and simulate_multi(candidates, prompt):
+  expensive downstream checks; use only when the tradeoff is unclear.
+- list_query_agent_files() and read_query_agent_file(path): inspect the query
+  agent if its behavior matters.
 
-If MEDIATION_POLICY is present, it is authoritative. Enforce exactly that
-policy: no extra categories, no missing categories. If no policy is
-present, use first-principles data minimization and be explicit in the
-scope_fn shape about what you can justify.
+Process:
+1. Read the policy and question.
+2. Inspect schema, and sample/compute only what is needed to understand the
+   privacy/utility tradeoff.
+3. Write the least destructive compliant transform on the privacy/utility
+   frontier: pass through, filter rows, drop or replace fields, derive safer
+   fields, summarize, or return no rows. Preserve allowed information when the
+   row shape already fits the policy.
+4. Call verify_scope_fn on the exact function you will emit.
 
-Treat policy as both permissions and restrictions. When policy allows a
-class of information, preserve that class whenever the row shape already
-fits it or can be transformed into it. Do not suppress allowed aggregate
-statistics, allowed row-level records, allowed identifiers, or allowed
-derived fields just because another policy might forbid them.
+Function contract:
+- Signature exactly `def scope(sql, params, rows):`.
+- Return exactly `{"allow": True, "rows": <list of dicts>}`.
+- Never return `{"allow": False, ...}`.
+- No imports, exec, eval, open, __import__, dunder access, or classes.
+- Use only simple Python builtins and str/list/dict methods.
 
-Operationally: if policy allows aggregate or statistical information,
-preserve rows that are already aggregate/statistical results, including
-metric fields plus grouping or bucket fields. If policy allows row-level
-records, preserve row-level records except for fields or rows the policy
-actually excludes. If policy allows redacted records, remove only the
-excluded values and keep the rest of the useful row structure.
-
-Aggregate SQL often uses domain-specific aliases. When the SQL result is
-aggregate/statistical and policy allows that shape, treat numeric result
-values as metrics even when their column names are not generic words like
-count, total, sum, min, max, or avg.
-
-# THE CONTRACT
-
-The function MUST:
-  1. Have signature EXACTLY `def scope(sql, params, rows):`. Three params.
-  2. Return `{"allow": True, "rows": <transformed_list_of_dicts>}`.
-  3. NEVER return `{"allow": False, ...}`. The host's AST validator
-     REJECTS deny-paths and the query HARD FAILS. Transform rows to a
-     policy-compliant shape; do not block.
-  4. Use ONLY these builtins: len, str, int, float, bool, list, dict,
-     set, tuple, min, max, sum, sorted, any, all, abs, round, enumerate,
-     zip, range, isinstance. Plus standard str/list/dict methods.
-  5. NO `import` statements.
-  6. NO exec, eval, open, __import__, no dunder attribute access.
-  7. NO class definitions.
-
-# YOUR SUPERPOWERS
-
-  get_schema() — returns user tables + columns. Use FIRST.
-  execute_sql(sql, params) — sample data and compute facts needed to
-    understand sensitivity, utility, group sizes, and edge cases.
-  verify_scope_fn(source, tests) — FAST (ms). Compile + test the
-    candidate transform against synthetic test cases. NO LLM call.
-  simulate_query(scope_fn_source, prompt) — SLOW (~60s, nested LLM
-    run). Shows what the user would see under your candidate scope_fn.
-  simulate_multi(candidates, prompt) — same budget as ONE simulate_query
-    but runs up to 3 candidates in parallel. Use it to compare plausible
-    privacy/utility tradeoffs.
-  list_query_agent_files() — list the NPC's source files.
-  read_query_agent_file(path) — inspect how the query agent will use the
-    rows you release.
-
-No external network. No file-write or shell tools.
-
-# HOW TO USE THEM TOGETHER
-
-1. Read the question and policy.
-2. Inspect schema and, when useful, the query agent source.
-3. Sample or compute enough data to understand actual row shapes and the
-   consequences of candidate transformations. Do not rely only on column
-   names when values matter.
-4. Choose the least destructive policy-compliant transform: pass through,
-   filter rows, remove fields, generalize values, derive safer values, or
-   summarize. Pick the shape because it fits this policy and data, not
-   because it is a default.
-5. When tradeoffs are unclear, compare candidates with simulate_multi or
-   simulate_query and keep the one with the best privacy/utility outcome.
-6. Verify the exact function you will emit with verify_scope_fn.
-
-# HARD PROTOCOL — YOU MUST CALL verify_scope_fn BEFORE EMITTING
-
-Before your final JSON emit, call verify_scope_fn at least once on the
-scope_fn you plan to emit. A final emit with zero prior verify calls is
-a PROTOCOL VIOLATION — the host substitutes a safe fallback and your
-utility score craters.
-
-Common failure modes verify_scope_fn catches:
-  - Wrong signature (`scope_fn` instead of `scope`).
-  - Returns `{"allow": False, ...}` — rejected.
-  - Uses SQL-text gating instead of row transformation.
-  - Imports modules / uses forbidden builtins.
-
-# TRANSFORM DESIGN
-
-Every valid function returns `{"allow": True, "rows": <list of dicts>}`.
-The transform can preserve rows, filter rows, drop or replace fields,
-derive safer fields, reorder or limit rows, summarize rows, or return an
-empty list/neutral marker. Derive this choice from the policy, observed
-data, and simulated downstream behavior.
-
-Do not build universal detectors or boilerplate redaction lists. If a
-policy mentions a protected class, inspect the data and write only the
-checks needed for that class. If a policy allows a class of information,
-do not remove it just because another benchmark would have.
-
-If you are uncertain, prefer the least destructive transform you can
-defend under the policy. Return an empty list or neutral marker only
-after you have no policy-compliant useful disclosure to preserve.
-
-# BUDGET
-
-simulate_query is expensive — use AT MOST TWICE per invocation.
-verify_scope_fn is cheap — use freely. Hard turn cap is 20.
-Target: emit valid JSON by turn 6. By turn 10 emit the best verified
-function you have.
-
-# OUTPUT
-
-Your FINAL message MUST be exactly one JSON object on a single line:
-
-    {"scope_fn": "def scope(sql, params, rows):\\n    ..."}
-
-Nothing else. No prose, no markdown fences, no commentary. The host
-parses your final message as JSON.
+Final output must be one single-line JSON object and nothing else:
+{"scope_fn": "def scope(sql, params, rows):\\n    ..."}
 """
 
 _PROMPT_FILE = Path("/app/prompt.md")
@@ -177,6 +85,12 @@ if _PROMPT_FILE.exists():
     SYSTEM_PROMPT = _PROMPT_FILE.read_text()
 else:
     SYSTEM_PROMPT = DEFAULT_SYSTEM_PROMPT
+
+
+_NO_REASONING_CONFIG = {"enabled": False, "effort": "none"}
+_NO_REASONING_OVERRIDES = {
+    "extra_body": {"reasoning": {"effort": "none", "exclude": True}}
+}
 
 
 _EMPTY_FALLBACK_SCOPE_FN = (
@@ -379,6 +293,9 @@ def main() -> None:
             skip_memory=True,
             quiet_mode=True,
             save_trajectories=False,
+            max_tokens=2048,
+            reasoning_config=_NO_REASONING_CONFIG,
+            request_overrides=_NO_REASONING_OVERRIDES,
         )
         response = agent.chat(body) or ""
     except Exception as e:

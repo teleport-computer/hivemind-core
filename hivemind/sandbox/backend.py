@@ -50,6 +50,7 @@ class SandboxBackend:
         top_p: float | None = None,
         tools: list[dict] | None = None,
         tool_choice: str | dict | None = None,
+        extra_body: dict | None = None,
     ) -> dict:
         """Passthrough proxy: forward agent's LLM calls to the provider."""
         kwargs: dict = {
@@ -65,6 +66,8 @@ class SandboxBackend:
             kwargs["tools"] = tools
         if tool_choice is not None:
             kwargs["tool_choice"] = tool_choice
+        if extra_body:
+            kwargs["extra_body"] = extra_body
 
         resp = await self.llm_client.chat.completions.create(**kwargs)
 
