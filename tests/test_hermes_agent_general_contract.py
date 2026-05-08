@@ -370,6 +370,81 @@ def test_query_agent_unresolved_non_answer_uses_scoped_sql_fallback(
     assert "Direct SQL fallback used" in captured.err
 
 
+def test_query_agent_schema_error_response_uses_scoped_sql_fallback(
+    monkeypatch,
+    capsys,
+):
+    monkeypatch.setenv(
+        "QUERY_PROMPT",
+        "Which day had the highest number of watches? Return watch_day and videos.",
+    )
+    monkeypatch.setenv(
+        "SCOPE_FN_SOURCE",
+        "def scope(sql, params, rows):\n"
+        "    return {\"allow\": True, \"rows\": rows}\n",
+    )
+    mod, _calls = _load_agent(
+        monkeypatch,
+        "agents/default-query-hermes/agent.py",
+        "default_query_hermes_schema_error_fallback_contract_test",
+        response=(
+            'SQL error: column "watch_day" does not exist. '
+            "Perhaps you meant watched_at."
+        ),
+    )
+
+    def fake_post_json(path, payload, *, timeout=90.0):
+        if path == "/tools/get_schema":
+            return {
+                "result": json.dumps(
+                    [
+                        {
+                            "table_name": "events",
+                            "column_name": "watched_at",
+                            "data_type": "timestamp",
+                        }
+                    ]
+                )
+            }
+        if path == "/v1/chat/completions":
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "content": json.dumps(
+                                {
+                                    "sql": (
+                                        "SELECT DATE(watched_at) AS watch_day, "
+                                        "COUNT(*)::int AS videos FROM events "
+                                        "GROUP BY 1 ORDER BY 2 DESC LIMIT 1"
+                                    ),
+                                    "params": [],
+                                }
+                            )
+                        }
+                    }
+                ]
+            }
+        if path == "/tools/execute_sql":
+            return {
+                "result": json.dumps(
+                    [{"watch_day": "2026-04-15", "videos": 482237}]
+                )
+            }
+        raise AssertionError(f"unexpected bridge path {path}")
+
+    monkeypatch.setattr(mod, "_post_json", fake_post_json)
+
+    mod.main()
+
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == [
+        {"watch_day": "2026-04-15", "videos": 482237}
+    ]
+    assert "Unresolved AIAgent response" in captured.err
+    assert "Direct SQL fallback used" in captured.err
+
+
 def test_scope_agent_uses_ai_agent_for_aggregate_policy(monkeypatch, capsys):
     scope_fn = (
         "def scope(sql, params, rows):\n"

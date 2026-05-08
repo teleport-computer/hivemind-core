@@ -107,6 +107,11 @@ _UNRESOLVED_RESPONSE_MARKERS = (
     "i do not have enough information",
     "i don't have enough information",
     "try finding",
+    "does not exist",
+    "perhaps you meant",
+    "did you mean",
+    "error executing query",
+    "undefinedcolumn",
 )
 _DIRECT_SQL_SYSTEM_PROMPT = """\
 You convert a database question into one safe PostgreSQL SELECT.
