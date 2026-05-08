@@ -23,10 +23,15 @@ Outputs answer text to stdout.
 
 from __future__ import annotations
 
+import json
 import os
+import re
 import sys
+import urllib.error
+import urllib.request
 from contextlib import redirect_stdout
 from pathlib import Path
+from typing import Any
 
 # Trigger plugin registration BEFORE importing AIAgent. Hermes' bundled
 # plugin discovery runs lazily and doesn't always fire in library mode,
@@ -91,6 +96,28 @@ _HERMES_FAILURE_MARKERS = (
     "maximum iterations",
     "temporarily unavailable due to rate limiting",
 )
+_DIRECT_SQL_SYSTEM_PROMPT = """\
+You convert a database question into one safe PostgreSQL SELECT.
+
+Return exactly one JSON object and no markdown:
+{"sql": "SELECT ...", "params": []}
+
+Rules:
+- Use only the provided schema and question/context.
+- Return {"error": "..."} if the schema cannot answer the question.
+- SQL must be one read-only SELECT, optionally starting with WITH.
+- Do not include semicolons or multiple statements.
+- Use %s placeholders for params.
+- Compute requested aggregates in SQL.
+- The runtime scope function will filter or transform rows after execution;
+  do not invent additional privacy policy in this planner.
+"""
+_MAX_PLANNER_CONTEXT_CHARS = 60_000
+_SELECT_START_RE = re.compile(r"^\s*(select|with)\b", re.IGNORECASE | re.DOTALL)
+_MUTATING_SQL_RE = re.compile(
+    r"\b(insert|update|delete|drop|alter|create|truncate|grant|revoke|copy|call|do)\b",
+    re.IGNORECASE,
+)
 
 
 def _looks_like_runtime_failure(text: str) -> bool:
@@ -108,6 +135,152 @@ def _user_facing_fallback() -> str:
     )
 
 
+def _clip_context(text: str, max_chars: int = _MAX_PLANNER_CONTEXT_CHARS) -> str:
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars] + "\n[truncated]"
+
+
+def _post_json(path: str, payload: dict[str, Any], *, timeout: float = 90.0) -> dict[str, Any]:
+    base_url = os.environ["BRIDGE_URL"].rstrip("/")
+    req = urllib.request.Request(
+        base_url + path,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {os.environ['SESSION_TOKEN']}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", "replace")
+        raise RuntimeError(f"bridge HTTP {e.code}: {body[:500]}") from e
+    except urllib.error.URLError as e:
+        raise RuntimeError(f"bridge request failed: {e}") from e
+    return json.loads(raw or "{}")
+
+
+def _call_tool(tool_name: str, arguments: dict[str, Any]) -> str:
+    payload = _post_json(
+        f"/tools/{tool_name}",
+        {"arguments": arguments},
+        timeout=60.0,
+    )
+    if payload.get("error"):
+        raise RuntimeError(str(payload["error"]))
+    return str(payload.get("result") or "")
+
+
+def _llm_chat(messages: list[dict[str, str]], *, max_tokens: int = 512) -> str:
+    payload = _post_json(
+        "/v1/chat/completions",
+        {
+            "model": HIVEMIND_MODEL,
+            "messages": messages,
+            "temperature": 0,
+            "max_tokens": max_tokens,
+            "stream": False,
+            "extra_body": {"reasoning": {"effort": "none", "exclude": True}},
+            "reasoning": {"effort": "none", "exclude": True},
+        },
+        timeout=120.0,
+    )
+    choices = payload.get("choices") or []
+    if not choices:
+        return ""
+    message = choices[0].get("message") or {}
+    return str(message.get("content") or "")
+
+
+def _extract_json_object(text: str) -> dict[str, Any]:
+    candidate = (text or "").strip()
+    if candidate.startswith("```"):
+        candidate = re.sub(r"^```(?:json)?\s*", "", candidate, flags=re.IGNORECASE)
+        candidate = re.sub(r"\s*```$", "", candidate)
+    try:
+        parsed = json.loads(candidate)
+    except json.JSONDecodeError:
+        start = candidate.find("{")
+        end = candidate.rfind("}")
+        if start < 0 or end <= start:
+            raise
+        parsed = json.loads(candidate[start : end + 1])
+    if not isinstance(parsed, dict):
+        raise ValueError("planner did not return a JSON object")
+    return parsed
+
+
+def _normalize_select_sql(sql: str) -> str:
+    normalized = (sql or "").strip()
+    if normalized.endswith(";"):
+        normalized = normalized[:-1].strip()
+    if ";" in normalized:
+        raise ValueError("planner returned multiple SQL statements")
+    if not _SELECT_START_RE.match(normalized):
+        raise ValueError("planner returned non-SELECT SQL")
+    if _MUTATING_SQL_RE.search(normalized):
+        raise ValueError("planner returned mutating SQL")
+    return normalized
+
+
+def _format_scoped_sql_result(result: str) -> str:
+    parsed = json.loads(result)
+    if isinstance(parsed, dict) and parsed.get("error"):
+        raise RuntimeError(str(parsed["error"]))
+    return json.dumps(parsed, ensure_ascii=False, default=str)
+
+
+def _build_sql_planner_messages(body: str, schema: str) -> list[dict[str, str]]:
+    user = (
+        "SCHEMA_JSON:\n"
+        f"{_clip_context(schema)}\n\n"
+        "SCOPE_FUNCTION_SOURCE:\n"
+        "```python\n"
+        f"{_clip_context(SCOPE_FN_SOURCE)}\n"
+        "```\n\n"
+        "QUESTION_AND_CONTEXT:\n"
+        f"{body}"
+    )
+    return [
+        {"role": "system", "content": _DIRECT_SQL_SYSTEM_PROMPT},
+        {"role": "user", "content": user},
+    ]
+
+
+def _run_direct_sql_fallback(body: str) -> str | None:
+    if not SCOPE_FN_SOURCE.strip():
+        return None
+
+    schema = _call_tool("get_schema", {})
+    planner_text = _llm_chat(_build_sql_planner_messages(body, schema))
+    plan = _extract_json_object(planner_text)
+    if plan.get("error"):
+        raise RuntimeError(str(plan["error"]))
+
+    sql = _normalize_select_sql(str(plan.get("sql") or ""))
+    params = plan.get("params") or []
+    if not isinstance(params, list):
+        raise ValueError("planner params must be a list")
+
+    result = _call_tool("execute_sql", {"sql": sql, "params": params})
+    return _format_scoped_sql_result(result)
+
+
+def _try_direct_sql_fallback(body: str, reason: str) -> str | None:
+    try:
+        answer = _run_direct_sql_fallback(body)
+    except Exception as e:
+        print(f"Direct SQL fallback failed after {reason}: {e}", file=sys.stderr)
+        return None
+    if answer and answer.strip():
+        print(f"Direct SQL fallback used after {reason}.", file=sys.stderr)
+        return answer
+    return None
+
+
 def main() -> None:
     if not QUERY_PROMPT.strip():
         print("No question provided.")
@@ -116,6 +289,7 @@ def main() -> None:
     body = QUERY_PROMPT
     if QUERY_CONTEXT.strip():
         body = f"Context: {QUERY_CONTEXT}\n\nQuestion: {QUERY_PROMPT}"
+    planner_body = body
     if SCOPE_FN_SOURCE.strip():
         body = (
             "The scope agent has produced this privacy filter that wraps "
@@ -153,14 +327,23 @@ def main() -> None:
             response = agent.chat(body)
     except Exception as e:
         print(f"AIAgent error: {e}", file=sys.stderr)
+        if answer := _try_direct_sql_fallback(planner_body, "AIAgent error"):
+            print(answer)
+            return
         print(_user_facing_fallback())
         return
 
     if not response or not response.strip():
+        if answer := _try_direct_sql_fallback(planner_body, "empty AIAgent response"):
+            print(answer)
+            return
         print(_user_facing_fallback())
         return
     if _looks_like_runtime_failure(response):
         print(f"Hermes runtime failure from AIAgent: {response[:500]}", file=sys.stderr)
+        if answer := _try_direct_sql_fallback(planner_body, "Hermes runtime failure"):
+            print(answer)
+            return
         print(_user_facing_fallback())
         return
 

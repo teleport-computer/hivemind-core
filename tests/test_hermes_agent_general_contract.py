@@ -174,6 +174,127 @@ def test_query_agent_redirects_ai_agent_stdout_diagnostics(monkeypatch, capsys):
     assert "Response truncated" in captured.err
 
 
+def test_query_agent_runtime_failure_uses_scoped_sql_fallback(
+    monkeypatch,
+    capsys,
+):
+    monkeypatch.setenv(
+        "QUERY_PROMPT",
+        "Which day had the highest number of watches? Return day and count only.",
+    )
+    monkeypatch.setenv(
+        "SCOPE_FN_SOURCE",
+        "def scope(sql, params, rows):\n"
+        "    return {\"allow\": True, \"rows\": rows}\n",
+    )
+    mod, _calls = _load_agent(
+        monkeypatch,
+        "agents/default-query-hermes/agent.py",
+        "default_query_hermes_direct_sql_fallback_contract_test",
+        response="Error code: 429 - {'detail': 'Budget exhausted'}",
+    )
+
+    bridge_calls = []
+
+    def fake_post_json(path, payload, *, timeout=90.0):
+        bridge_calls.append((path, payload, timeout))
+        if path == "/tools/get_schema":
+            return {
+                "result": json.dumps(
+                    [
+                        {
+                            "table_name": "events",
+                            "column_name": "watched_at",
+                            "data_type": "timestamp",
+                        }
+                    ]
+                )
+            }
+        if path == "/v1/chat/completions":
+            user_message = payload["messages"][1]["content"]
+            assert "def scope(sql, params, rows)" in user_message
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "content": json.dumps(
+                                {
+                                    "sql": (
+                                        "SELECT DATE(watched_at) AS day, "
+                                        "COUNT(*)::int AS count FROM events "
+                                        "GROUP BY 1 ORDER BY 2 DESC LIMIT 1"
+                                    ),
+                                    "params": [],
+                                }
+                            )
+                        }
+                    }
+                ]
+            }
+        if path == "/tools/execute_sql":
+            assert payload["arguments"]["sql"].lower().startswith("select ")
+            return {"result": json.dumps([{"day": "2026-04-15", "count": 482237}])}
+        raise AssertionError(f"unexpected bridge path {path}")
+
+    monkeypatch.setattr(mod, "_post_json", fake_post_json)
+
+    mod.main()
+
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == [{"day": "2026-04-15", "count": 482237}]
+    assert "Direct SQL fallback used" in captured.err
+    assert [call[0] for call in bridge_calls] == [
+        "/tools/get_schema",
+        "/v1/chat/completions",
+        "/tools/execute_sql",
+    ]
+
+
+def test_query_agent_scoped_sql_fallback_rejects_mutating_sql(
+    monkeypatch,
+    capsys,
+):
+    monkeypatch.setenv("QUERY_PROMPT", "How many records are present?")
+    monkeypatch.setenv(
+        "SCOPE_FN_SOURCE",
+        "def scope(sql, params, rows):\n"
+        "    return {\"allow\": True, \"rows\": rows}\n",
+    )
+    mod, _calls = _load_agent(
+        monkeypatch,
+        "agents/default-query-hermes/agent.py",
+        "default_query_hermes_direct_sql_rejects_mutation_contract_test",
+        response="InternalServerError: provider failed",
+    )
+
+    def fake_post_json(path, payload, *, timeout=90.0):
+        if path == "/tools/get_schema":
+            return {"result": json.dumps([])}
+        if path == "/v1/chat/completions":
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "content": json.dumps(
+                                {"sql": "DELETE FROM events", "params": []}
+                            )
+                        }
+                    }
+                ]
+            }
+        if path == "/tools/execute_sql":
+            raise AssertionError("mutating SQL must not be executed")
+        raise AssertionError(f"unexpected bridge path {path}")
+
+    monkeypatch.setattr(mod, "_post_json", fake_post_json)
+
+    mod.main()
+
+    captured = capsys.readouterr()
+    assert "I wasn't able to produce an answer" in captured.out
+    assert "Direct SQL fallback failed" in captured.err
+
+
 def test_scope_agent_uses_ai_agent_for_aggregate_policy(monkeypatch, capsys):
     scope_fn = (
         "def scope(sql, params, rows):\n"
