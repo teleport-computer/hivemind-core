@@ -36,8 +36,7 @@ def pg_db():
 def test_table(pg_db):
     """Create a test table and clean up after."""
     pg_db.execute_commit(
-        "CREATE TABLE IF NOT EXISTS test_tools_data "
-        "(id SERIAL PRIMARY KEY, name TEXT, team TEXT)"
+        "CREATE TABLE IF NOT EXISTS test_tools_data (id SERIAL PRIMARY KEY, name TEXT, team TEXT)"
     )
     pg_db.execute_commit("DELETE FROM test_tools_data")
     pg_db.execute_commit(
@@ -69,9 +68,7 @@ class TestIsSelectOnly:
         assert _is_select_only("SELECT * FROM users WHERE id = 1") is True
 
     def test_select_with_join(self):
-        assert _is_select_only(
-            "SELECT a.id, b.name FROM a JOIN b ON a.id = b.a_id"
-        ) is True
+        assert _is_select_only("SELECT a.id, b.name FROM a JOIN b ON a.id = b.a_id") is True
 
     def test_insert_rejected(self):
         assert _is_select_only("INSERT INTO t (x) VALUES (1)") is False
@@ -122,9 +119,7 @@ class TestIsSelectOnlyForbiddenFuncs:
     'evil', false)`` reroutes every subsequent table lookup."""
 
     def test_set_config_blocked(self):
-        assert _is_select_only(
-            "SELECT set_config('search_path', 'public_shadow', false)"
-        ) is False
+        assert _is_select_only("SELECT set_config('search_path', 'public_shadow', false)") is False
 
     def test_set_role_blocked(self):
         assert _is_select_only("SELECT set_role('admin')") is False
@@ -133,19 +128,13 @@ class TestIsSelectOnlyForbiddenFuncs:
         assert _is_select_only("SELECT pg_sleep(3600)") is False
 
     def test_pg_sleep_inside_where_blocked(self):
-        assert _is_select_only(
-            "SELECT id FROM users WHERE pg_sleep(10) IS NULL"
-        ) is False
+        assert _is_select_only("SELECT id FROM users WHERE pg_sleep(10) IS NULL") is False
 
     def test_pg_sleep_inside_cte_blocked(self):
-        assert _is_select_only(
-            "WITH s AS (SELECT pg_sleep(1)) SELECT * FROM users"
-        ) is False
+        assert _is_select_only("WITH s AS (SELECT pg_sleep(1)) SELECT * FROM users") is False
 
     def test_dblink_blocked(self):
-        assert _is_select_only(
-            "SELECT * FROM dblink('host=evil', 'SELECT 1') AS t(c int)"
-        ) is False
+        assert _is_select_only("SELECT * FROM dblink('host=evil', 'SELECT 1') AS t(c int)") is False
 
     def test_pg_read_file_blocked(self):
         assert _is_select_only("SELECT pg_read_file('/etc/passwd')") is False
@@ -168,16 +157,22 @@ class TestScopedRequiresScopeFn:
     def test_scoped_with_no_scope_fn_raises(self):
         # FakeDB sufficient — error must surface before any DB interaction.
         class FakeDB:
-            def execute(self, sql, params=None): return []
-            def execute_commit(self, sql, params=None): return 0
+            def execute(self, sql, params=None):
+                return []
+
+            def execute_commit(self, sql, params=None):
+                return 0
 
         with pytest.raises(ValueError, match="SCOPED"):
             build_sql_tools(FakeDB(), AccessLevel.SCOPED, scope_fn=None)
 
     def test_scoped_with_scope_fn_constructs(self):
         class FakeDB:
-            def execute(self, sql, params=None): return []
-            def execute_commit(self, sql, params=None): return 0
+            def execute(self, sql, params=None):
+                return []
+
+            def execute_commit(self, sql, params=None):
+                return 0
 
         fn = lambda sql, params, rows: {"allow": True, "rows": rows}
         tools = build_sql_tools(FakeDB(), AccessLevel.SCOPED, scope_fn=fn)
@@ -186,8 +181,11 @@ class TestScopedRequiresScopeFn:
     def test_full_read_with_no_scope_fn_constructs(self):
         # FULL_READ never invokes scope_fn; missing one is fine.
         class FakeDB:
-            def execute(self, sql, params=None): return []
-            def execute_commit(self, sql, params=None): return 0
+            def execute(self, sql, params=None):
+                return []
+
+            def execute_commit(self, sql, params=None):
+                return 0
 
         tools = build_sql_tools(FakeDB(), AccessLevel.FULL_READ, scope_fn=None)
         assert len(tools) == 2
@@ -212,9 +210,7 @@ class TestReferencesInternalTables:
     def test_in_where_clause_string_literal(self):
         # String literal mentioning internal table is NOT an actual table reference
         assert (
-            _references_internal_tables(
-                "SELECT * FROM t WHERE table_name = '_hivemind_agents'"
-            )
+            _references_internal_tables("SELECT * FROM t WHERE table_name = '_hivemind_agents'")
             is False
         )
 
@@ -281,23 +277,67 @@ class TestAccessLevelFullRead:
 
     def test_select_works(self, pg_db, test_table):
         tools = self._get_tools(pg_db)
-        result = json.loads(tools["execute_sql"].handler("SELECT name FROM test_tools_data ORDER BY name"))
+        result = json.loads(
+            tools["execute_sql"].handler("SELECT name FROM test_tools_data ORDER BY name")
+        )
         assert len(result) == 2
         assert result[0]["name"] == "alice"
+
+    def test_stray_params_are_dropped_when_sql_has_no_placeholders(self):
+        class FakeDB:
+            def __init__(self):
+                self.calls = []
+
+            def execute(self, sql, params=None):
+                self.calls.append((sql, params))
+                return [{"ok": True}]
+
+            def get_schema(self, exclude_internal=True):
+                return []
+
+        db = FakeDB()
+        tools = build_sql_tools(db, AccessLevel.FULL_READ)
+        t = {t.name: t for t in tools}
+
+        result = json.loads(t["execute_sql"].handler("SELECT 1", ["unused"]))
+
+        assert result == [{"ok": True}]
+        assert db.calls == [("SELECT 1", [])]
+
+    def test_params_are_preserved_when_sql_has_placeholders(self):
+        class FakeDB:
+            def __init__(self):
+                self.calls = []
+
+            def execute(self, sql, params=None):
+                self.calls.append((sql, params))
+                return [{"ok": True}]
+
+            def get_schema(self, exclude_internal=True):
+                return []
+
+        db = FakeDB()
+        tools = build_sql_tools(db, AccessLevel.FULL_READ)
+        t = {t.name: t for t in tools}
+
+        result = json.loads(t["execute_sql"].handler("SELECT %s", ["kept"]))
+
+        assert result == [{"ok": True}]
+        assert db.calls == [("SELECT %s", ["kept"])]
 
     def test_insert_blocked(self, pg_db, test_table):
         tools = self._get_tools(pg_db)
         result = json.loads(
-            tools["execute_sql"].handler("INSERT INTO test_tools_data (name, team) VALUES ('eve', 'gamma')")
+            tools["execute_sql"].handler(
+                "INSERT INTO test_tools_data (name, team) VALUES ('eve', 'gamma')"
+            )
         )
         assert "error" in result
         assert "SELECT" in result["error"]
 
     def test_internal_table_blocked(self, pg_db):
         tools = self._get_tools(pg_db)
-        result = json.loads(
-            tools["execute_sql"].handler("SELECT * FROM _hivemind_agents")
-        )
+        result = json.loads(tools["execute_sql"].handler("SELECT * FROM _hivemind_agents"))
         assert "error" in result
         # Opaque rejection — _validate_table_allowlist returns "query rejected"
         # regardless of why, so an attacker can't probe what's behind the wall.
@@ -381,15 +421,20 @@ class TestAccessLevelScoped:
 
 class TestAgentFileTools:
     def test_list_files_with_files(self, pg_db, agent_store):
-        agent_store.create(AgentConfig(
-            agent_id="file-test-agent",
-            name="File Test",
-            image="img:test",
-        ))
-        agent_store.save_files("file-test-agent", {
-            "agent.py": "print('hello')",
-            "Dockerfile": "FROM python:3.12",
-        })
+        agent_store.create(
+            AgentConfig(
+                agent_id="file-test-agent",
+                name="File Test",
+                image="img:test",
+            )
+        )
+        agent_store.save_files(
+            "file-test-agent",
+            {
+                "agent.py": "print('hello')",
+                "Dockerfile": "FROM python:3.12",
+            },
+        )
         try:
             tools = build_agent_file_tools(agent_store, "file-test-agent")
             t = {t.name: t for t in tools}
@@ -400,11 +445,13 @@ class TestAgentFileTools:
             agent_store.delete("file-test-agent")
 
     def test_list_files_empty(self, pg_db, agent_store):
-        agent_store.create(AgentConfig(
-            agent_id="empty-file-agent",
-            name="Empty",
-            image="img:test",
-        ))
+        agent_store.create(
+            AgentConfig(
+                agent_id="empty-file-agent",
+                name="Empty",
+                image="img:test",
+            )
+        )
         try:
             tools = build_agent_file_tools(agent_store, "empty-file-agent")
             t = {t.name: t for t in tools}
@@ -414,11 +461,13 @@ class TestAgentFileTools:
             agent_store.delete("empty-file-agent")
 
     def test_read_file_exists(self, pg_db, agent_store):
-        agent_store.create(AgentConfig(
-            agent_id="read-test-agent",
-            name="Read Test",
-            image="img:test",
-        ))
+        agent_store.create(
+            AgentConfig(
+                agent_id="read-test-agent",
+                name="Read Test",
+                image="img:test",
+            )
+        )
         agent_store.save_files("read-test-agent", {"agent.py": "print('hello')"})
         try:
             tools = build_agent_file_tools(agent_store, "read-test-agent")
@@ -429,11 +478,13 @@ class TestAgentFileTools:
             agent_store.delete("read-test-agent")
 
     def test_read_file_not_found(self, pg_db, agent_store):
-        agent_store.create(AgentConfig(
-            agent_id="read-miss-agent",
-            name="Read Miss",
-            image="img:test",
-        ))
+        agent_store.create(
+            AgentConfig(
+                agent_id="read-miss-agent",
+                name="Read Miss",
+                image="img:test",
+            )
+        )
         try:
             tools = build_agent_file_tools(agent_store, "read-miss-agent")
             t = {t.name: t for t in tools}

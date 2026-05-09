@@ -50,13 +50,9 @@ def _check_bridge_env() -> bool:
 async def _post(path: str, payload: dict[str, Any]) -> dict[str, Any]:
     """POST JSON to the bridge; raise on non-2xx with a short body excerpt."""
     async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
-        resp = await client.post(
-            f"{_bridge_url()}{path}", json=payload, headers=_auth_headers()
-        )
+        resp = await client.post(f"{_bridge_url()}{path}", json=payload, headers=_auth_headers())
         if resp.status_code >= 300:
-            raise RuntimeError(
-                f"bridge {path} returned {resp.status_code}: {resp.text[:500]}"
-            )
+            raise RuntimeError(f"bridge {path} returned {resp.status_code}: {resp.text[:500]}")
         return resp.json()
 
 
@@ -65,9 +61,7 @@ async def _get(path: str) -> dict[str, Any]:
     async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
         resp = await client.get(f"{_bridge_url()}{path}", headers=_auth_headers())
         if resp.status_code >= 300:
-            raise RuntimeError(
-                f"bridge {path} returned {resp.status_code}: {resp.text[:500]}"
-            )
+            raise RuntimeError(f"bridge {path} returned {resp.status_code}: {resp.text[:500]}")
         return resp.json()
 
 
@@ -86,7 +80,8 @@ EXECUTE_SQL_SCHEMA = {
     "description": (
         "Execute a SQL query against the hivemind database. Returns JSON "
         "rows for SELECT, or {rowcount: N} for writes. Use %s for "
-        "parameter placeholders."
+        "parameter placeholders; pass params=[] when the SQL has no %s "
+        "placeholders."
     ),
     "parameters": {
         "type": "object",
@@ -95,7 +90,7 @@ EXECUTE_SQL_SCHEMA = {
             "params": {
                 "type": "array",
                 "items": {},
-                "description": "Query parameters for %s placeholders.",
+                "description": "Query parameters for %s placeholders; use [] when there are none.",
                 "default": [],
             },
         },
@@ -131,8 +126,7 @@ VERIFY_SCOPE_FN_SCHEMA = {
             "tests": {
                 "type": "string",
                 "description": (
-                    "JSON array of test cases. Each: "
-                    "{sql, params, rows, expect_allow?, label?}."
+                    "JSON array of test cases. Each: {sql, params, rows, expect_allow?, label?}."
                 ),
             },
         },
@@ -225,8 +219,7 @@ READ_QUERY_AGENT_FILE_SCHEMA = {
             "path": {
                 "type": "string",
                 "description": (
-                    f"Relative path under {QUERY_AGENT_MOUNT} "
-                    "(e.g. 'agent.py', 'query-prompt.md')."
+                    f"Relative path under {QUERY_AGENT_MOUNT} (e.g. 'agent.py', 'query-prompt.md')."
                 ),
             },
         },
@@ -269,9 +262,7 @@ async def verify_scope_fn_handler(args: dict[str, Any], **_kw) -> str:
         tests = tests_raw
     else:
         tests = []
-    data = await _post(
-        "/sandbox/verify_scope_fn", {"source": source, "tests": tests}
-    )
+    data = await _post("/sandbox/verify_scope_fn", {"source": source, "tests": tests})
     return json.dumps(data)
 
 
@@ -321,8 +312,7 @@ async def read_query_agent_file_handler(args: dict[str, Any], **_kw) -> str:
         return "Error: path must be relative (no '..' or absolute paths)"
     try:
         data = await _get(
-            f"/sandbox/agents/{quote(agent_id, safe='')}/files/"
-            f"{quote(raw_path, safe='')}"
+            f"/sandbox/agents/{quote(agent_id, safe='')}/files/{quote(raw_path, safe='')}"
         )
         content = data.get("content")
         if content is None:
@@ -381,11 +371,17 @@ import logging as _logging
 _log = _logging.getLogger(__name__)
 
 _ROLE_TOOLS: dict[str, set[str]] = {
-    "query":    {"execute_sql", "get_schema"},
-    "index":    {"execute_sql", "get_schema"},
-    "scope":    {"execute_sql", "get_schema", "verify_scope_fn",
-                 "simulate_query", "simulate_multi",
-                 "list_query_agent_files", "read_query_agent_file"},
+    "query": {"execute_sql", "get_schema"},
+    "index": {"execute_sql", "get_schema"},
+    "scope": {
+        "execute_sql",
+        "get_schema",
+        "verify_scope_fn",
+        "simulate_query",
+        "simulate_multi",
+        "list_query_agent_files",
+        "read_query_agent_file",
+    },
     "mediator": set(),
 }
 
@@ -395,7 +391,8 @@ if _allowed is None:
     _log.warning(
         "HIVEMIND_AGENT_ROLE=%r is unset or unknown; registering NO tools. "
         "Set it to one of %s in the sandbox runner.",
-        _role, sorted(_ROLE_TOOLS),
+        _role,
+        sorted(_ROLE_TOOLS),
     )
     _allowed = set()
 
@@ -408,13 +405,13 @@ _REG_KW = dict(
 )
 
 _ALL_TOOLS = (
-    ("execute_sql",            EXECUTE_SQL_SCHEMA,            execute_sql_handler),
-    ("get_schema",             GET_SCHEMA_SCHEMA,             get_schema_handler),
-    ("verify_scope_fn",        VERIFY_SCOPE_FN_SCHEMA,        verify_scope_fn_handler),
-    ("simulate_query",         SIMULATE_QUERY_SCHEMA,         simulate_query_handler),
-    ("simulate_multi",         SIMULATE_MULTI_SCHEMA,         simulate_multi_handler),
+    ("execute_sql", EXECUTE_SQL_SCHEMA, execute_sql_handler),
+    ("get_schema", GET_SCHEMA_SCHEMA, get_schema_handler),
+    ("verify_scope_fn", VERIFY_SCOPE_FN_SCHEMA, verify_scope_fn_handler),
+    ("simulate_query", SIMULATE_QUERY_SCHEMA, simulate_query_handler),
+    ("simulate_multi", SIMULATE_MULTI_SCHEMA, simulate_multi_handler),
     ("list_query_agent_files", LIST_QUERY_AGENT_FILES_SCHEMA, list_query_agent_files_handler),
-    ("read_query_agent_file",  READ_QUERY_AGENT_FILE_SCHEMA,  read_query_agent_file_handler),
+    ("read_query_agent_file", READ_QUERY_AGENT_FILE_SCHEMA, read_query_agent_file_handler),
 )
 
 for _name, _schema, _handler in _ALL_TOOLS:

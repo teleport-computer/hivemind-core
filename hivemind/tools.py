@@ -26,6 +26,13 @@ logger = logging.getLogger(__name__)
 MAX_RESULT_ROWS = 10_000
 
 
+def _normalize_sql_params(sql: str, params: list | tuple | None) -> list:
+    safe_params = list(params or [])
+    if safe_params and "%s" not in str(sql):
+        return []
+    return safe_params
+
+
 @dataclass
 class Tool:
     name: str
@@ -61,26 +68,28 @@ class AccessLevel(enum.Enum):
 # Names are matched case-insensitively against the function's leaf name; we
 # do not try to be schema-aware because a bare `set_config(...)` resolves to
 # `pg_catalog.set_config` regardless of search_path.
-_FORBIDDEN_SQL_FUNCS = frozenset({
-    "set_config",
-    "set_role",
-    "current_setting",  # not directly dangerous, but pairs with set_config
-    "pg_sleep",
-    "pg_sleep_for",
-    "pg_sleep_until",
-    "dblink",
-    "dblink_exec",
-    "dblink_connect",
-    "dblink_disconnect",
-    "lo_export",
-    "lo_import",
-    "pg_read_file",
-    "pg_read_binary_file",
-    "pg_ls_dir",
-    "pg_stat_file",
-    "copy_to_program",
-    "copy_from_program",
-})
+_FORBIDDEN_SQL_FUNCS = frozenset(
+    {
+        "set_config",
+        "set_role",
+        "current_setting",  # not directly dangerous, but pairs with set_config
+        "pg_sleep",
+        "pg_sleep_for",
+        "pg_sleep_until",
+        "dblink",
+        "dblink_exec",
+        "dblink_connect",
+        "dblink_disconnect",
+        "lo_export",
+        "lo_import",
+        "pg_read_file",
+        "pg_read_binary_file",
+        "pg_ls_dir",
+        "pg_stat_file",
+        "copy_to_program",
+        "copy_from_program",
+    }
+)
 
 
 def _references_forbidden_funcs(stmt) -> bool:
@@ -123,9 +132,7 @@ def _is_select_only(sql: str) -> bool:
     import sqlglot
 
     try:
-        statements = sqlglot.parse(
-            sql, dialect="postgres", error_level=sqlglot.ErrorLevel.IGNORE
-        )
+        statements = sqlglot.parse(sql, dialect="postgres", error_level=sqlglot.ErrorLevel.IGNORE)
     except sqlglot.errors.ParseError:
         return False
 
@@ -133,8 +140,12 @@ def _is_select_only(sql: str) -> bool:
         return False
 
     _DANGEROUS = (
-        sqlglot.exp.Delete, sqlglot.exp.Update, sqlglot.exp.Insert,
-        sqlglot.exp.Drop, sqlglot.exp.Create, sqlglot.exp.Alter,
+        sqlglot.exp.Delete,
+        sqlglot.exp.Update,
+        sqlglot.exp.Insert,
+        sqlglot.exp.Drop,
+        sqlglot.exp.Create,
+        sqlglot.exp.Alter,
         sqlglot.exp.Command,
     )
 
@@ -174,9 +185,7 @@ def _references_internal_tables(sql: str) -> bool:
     import sqlglot
 
     try:
-        statements = sqlglot.parse(
-            sql, dialect="postgres", error_level=sqlglot.ErrorLevel.WARN
-        )
+        statements = sqlglot.parse(sql, dialect="postgres", error_level=sqlglot.ErrorLevel.WARN)
     except Exception:
         statements = None
 
@@ -199,11 +208,13 @@ def _references_internal_tables(sql: str) -> bool:
 
 # Schemas that catalog the entire database — would let an agent enumerate every
 # table that exists, including ones outside its allowlist. Block all references.
-_HIDDEN_SCHEMAS: frozenset[str] = frozenset({
-    "information_schema",
-    "pg_catalog",
-    "pg_toast",
-})
+_HIDDEN_SCHEMAS: frozenset[str] = frozenset(
+    {
+        "information_schema",
+        "pg_catalog",
+        "pg_toast",
+    }
+)
 
 # Table-name prefixes that mark Hivemind's control-plane and tenant-DB internals.
 # An agent on a sandboxed tenant DB shouldn't see any of these even by name.
@@ -247,7 +258,9 @@ def _validate_table_allowlist(
 
     try:
         statements = sqlglot.parse(
-            sql, dialect="postgres", error_level=sqlglot.ErrorLevel.WARN,
+            sql,
+            dialect="postgres",
+            error_level=sqlglot.ErrorLevel.WARN,
         )
     except Exception:
         return "query rejected (could not parse)"
@@ -333,7 +346,7 @@ def build_sql_tools(
         )
 
     def execute_sql(sql: str, params: list | None = None) -> str:
-        safe_params = params or []
+        safe_params = _normalize_sql_params(sql, params)
 
         # Per-room allowlist + system-table block. allowed_tables is None for
         # legacy rooms whose manifests don't carry the field (we keep the old
@@ -343,7 +356,9 @@ def build_sql_tools(
         if violation:
             logger.warning(
                 "tool execute_sql rejected (access=%s, allowed=%s): %s",
-                access.value, allowed_tables, sql,
+                access.value,
+                allowed_tables,
+                sql,
             )
             return json.dumps({"error": violation})
 
@@ -377,9 +392,7 @@ def build_sql_tools(
                 logger.debug("Scope function error: %s", e)
                 return json.dumps({"error": "Query denied by scope function"})
             if not result.get("allow", False):
-                return json.dumps(
-                    {"error": result.get("error", "Query denied by scope function")}
-                )
+                return json.dumps({"error": result.get("error", "Query denied by scope function")})
             rows = result.get("rows") or []
 
         return _serialize_rows(rows)
@@ -394,10 +407,7 @@ def build_sql_tools(
             # old "everything except _hivemind_*" view.
             if allowed_tables is not None:
                 allow = {t.strip().lower() for t in allowed_tables if t}
-                schema = [
-                    r for r in schema
-                    if str(r.get("table_name", "")).lower() in allow
-                ]
+                schema = [r for r in schema if str(r.get("table_name", "")).lower() in allow]
             return json.dumps(schema, default=str)
         except Exception as e:
             return json.dumps({"error": str(e)})
@@ -409,7 +419,8 @@ def build_sql_tools(
                 "Execute a SQL query against the database. "
                 "For SELECT queries, returns a JSON array of row objects. "
                 "For write queries (INSERT/UPDATE/DELETE), returns {rowcount: N}. "
-                "Use parameterized queries with %s placeholders."
+                "Use parameterized queries with %s placeholders; pass params=[] "
+                "when the SQL has no placeholders."
             ),
             parameters={
                 "type": "object",
@@ -421,7 +432,7 @@ def build_sql_tools(
                     "params": {
                         "type": "array",
                         "items": {},
-                        "description": "Query parameters (optional)",
+                        "description": "Query parameters for %s placeholders; use [] when there are none.",
                         "default": [],
                     },
                 },
@@ -566,11 +577,13 @@ def build_agent_file_tools(agent_store, query_agent_id: str) -> list[Tool]:
     def list_query_agent_files() -> str:
         files = agent_store.list_file_paths(query_agent_id)
         if not files:
-            return json.dumps({
-                "files": [],
-                "note": "No source files extracted for this agent. "
-                "The image may contain only compiled binaries.",
-            })
+            return json.dumps(
+                {
+                    "files": [],
+                    "note": "No source files extracted for this agent. "
+                    "The image may contain only compiled binaries.",
+                }
+            )
         return json.dumps({"files": files})
 
     def read_query_agent_file(file_path: str) -> str:
@@ -606,8 +619,7 @@ def build_agent_file_tools(agent_store, query_agent_id: str) -> list[Tool]:
         Tool(
             name="read_query_agent_file",
             description=(
-                "Read the contents of a specific source file from the query agent's "
-                "Docker image."
+                "Read the contents of a specific source file from the query agent's Docker image."
             ),
             parameters={
                 "type": "object",

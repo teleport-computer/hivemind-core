@@ -10,6 +10,7 @@ It speaks JSON-RPC 2.0 line-delimited on stdin/stdout, per the MCP spec.
 
 Run with: BRIDGE_URL=... SESSION_TOKEN=... python -m hivemind.mcp_stdio_proxy
 """
+
 from __future__ import annotations
 
 import json
@@ -36,8 +37,7 @@ TOOLS: list[dict[str, Any]] = [
     {
         "name": "get_schema",
         "description": (
-            "Return the user-table schema as JSON. Use first, before any "
-            "execute_sql call."
+            "Return the user-table schema as JSON. Use first, before any execute_sql call."
         ),
         "inputSchema": {"type": "object", "properties": {}, "required": []},
     },
@@ -45,7 +45,8 @@ TOOLS: list[dict[str, Any]] = [
         "name": "execute_sql",
         "description": (
             "Run a read-only SELECT on the user tables. Returns list-of-dicts. "
-            "Reject dunder / _hivemind_ paths at the host layer."
+            "Reject dunder / _hivemind_ paths at the host layer. Pass params=[] "
+            "when the SQL has no %s placeholders."
         ),
         "inputSchema": {
             "type": "object",
@@ -104,6 +105,7 @@ TOOLS: list[dict[str, Any]] = [
 # HTTP dispatch to the bridge.
 # ---------------------------------------------------------------------------
 
+
 def _http_post(path: str, body: dict) -> dict:
     req = urllib.request.Request(
         f"{BRIDGE_URL}{path}",
@@ -156,6 +158,7 @@ def _dispatch_tool(name: str, arguments: dict) -> str:
 # ---------------------------------------------------------------------------
 # JSON-RPC 2.0 server loop.
 # ---------------------------------------------------------------------------
+
 
 def _send(msg: dict) -> None:
     line = json.dumps(msg)
@@ -212,13 +215,10 @@ def _handle(msg: dict) -> dict | None:
 
 def main() -> None:
     if not BRIDGE_URL or not SESSION_TOKEN:
-        sys.stderr.write(
-            "mcp_stdio_proxy: BRIDGE_URL and SESSION_TOKEN must be set\n"
-        )
+        sys.stderr.write("mcp_stdio_proxy: BRIDGE_URL and SESSION_TOKEN must be set\n")
         sys.exit(2)
     sys.stderr.write(
-        f"mcp_stdio_proxy: ready, bridge={BRIDGE_URL}, "
-        f"query_agent={QUERY_AGENT_ID!r}\n"
+        f"mcp_stdio_proxy: ready, bridge={BRIDGE_URL}, query_agent={QUERY_AGENT_ID!r}\n"
     )
     sys.stderr.flush()
     for line in sys.stdin:
