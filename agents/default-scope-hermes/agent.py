@@ -51,6 +51,13 @@ MEDIATION_POLICY is present, it is authoritative: enforce exactly that policy,
 with no extra categories and no missing categories. If no policy is present,
 use first-principles data minimization.
 
+Utility matters. Do not add unstated granularity rules. If the policy permits
+aggregate statistics, preserve compliant grouped or bucketed result rows such
+as counts, sums, averages, rankings, or trends unless the policy explicitly
+forbids that grouping key or field. Empty rows are appropriate only when the
+requested result shape violates the policy or when every returned row violates
+the policy.
+
 Tools:
 - get_schema(): inspect tables, columns, and types.
 - execute_sql(sql, params): sample or compute facts needed for the policy.
@@ -68,7 +75,9 @@ Process:
    frontier: pass through, filter rows, drop or replace fields, derive safer
    fields, summarize, or return no rows. Preserve allowed information when the
    row shape already fits the policy.
-4. Call verify_scope_fn on the exact function you will emit.
+4. Call verify_scope_fn on the exact function you will emit. Include tests for
+   both an allowed result shape and a forbidden result shape when the policy
+   distinguishes them.
 
 Function contract:
 - Signature exactly `def scope(sql, params, rows):`.

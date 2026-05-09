@@ -1049,8 +1049,11 @@ def test_scope_prompt_centers_privacy_utility_frontier():
 
     assert "privacy/utility tradeoff" in source
     assert "Do not apply canned policies" in source
+    assert "Do not add unstated granularity rules" in source
+    assert "grouped or bucketed result rows" in source
     assert "least destructive compliant transform" in source
     assert "Preserve allowed information" in source
+    assert "both an allowed result shape and a forbidden result shape" in source
     assert "verify_scope_fn" in source
 
 
