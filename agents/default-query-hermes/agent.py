@@ -103,6 +103,18 @@ _HERMES_FAILURE_MARKERS = (
     "maximum iterations",
     "temporarily unavailable due to rate limiting",
 )
+_RETRIABLE_HERMES_FAILURE_MARKERS = (
+    "response truncated",
+    "requesting continuation",
+    "iteration budget exhausted",
+    "maximum iterations",
+)
+_PROVIDER_CAPACITY_FAILURE_MARKERS = (
+    "budget exhausted",
+    "error code: 429",
+    "http 429",
+    "temporarily unavailable due to rate limiting",
+)
 _UNRESOLVED_RESPONSE_MARKERS = (
     "would you like me to",
     "should i try",
@@ -191,6 +203,13 @@ _DATE_BUCKET_TERMS = ("day", "date", "daily", "per day", "by day")
 def _looks_like_runtime_failure(text: str) -> bool:
     lower = (text or "").lower()
     return any(marker in lower for marker in _HERMES_FAILURE_MARKERS)
+
+
+def _looks_like_retriable_runtime_failure(text: str) -> bool:
+    lower = (text or "").lower()
+    if any(marker in lower for marker in _PROVIDER_CAPACITY_FAILURE_MARKERS):
+        return False
+    return any(marker in lower for marker in _RETRIABLE_HERMES_FAILURE_MARKERS)
 
 
 def _looks_like_unresolved_response(text: str) -> bool:
@@ -643,6 +662,14 @@ def main() -> None:
         return
     if _looks_like_runtime_failure(response):
         print(f"Hermes runtime failure from AIAgent: {response[:500]}", file=sys.stderr)
+        if _looks_like_retriable_runtime_failure(response):
+            if answer := _retry_ai_agent_if_fallback_disabled(
+                body,
+                reason="Hermes runtime failure",
+                previous_response=response,
+            ):
+                print(answer)
+                return
         if answer := _try_direct_sql_fallback(planner_body, "Hermes runtime failure"):
             print(answer)
             return

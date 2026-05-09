@@ -226,6 +226,29 @@ def test_query_agent_retries_empty_response_without_direct_sql_fallback(
     assert "previous attempt did not produce a usable final answer" in calls["chats"][1]
 
 
+def test_query_agent_retries_retriable_runtime_failure_without_direct_sql_fallback(
+    monkeypatch,
+    capsys,
+):
+    monkeypatch.setenv("QUERY_PROMPT", "Which day had the most rows?")
+    mod, calls = _load_agent(
+        monkeypatch,
+        "agents/default-query-hermes/agent.py",
+        "default_query_hermes_retry_runtime_contract_test",
+        response=[
+            "Response truncated. I reached the maximum iterations.",
+            '[{"watch_day": "2026-04-15", "videos": 482237}]',
+        ],
+    )
+
+    mod.main()
+
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == [{"watch_day": "2026-04-15", "videos": 482237}]
+    assert len(calls["chats"]) == 2
+    assert "Hermes runtime failure" in calls["chats"][1]
+
+
 def test_query_agent_runtime_failure_uses_scoped_sql_fallback(
     monkeypatch,
     capsys,
@@ -981,6 +1004,83 @@ def test_scope_agent_aggregate_fallback_disabled_by_default(monkeypatch, capsys)
         [{"bucket": "2026-04-15", "total": 482237}],
     )
     assert result == {"allow": True, "rows": []}
+
+
+def test_scope_agent_retries_unparseable_response_before_empty_fallback(
+    monkeypatch,
+    capsys,
+):
+    passthrough_scope_fn = (
+        'def scope(sql, params, rows):\n    return {"allow": True, "rows": rows}\n'
+    )
+    monkeypatch.setenv(
+        "QUERY_PROMPT",
+        "Which bucket has the highest count? Return bucket and total only.",
+    )
+    monkeypatch.setenv(
+        "POLICY_CONTEXT",
+        "Allowed: aggregate statistics and summaries. Not allowed: raw row dumps.",
+    )
+    mod, calls = _load_agent(
+        monkeypatch,
+        "agents/default-scope-hermes/agent.py",
+        "default_scope_hermes_retry_unparseable_contract_test",
+        response=["not json", json.dumps({"scope_fn": passthrough_scope_fn})],
+    )
+
+    mod.main()
+
+    emitted = json.loads(capsys.readouterr().out)
+    fn = compile_scope_fn(emitted["scope_fn"])
+    result = fn(
+        "SELECT bucket, COUNT(*)::int AS total FROM events GROUP BY bucket",
+        [],
+        [{"bucket": "2026-04-15", "total": 482237}],
+    )
+    assert result["rows"] == [{"bucket": "2026-04-15", "total": 482237}]
+    assert len(calls["chats"]) == 2
+    assert "RECOVERY INSTRUCTION" in calls["chats"][1]
+
+
+def test_scope_agent_retries_static_empty_for_allowed_aggregate_without_fallback(
+    monkeypatch,
+    capsys,
+):
+    empty_scope_fn = 'def scope(sql, params, rows):\n    return {"allow": True, "rows": []}\n'
+    passthrough_scope_fn = (
+        'def scope(sql, params, rows):\n    return {"allow": True, "rows": rows}\n'
+    )
+    monkeypatch.setenv(
+        "QUERY_PROMPT",
+        "Which bucket has the highest count? Return bucket and total only.",
+    )
+    monkeypatch.setenv(
+        "POLICY_CONTEXT",
+        "Allowed: aggregate statistics and summaries. Not allowed: raw row dumps.",
+    )
+    mod, calls = _load_agent(
+        monkeypatch,
+        "agents/default-scope-hermes/agent.py",
+        "default_scope_hermes_retry_empty_aggregate_contract_test",
+        response=[
+            json.dumps({"scope_fn": empty_scope_fn}),
+            json.dumps({"scope_fn": passthrough_scope_fn}),
+        ],
+    )
+
+    mod.main()
+
+    captured = capsys.readouterr()
+    emitted = json.loads(captured.out)
+    fn = compile_scope_fn(emitted["scope_fn"])
+    result = fn(
+        "SELECT bucket, COUNT(*)::int AS total FROM events GROUP BY bucket",
+        [],
+        [{"bucket": "2026-04-15", "total": 482237}],
+    )
+    assert result["rows"] == [{"bucket": "2026-04-15", "total": 482237}]
+    assert "retrying" in captured.err
+    assert len(calls["chats"]) == 2
 
 
 def test_scope_agent_aggregate_fallback_does_not_release_raw_rows(monkeypatch, capsys):

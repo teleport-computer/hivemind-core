@@ -125,6 +125,7 @@ _AGGREGATE_FALLBACK_SCOPE_FN = (
     "                    safe.append(dict(row))\n"
     '    return {"allow": True, "rows": safe}\n'
 )
+_MAX_RETRY_CONTEXT_CHARS = 3000
 
 
 def _aggregate_fallback_is_policy_appropriate() -> bool:
@@ -176,6 +177,73 @@ def _fallback_scope_fn_source() -> str:
     if _ENABLE_AGGREGATE_FALLBACK and _aggregate_fallback_is_policy_appropriate():
         return _AGGREGATE_FALLBACK_SCOPE_FN
     return _EMPTY_FALLBACK_SCOPE_FN
+
+
+def _run_ai_agent(body: str) -> str:
+    base_url = os.environ["BRIDGE_URL"].rstrip("/") + "/v1"
+    api_key = os.environ["SESSION_TOKEN"]
+
+    agent = AIAgent(
+        base_url=base_url,
+        api_key=api_key,
+        provider="custom",
+        model=HIVEMIND_MODEL,
+        # Match agents/default-scope: hard cap 20, target emit by 10.
+        max_iterations=20,
+        enabled_toolsets=["hivemind"],
+        ephemeral_system_prompt=SYSTEM_PROMPT,
+        skip_context_files=True,
+        skip_memory=True,
+        quiet_mode=True,
+        save_trajectories=False,
+        max_tokens=2048,
+        reasoning_config=_NO_REASONING_CONFIG,
+        request_overrides=_NO_REASONING_OVERRIDES,
+    )
+    with redirect_stdout(sys.stderr):
+        return agent.chat(body) or ""
+
+
+def _retry_body(body: str, reason: str, previous_response: str) -> str:
+    previous = (previous_response or "").strip()
+    if len(previous) > _MAX_RETRY_CONTEXT_CHARS:
+        previous = previous[:_MAX_RETRY_CONTEXT_CHARS] + "\n[truncated]"
+    return (
+        f"{body}\n\n"
+        "RECOVERY INSTRUCTION:\n"
+        f"The previous scope attempt was not usable: {reason}.\n"
+        "Return only one compact JSON object with a short scope_fn string. "
+        "No markdown, no explanation, no audit report. If the policy permits "
+        "aggregate statistics, do not erase compliant grouped or bucketed "
+        "result rows unless the policy explicitly forbids the grouping key or "
+        "field. Still block raw row dumps and fields the policy forbids.\n\n"
+        f"PREVIOUS RESPONSE:\n{previous}"
+    )
+
+
+def _retry_scope_emit(body: str, *, reason: str, previous_response: str) -> dict | None:
+    try:
+        retry_response = _run_ai_agent(_retry_body(body, reason, previous_response))
+    except Exception as e:
+        print(f"scope agent retry error after {reason}: {e}", file=sys.stderr)
+        return None
+    parsed = _extract_json_emit(retry_response)
+    if parsed and isinstance(parsed.get("scope_fn"), str) and parsed["scope_fn"].strip():
+        if _aggregate_fallback_is_policy_appropriate() and _statically_erases_rows(
+            parsed["scope_fn"]
+        ):
+            print(
+                "scope agent retry still erased rows for allowed aggregate.",
+                file=sys.stderr,
+            )
+            return None
+        return parsed
+    print(
+        f"scope agent retry produced no parseable JSON after {reason}. "
+        f"raw={retry_response[:500]!r}",
+        file=sys.stderr,
+    )
+    return None
 
 
 def _extract_json_emit(text: str) -> dict | None:
@@ -283,30 +351,9 @@ def main() -> None:
     parts.append(f"QUESTION:\n{QUERY_PROMPT}")
     body = "\n\n".join(parts)
 
-    base_url = os.environ["BRIDGE_URL"].rstrip("/") + "/v1"
-    api_key = os.environ["SESSION_TOKEN"]
-
     response = ""
     try:
-        agent = AIAgent(
-            base_url=base_url,
-            api_key=api_key,
-            provider="custom",
-            model=HIVEMIND_MODEL,
-            # Match agents/default-scope: hard cap 20, target emit by 10.
-            max_iterations=20,
-            enabled_toolsets=["hivemind"],
-            ephemeral_system_prompt=SYSTEM_PROMPT,
-            skip_context_files=True,
-            skip_memory=True,
-            quiet_mode=True,
-            save_trajectories=False,
-            max_tokens=2048,
-            reasoning_config=_NO_REASONING_CONFIG,
-            request_overrides=_NO_REASONING_OVERRIDES,
-        )
-        with redirect_stdout(sys.stderr):
-            response = agent.chat(body) or ""
+        response = _run_ai_agent(body)
     except Exception as e:
         print(f"AIAgent error: {e}", file=sys.stderr)
 
@@ -324,12 +371,37 @@ def main() -> None:
             )
             print(json.dumps({"scope_fn": _AGGREGATE_FALLBACK_SCOPE_FN}))
             return
+        if (
+            not _ENABLE_AGGREGATE_FALLBACK
+            and _aggregate_fallback_is_policy_appropriate()
+            and _statically_erases_rows(parsed["scope_fn"])
+        ):
+            print(
+                "scope agent emitted static empty rows for allowed aggregate; retrying.",
+                file=sys.stderr,
+            )
+            retry = _retry_scope_emit(
+                body,
+                reason="static empty rows for policy-allowed aggregate",
+                previous_response=response,
+            )
+            if retry:
+                print(json.dumps({"scope_fn": retry["scope_fn"]}))
+                return
         # Re-emit canonically so the pipeline parses cleanly.
         print(json.dumps({"scope_fn": parsed["scope_fn"]}))
         return
 
     # Fail closed with no disclosure so the pipeline can complete rather
     # than HARD FAIL on bad JSON.
+    retry = _retry_scope_emit(
+        body,
+        reason="unparseable or truncated scope JSON",
+        previous_response=response,
+    )
+    if retry:
+        print(json.dumps({"scope_fn": retry["scope_fn"]}))
+        return
     print(
         f"scope agent produced no parseable JSON; using fallback. raw={response[:500]!r}",
         file=sys.stderr,
