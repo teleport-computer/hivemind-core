@@ -481,6 +481,7 @@ def _run_query_agent(body: str) -> str:
         content = (message.get("content") or "").strip()
         if not tool_calls:
             if content:
+                _maybe_upload_report_artifact(content)
                 return content
             break
         messages.append(_assistant_message_for_history(message))

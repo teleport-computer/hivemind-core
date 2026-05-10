@@ -329,6 +329,28 @@ def test_query_agent_forces_final_answer_after_tool_turn_cap_and_uploads_report(
     ]
 
 
+def test_query_agent_uploads_report_when_model_stops_before_tool_cap(
+    monkeypatch,
+    capsys,
+):
+    monkeypatch.setenv("QUERY_PROMPT", "Write a deep research report.")
+    report = "# Natural Stop Report\n\n" + ("finding evidence limitation implication " * 140)
+    mod, calls = _load_query_agent(
+        monkeypatch,
+        "default_query_hermes_natural_stop_artifact_contract_test",
+        chat_responses=[_chat_response(report)],
+    )
+
+    mod.main()
+
+    captured = capsys.readouterr()
+    assert captured.out.startswith("# Natural Stop Report")
+    assert len(calls["llm_payloads"]) == 1
+    assert calls["artifact_payloads"][0]["filename"] == "write_a_deep_research_report"
+    assert calls["artifact_payloads"][0]["markdown"] == report.strip()
+    assert calls["artifact_payloads"][0]["include_pdf"] is True
+
+
 def test_query_agent_retries_meta_summary_instead_of_report(monkeypatch, capsys):
     monkeypatch.setenv(
         "QUERY_PROMPT",
