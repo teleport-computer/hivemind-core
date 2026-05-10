@@ -1033,10 +1033,11 @@ class Pipeline:
         """Run the full 3-stage pipeline with run tracking and artifact upload.
 
         Stage 0: Scope agent    → produces scope_fn to filter SQL results
-        Stage 1: Query agent    → executes with scoped DB access; may POST
-                                  /sandbox/artifact-upload → writes straight to
-                                  _hivemind_query_artifacts (no S3)
+        Stage 1: Query agent    → executes with scoped DB access.
         Stage 2: Mediator agent → audits/redacts query output
+        Stage 3: Final artifacts → report artifacts are written from the
+                                  mediated output so artifacts cannot bypass
+                                  the mediator.
 
         Updates run_store status through the lifecycle:
           pending → running → completed/failed
@@ -1194,7 +1195,11 @@ class Pipeline:
                 max_calls=max_calls,
                 max_tokens=query_max_tokens,
                 timeout_seconds=timeout_seconds,
-                artifact_store=artifact_store if artifacts_enabled else None,
+                artifact_store=(
+                    artifact_store
+                    if artifacts_enabled and not resolved_mediator_id
+                    else None
+                ),
                 artifact_retention_seconds=artifact_retention_seconds,
                 run_id=run_id,
                 run_store=run_store,
