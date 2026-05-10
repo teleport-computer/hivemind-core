@@ -166,7 +166,7 @@ jobs:
             -o ServerAliveInterval=30 -o ServerAliveCountMax=20 \
             -o TCPKeepAlive=yes \
             "${EC2_USER}@${EC2_HOST}" \
-            'echo "relay: $(hostname) $(whoami)"; phala --version; phala status | head -10'
+            'set -e; echo "relay: $(hostname) $(whoami)"; phala --version; phala status > /tmp/hivemind-phala-status.txt; head -10 /tmp/hivemind-phala-status.txt'
 
       - name: Deploy via relay
         timeout-minutes: 24
@@ -180,6 +180,19 @@ jobs:
           q() {
             printf "'%s'" "$(printf "%s" "$1" | sed "s/'/'\\\\''/g")"
           }
+
+          if [ -n "${PHALA_CLOUD_API_KEY:-}" ]; then
+            if ssh -i ~/.ssh/id_ed25519 -o BatchMode=yes \
+              -o ServerAliveInterval=30 -o ServerAliveCountMax=20 \
+              -o TCPKeepAlive=yes \
+              "${EC2_USER}@${EC2_HOST}" \
+              "PHALA_CLOUD_API_KEY=$(q "$PHALA_CLOUD_API_KEY") phala status >/dev/null 2>&1"; then
+              echo "PHALA_CLOUD_API_KEY override validated"
+            else
+              echo "::warning::PHALA_CLOUD_API_KEY secret is invalid; falling back to relay stored Phala credentials"
+              PHALA_CLOUD_API_KEY=""
+            fi
+          fi
 
           # All work happens inside this SSH session. We use a heredoc
           # with quoted 'REMOTE' so no local variables get interpolated
