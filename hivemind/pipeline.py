@@ -1178,6 +1178,11 @@ class Pipeline:
             if prompt:
                 env["QUERY_PROMPT"] = prompt
             env["SCOPE_FN_SOURCE"] = scope_fn_source or ""
+            env["HIVEMIND_QUERY_UPLOAD_ARTIFACTS"] = (
+                "true"
+                if artifacts_enabled and not resolved_mediator_id
+                else "false"
+            )
 
             backend = SandboxBackend(
                 self._client_for(provider),

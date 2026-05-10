@@ -1007,6 +1007,7 @@ class TestTrackedRunFailsClosedOnScopeError:
 
             async def run(self, **kwargs):
                 captured["query_artifact_store"] = kwargs.get("artifact_store")
+                captured["query_env"] = kwargs.get("env")
                 return "# Unmediated Report\n\nraw-ish draft", {"total_tokens": 0}
 
         class FakeRunStore:
@@ -1046,6 +1047,7 @@ class TestTrackedRunFailsClosedOnScopeError:
         )
 
         assert captured["query_artifact_store"] is None
+        assert captured["query_env"]["HIVEMIND_QUERY_UPLOAD_ARTIFACTS"] == "false"
         assert [item[1] for item in artifact_store.writes] == [
             "write_a_research_report.md",
             "write_a_research_report.pdf",

@@ -240,7 +240,7 @@ def _max_tool_turns() -> int:
     # consume every LLM iteration before a final answer is written.
     reserve = 2
     budget_limited = max(0, _budget_max_calls() - reserve)
-    default = 14 if _is_research_prompt() else 5
+    default = 10 if _is_research_prompt() else 4
     return max(0, min(default, budget_limited))
 
 
@@ -414,6 +414,13 @@ def _artifact_stem() -> str:
 
 
 def _maybe_upload_report_artifact(markdown: str) -> None:
+    if os.environ.get("HIVEMIND_QUERY_UPLOAD_ARTIFACTS", "true").strip().lower() in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }:
+        return
     if not (_is_research_prompt() or "pdf" in QUERY_PROMPT.lower() or "file" in QUERY_PROMPT.lower()):
         return
     if not _looks_like_report(markdown):

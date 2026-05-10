@@ -23,6 +23,7 @@ venv/
 .claude
 .hivemind/
 tests/artifacts/
+hivemind-artifacts/
 
 hivemind-core-amiller-cvm-deploy-demo
 

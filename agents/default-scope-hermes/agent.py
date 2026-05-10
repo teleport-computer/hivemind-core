@@ -170,9 +170,9 @@ def _run_ai_agent(body: str) -> str:
     api_key = os.environ["SESSION_TOKEN"]
 
     try:
-        max_iterations = int(os.environ.get("HIVEMIND_SCOPE_MAX_ITERATIONS", "8"))
+        max_iterations = int(os.environ.get("HIVEMIND_SCOPE_MAX_ITERATIONS", "6"))
     except ValueError:
-        max_iterations = 8
+        max_iterations = 6
     max_iterations = max(4, min(20, max_iterations))
 
     agent = AIAgent(

@@ -65,27 +65,90 @@ def _pdf_escape(value: str) -> str:
 
 
 def _render_markdown_to_simple_pdf(markdown: str) -> bytes:
-    """Render readable Markdown text into a small dependency-free PDF.
+    """Render readable Markdown into a dependency-free PDF report.
 
-    This intentionally avoids HTML/CSS fidelity; it gives agents a real PDF
-    artifact path in minimal sandbox/server images where pandoc/weasyprint are
-    not installed.
+    This intentionally avoids HTML/CSS fidelity, but it preserves enough
+    structure (headings, tables/code, bullets, page numbers) that generated
+    report artifacts are usable when pandoc/weasyprint are unavailable.
     """
     import textwrap
 
-    lines: list[str] = []
-    for raw in (markdown or "").splitlines():
-        line = raw.rstrip()
-        if not line:
-            lines.append("")
-            continue
-        width = 78 if line.startswith("#") else 92
-        lines.extend(textwrap.wrap(line, width=width) or [""])
+    page_width = 612
+    page_height = 792
+    margin_x = 54
+    top_y = 746
+    bottom_y = 62
+    pages: list[list[tuple[str, int, int, int, str]]] = [[]]
+    y = top_y
 
-    page_line_count = 52
-    pages = [
-        lines[i : i + page_line_count] for i in range(0, len(lines), page_line_count)
-    ] or [[]]
+    def clean(text: str) -> str:
+        return (
+            text.replace("**", "")
+            .replace("__", "")
+            .replace("`", "")
+            .replace("\t", "    ")
+            .strip()
+        )
+
+    def wrap(text: str, width: int) -> list[str]:
+        return textwrap.wrap(
+            text,
+            width=width,
+            break_long_words=False,
+            break_on_hyphens=False,
+        ) or [""]
+
+    def ensure_space(height: int) -> None:
+        nonlocal y
+        if y - height < bottom_y:
+            pages.append([])
+            y = top_y
+
+    def add_line(text: str, *, font: str = "F1", size: int = 10, x: int = margin_x) -> None:
+        nonlocal y
+        line_height = int(size * 1.45)
+        ensure_space(line_height)
+        pages[-1].append((font, size, x, y, text))
+        y -= line_height
+
+    for raw in (markdown or "").splitlines():
+        stripped = raw.rstrip()
+        if not stripped:
+            y -= 8
+            if y < bottom_y:
+                pages.append([])
+                y = top_y
+            continue
+
+        line = clean(stripped)
+        if line.startswith("# "):
+            y -= 6
+            for part in wrap(line[2:].strip(), 48):
+                add_line(part, font="F2", size=18)
+            y -= 6
+        elif line.startswith("## "):
+            y -= 4
+            for part in wrap(line[3:].strip(), 58):
+                add_line(part, font="F2", size=14)
+            y -= 2
+        elif line.startswith("### "):
+            for part in wrap(line[4:].strip(), 68):
+                add_line(part, font="F2", size=12)
+        elif line.startswith(("- ", "* ")):
+            for idx, part in enumerate(wrap(line[2:].strip(), 82)):
+                prefix = "- " if idx == 0 else "  "
+                add_line(prefix + part, size=10, x=margin_x + 10)
+        elif "|" in line and line.count("|") >= 2:
+            for part in wrap(line, 94):
+                add_line(part, font="F3", size=8)
+        elif set(line) <= {"-", " "} and line.count("-") >= 3:
+            add_line("-" * 84, font="F3", size=8)
+        else:
+            for part in wrap(line, 86):
+                add_line(part, size=10)
+
+    if not any(pages):
+        add_line("(empty report)")
 
     objects: list[str | None] = [None]
 
@@ -95,12 +158,19 @@ def _render_markdown_to_simple_pdf(markdown: str) -> bytes:
 
     pages_id = add("")
     font_id = add("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>")
+    bold_font_id = add("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>")
+    mono_font_id = add("<< /Type /Font /Subtype /Type1 /BaseFont /Courier >>")
     page_ids: list[int] = []
-    for page in pages:
-        body = ["BT", "/F1 10 Tf", "50 750 Td", "14 TL"]
-        for line in page:
-            body.append(f"({_pdf_escape(line)}) Tj")
-            body.append("T*")
+    page_count = len(pages)
+    for page_number, page in enumerate(pages, start=1):
+        body = ["BT"]
+        for font, size, x, line_y, text in page:
+            body.append(f"/{font} {size} Tf")
+            body.append(f"1 0 0 1 {x} {line_y} Tm")
+            body.append(f"({_pdf_escape(text)}) Tj")
+        body.append("/F1 8 Tf")
+        body.append("1 0 0 1 270 34 Tm")
+        body.append(f"(Page {page_number} of {page_count}) Tj")
         body.append("ET")
         stream = "\n".join(body).encode("latin-1", "replace")
         content_id = add(
@@ -109,8 +179,9 @@ def _render_markdown_to_simple_pdf(markdown: str) -> bytes:
             + "\nendstream"
         )
         page_id = add(
-            f"<< /Type /Page /Parent {pages_id} 0 R /MediaBox [0 0 612 792] "
-            f"/Resources << /Font << /F1 {font_id} 0 R >> >> "
+            f"<< /Type /Page /Parent {pages_id} 0 R /MediaBox [0 0 {page_width} {page_height}] "
+            f"/Resources << /Font << /F1 {font_id} 0 R "
+            f"/F2 {bold_font_id} 0 R /F3 {mono_font_id} 0 R >> >> "
             f"/Contents {content_id} 0 R >>"
         )
         page_ids.append(page_id)

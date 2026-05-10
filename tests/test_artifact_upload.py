@@ -309,6 +309,8 @@ class TestBridgeArtifactUpload:
             assert md["content"] == b"# Title\n\nA concise report body."
             assert md["content_type"] == "text/markdown; charset=utf-8"
             assert pdf["content"].startswith(b"%PDF-1.4")
+            assert b"/Helvetica-Bold" in pdf["content"]
+            assert b"Page 1 of 1" in pdf["content"]
             assert pdf["content_type"] == "application/pdf"
         finally:
             await client.aclose()

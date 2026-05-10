@@ -351,6 +351,28 @@ def test_query_agent_uploads_report_when_model_stops_before_tool_cap(
     assert calls["artifact_payloads"][0]["include_pdf"] is True
 
 
+def test_query_agent_skips_report_upload_when_server_disables_artifacts(
+    monkeypatch,
+    capsys,
+):
+    monkeypatch.setenv("QUERY_PROMPT", "Write a deep research report.")
+    monkeypatch.setenv("HIVEMIND_QUERY_UPLOAD_ARTIFACTS", "false")
+    report = "# Server Side Report\n\n" + (
+        "finding evidence limitation implication " * 140
+    )
+    mod, calls = _load_query_agent(
+        monkeypatch,
+        "default_query_hermes_skip_disabled_artifact_upload_test",
+        chat_responses=[_chat_response(report)],
+    )
+
+    mod.main()
+
+    captured = capsys.readouterr()
+    assert captured.out.startswith("# Server Side Report")
+    assert calls["artifact_payloads"] == []
+
+
 def test_query_agent_retries_meta_summary_instead_of_report(monkeypatch, capsys):
     monkeypatch.setenv(
         "QUERY_PROMPT",
