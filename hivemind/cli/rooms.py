@@ -34,6 +34,41 @@ def _hdelete(*a, **kw):
     return _f(*a, **kw)
 
 
+_ROOM_ATTEST_TIMEOUT_SECONDS = 90
+_ROOM_ATTEST_RETRY_DELAYS_SECONDS = (0.5, 2.0)
+_ROOM_PIPELINE_STAGE_COUNT = 3
+_ROOM_RUN_POLL_GRACE_SECONDS = 120
+
+
+def _get_room_attest(service: str, room_id: str, headers: dict):
+    """Fetch the signed room manifest, retrying slow reads only.
+
+    This preflight is an idempotent GET and can be slow on production CVMs
+    under attestation/tenant-thaw load. Do not retry HTTP status failures here;
+    callers need the exact response for sealed-room handling.
+    """
+    url = f"{service}/v1/rooms/{room_id}/attest"
+    attempts = len(_ROOM_ATTEST_RETRY_DELAYS_SECONDS) + 1
+    last_exc: httpx.TimeoutException | None = None
+    for attempt in range(attempts):
+        try:
+            return _hget(url, headers=headers, timeout=_ROOM_ATTEST_TIMEOUT_SECONDS)
+        except httpx.TimeoutException as exc:
+            last_exc = exc
+            if attempt == attempts - 1:
+                break
+            time.sleep(_ROOM_ATTEST_RETRY_DELAYS_SECONDS[attempt])
+    raise click.ClickException(
+        f"room attestation fetch timed out after {attempts} attempts: {last_exc}"
+    )
+
+
+def _room_run_poll_seconds(timeout: int) -> int:
+    """Local polling window for a scope/query/mediator room pipeline."""
+    stage_timeout = max(1, int(timeout))
+    return stage_timeout * _ROOM_PIPELINE_STAGE_COUNT + _ROOM_RUN_POLL_GRACE_SECONDS
+
+
 def _parse_room_ref(
     ref: str,
     config: dict | None = None,
@@ -106,11 +141,7 @@ def _fetch_verified_room(
         # the normal profile-based attestation gate unless we run it
         # explicitly before sending the room token.
         _require_trust({"service": service})
-    resp = _hget(
-        f"{service}/v1/rooms/{room_id}/attest",
-        headers=headers,
-        timeout=30,
-    )
+    resp = _get_room_attest(service, room_id, headers)
     if resp.status_code >= 400:
         detail = _api_error(resp)
         room_tenant_sealed = (
@@ -119,11 +150,7 @@ def _fetch_verified_room(
             and "Tenant is sealed" in detail
         )
         if room_tenant_sealed and _thaw_active_profile_tenant(service):
-            resp = _hget(
-                f"{service}/v1/rooms/{room_id}/attest",
-                headers=headers,
-                timeout=30,
-            )
+            resp = _get_room_attest(service, room_id, headers)
             detail = _api_error(resp) if resp.status_code >= 400 else ""
         if resp.status_code >= 400:
             if room_tenant_sealed and "Tenant is sealed" in detail:
@@ -470,7 +497,8 @@ def _upload_room_query_agent_and_poll(
     if not as_json:
         click.echo(f"Submitted: run_id={run_id} agent_id={submission.get('agent_id')}")
 
-    deadline = time.time() + timeout
+    poll_seconds = _room_run_poll_seconds(timeout)
+    deadline = time.time() + poll_seconds
     last_status = ""
     while time.time() < deadline:
         sr = _hget(f"{service}/v1/runs/{run_id}", headers=headers, timeout=15)
@@ -515,7 +543,7 @@ def _upload_room_query_agent_and_poll(
             raise click.ClickException(f"run failed: {data.get('error') or '?'}")
         time.sleep(3)
 
-    raise click.ClickException(f"timed out after {timeout}s; run_id={run_id}")
+    raise click.ClickException(f"timed out after {poll_seconds}s; run_id={run_id}")
 
 
 @click.group("room")
@@ -1187,8 +1215,9 @@ def trust_room(
     default=900,
     show_default=True,
     help=(
-        "Seconds to give the run and local poll. CLI sends at most 3600; "
-        "hosted services may clamp lower, e.g. 900s."
+        "Per-stage sandbox timeout. Local polling waits for the full "
+        "scope/query/mediator pipeline. CLI sends at most 3600; hosted "
+        "services may clamp lower, e.g. 900s."
     ),
 )
 @click.option("--memory-mb", type=int, default=256, show_default=True)
@@ -1334,7 +1363,7 @@ def ask_room(
         as_json=as_json,
         fetch=fetch,
         fetch_headers=headers,
-        poll_seconds=timeout,
+        poll_seconds=_room_run_poll_seconds(timeout),
     )
 
 

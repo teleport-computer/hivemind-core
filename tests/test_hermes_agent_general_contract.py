@@ -4,6 +4,8 @@ import sys
 import types
 from pathlib import Path
 
+import pytest
+
 from hivemind.scope import compile_scope_fn
 
 
@@ -522,6 +524,56 @@ def test_scope_agent_retries_empty_scope_for_report_prompt(monkeypatch, capsys):
     assert emitted == {"scope_fn": passthrough_scope_fn}
     assert len(calls["chats"]) == 2
     assert "dropped useful synthetic summary rows" in captured.err
+
+
+def test_scope_agent_rejects_unparseable_retry_empty_scope_for_report_prompt(
+    monkeypatch,
+    capsys,
+):
+    empty_scope_fn = 'def scope(sql, params, rows):\n    return {"allow": True, "rows": []}\n'
+    monkeypatch.setenv(
+        "QUERY_PROMPT",
+        "Write a research report with evidence-backed findings.",
+    )
+    mod, calls = _load_agent(
+        monkeypatch,
+        "agents/default-scope-hermes/agent.py",
+        "default_scope_hermes_reject_empty_retry_contract_test",
+        response=["not json", json.dumps({"scope_fn": empty_scope_fn})],
+    )
+
+    class FakeVerifyResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "compiles": True,
+                "all_tests_passed": True,
+                "results": [
+                    {
+                        "label": "summary metric row is preserved",
+                        "allow": True,
+                        "rows_returned": 0,
+                    }
+                ],
+            }
+
+    monkeypatch.setattr(
+        mod.httpx,
+        "post",
+        lambda _url, *, json, headers, timeout: FakeVerifyResponse(),
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        mod.main()
+
+    captured = capsys.readouterr()
+    assert exc.value.code == 2
+    assert captured.out == ""
+    assert len(calls["chats"]) == 2
+    assert "scope self-verify failed" in captured.err
+    assert "unparseable or unverifiable scope JSON" in captured.err
 
 
 def test_scope_prompt_centers_privacy_utility_frontier():

@@ -110,7 +110,6 @@ _NO_REASONING_CONFIG = {"enabled": False, "effort": "none"}
 _NO_REASONING_OVERRIDES = {"extra_body": {"reasoning": {"effort": "none", "exclude": True}}}
 
 
-_EMPTY_FALLBACK_SCOPE_FN = 'def scope(sql, params, rows):\n    return {"allow": True, "rows": []}\n'
 _MAX_RETRY_CONTEXT_CHARS = 3000
 _VERIFY_TESTS = [
     {
@@ -249,6 +248,25 @@ def _verify_scope_source(source: str) -> tuple[bool, str]:
     return True, "ok"
 
 
+def _emit_verified_scope(source: str) -> bool:
+    verified, reason = _verify_scope_source(source)
+    if verified:
+        # Re-emit canonically so the pipeline parses cleanly.
+        print(json.dumps({"scope_fn": source}))
+        return True
+    print(f"scope self-verify failed: {reason}", file=sys.stderr)
+    return False
+
+
+def _fail_scope(reason: str, previous_response: str = "") -> None:
+    preview = (previous_response or "").strip()[:500]
+    if preview:
+        print(f"scope agent failed: {reason}. raw={preview!r}", file=sys.stderr)
+    else:
+        print(f"scope agent failed: {reason}", file=sys.stderr)
+    raise SystemExit(2)
+
+
 def _extract_json_emit(text: str) -> dict | None:
     """Pull the last JSON object containing `scope_fn` from the agent's output."""
     if not isinstance(text, str) or not text:
@@ -344,9 +362,7 @@ def _extract_json_emit(text: str) -> dict | None:
 
 def main() -> None:
     if not QUERY_PROMPT.strip():
-        # Fail closed with no disclosure when there is no question to scope.
-        print(json.dumps({"scope_fn": _EMPTY_FALLBACK_SCOPE_FN}))
-        return
+        _fail_scope("missing query prompt")
 
     parts: list[str] = []
     if POLICY_CONTEXT:
@@ -362,45 +378,25 @@ def main() -> None:
 
     parsed = _extract_json_emit(response)
     if parsed and isinstance(parsed.get("scope_fn"), str) and parsed["scope_fn"].strip():
-        verified, reason = _verify_scope_source(parsed["scope_fn"])
-        if not verified:
-            print(f"scope self-verify failed: {reason}", file=sys.stderr)
-            retry = _retry_scope_emit(
-                body,
-                reason=f"scope_fn failed self verification: {reason}",
-                previous_response=response,
-            )
-            if retry:
-                retry_verified, retry_reason = _verify_scope_source(retry["scope_fn"])
-                if retry_verified:
-                    print(json.dumps({"scope_fn": retry["scope_fn"]}))
-                    return
-                print(
-                    f"scope retry self-verify failed: {retry_reason}",
-                    file=sys.stderr,
-                )
-            print(json.dumps({"scope_fn": _EMPTY_FALLBACK_SCOPE_FN}))
+        if _emit_verified_scope(parsed["scope_fn"]):
             return
-        else:
-            # Re-emit canonically so the pipeline parses cleanly.
-            print(json.dumps({"scope_fn": parsed["scope_fn"]}))
+        retry = _retry_scope_emit(
+            body,
+            reason="scope_fn failed self verification",
+            previous_response=response,
+        )
+        if retry and _emit_verified_scope(retry["scope_fn"]):
             return
+        _fail_scope("scope_fn failed self verification", response)
 
-    # Fail closed with no disclosure so the pipeline can complete rather
-    # than HARD FAIL on bad JSON.
     retry = _retry_scope_emit(
         body,
         reason="unparseable or truncated scope JSON",
         previous_response=response,
     )
-    if retry:
-        print(json.dumps({"scope_fn": retry["scope_fn"]}))
+    if retry and _emit_verified_scope(retry["scope_fn"]):
         return
-    print(
-        f"scope agent produced no parseable JSON; using fallback. raw={response[:500]!r}",
-        file=sys.stderr,
-    )
-    print(json.dumps({"scope_fn": _EMPTY_FALLBACK_SCOPE_FN}))
+    _fail_scope("unparseable or unverifiable scope JSON", response)
 
 
 if __name__ == "__main__":

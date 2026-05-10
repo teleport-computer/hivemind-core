@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 
 
+import httpx
 import pytest
 from click.testing import CliRunner
 
@@ -71,6 +72,46 @@ def _stub_attestation(monkeypatch, bundle: dict):
         "_fetch_attestation",
         lambda service: (bundle, None),
     )
+
+
+def test_fetch_verified_room_retries_slow_attest_read(_sandbox, monkeypatch):
+    calls: list[dict] = []
+
+    class Resp:
+        status_code = 200
+
+        def json(self):
+            return {"room": {"envelope": {}}, "attestation": {}}
+
+    def fake_get(url, **kwargs):
+        calls.append({"url": url, **kwargs})
+        if len(calls) == 1:
+            raise httpx.ReadTimeout("slow room attest")
+        return Resp()
+
+    monkeypatch.setattr(_rooms_cli, "_hget", fake_get)
+    monkeypatch.setattr(_rooms_cli.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        _rooms_cli,
+        "verify_room_envelope",
+        lambda envelope, *, expected_pubkey_b64=None: (True, ""),
+    )
+
+    data = _rooms_cli._fetch_verified_room(
+        "https://cvm.example",
+        "room_test",
+        {"Authorization": "Bearer hmq_test"},
+        owner_pubkey_b64=None,
+    )
+
+    assert data["room"]["envelope"] == {}
+    assert [call["url"] for call in calls] == [
+        "https://cvm.example/v1/rooms/room_test/attest",
+        "https://cvm.example/v1/rooms/room_test/attest",
+    ]
+    assert {call["timeout"] for call in calls} == {
+        _rooms_cli._ROOM_ATTEST_TIMEOUT_SECONDS
+    }
 
 
 def test_remote_https_requires_full_attestation_by_default(
@@ -226,6 +267,7 @@ def test_room_ask_omits_room_id_from_path_scoped_run_body(
     assert captured["headers"]["X-Hivemind-Api-Key"] == "hmk_test"
     assert "room_id" not in captured["payload"]
     assert captured["kwargs"]["submit_path"] == "/v1/rooms/room_test/runs"
+    assert captured["kwargs"]["poll_seconds"] == 2820
 
 
 def test_room_ask_uses_named_profile_api_key_for_billing(_sandbox, monkeypatch):
