@@ -531,6 +531,26 @@ def test_mediator_agent_uses_ai_agent_for_safe_aggregate_output(monkeypatch, cap
     }
 
 
+def test_mediator_agent_passes_through_without_policy(monkeypatch, capsys):
+    raw = "# Report\n\nA long compliant report with tables and findings."
+    monkeypatch.setenv("RAW_OUTPUT", raw)
+    monkeypatch.setenv("QUERY_PROMPT", "Write a report.")
+    monkeypatch.delenv("MEDIATION_POLICY", raising=False)
+    mod, calls = _load_agent(
+        monkeypatch,
+        "agents/default-mediator-hermes/agent.py",
+        "default_mediator_hermes_policyless_passthrough_test",
+        response="should not be called",
+    )
+
+    mod.main()
+
+    captured = capsys.readouterr()
+    assert captured.out.strip() == raw
+    assert calls["inits"] == []
+    assert calls["chats"] == []
+
+
 def test_mediator_agent_does_not_emit_hermes_runtime_diagnostics(monkeypatch, capsys):
     monkeypatch.setenv("RAW_OUTPUT", "watch_day: 2026-04-15\nvideos: 482237")
     monkeypatch.setenv("QUERY_PROMPT", "Which day had the highest count?")

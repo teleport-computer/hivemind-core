@@ -84,6 +84,18 @@ _HERMES_FAILURE_MARKERS = (
     "maximum iterations",
     "temporarily unavailable due to rate limiting",
 )
+_SECRET_MARKERS = (
+    "api_key",
+    "api key",
+    "password",
+    "secret",
+    "bearer ",
+    "-----begin ",
+    "sk-",
+    "ghp_",
+    "gho_",
+    "hmk_",
+)
 
 
 def _completion_token_cap(default: int = 8192, hard_cap: int = 16384) -> int:
@@ -103,6 +115,11 @@ def _looks_like_runtime_failure(text: str) -> bool:
     return any(marker in lower for marker in _HERMES_FAILURE_MARKERS)
 
 
+def _needs_policyless_filter(text: str) -> bool:
+    lower = (text or "").lower()
+    return any(marker in lower for marker in _SECRET_MARKERS)
+
+
 def _mediator_internal_error() -> str:
     return "Unable to process response due to an internal error."
 
@@ -117,6 +134,9 @@ def main() -> None:
             "Unable to complete the request because the model provider or "
             "agent runtime failed before producing a usable answer."
         )
+        return
+    if not MEDIATION_POLICY.strip() and not _needs_policyless_filter(RAW_OUTPUT):
+        print(RAW_OUTPUT)
         return
 
     parts: list[str] = []
