@@ -34,7 +34,7 @@ sudo npm install -g phala
 
 # 2. Authenticate phala CLI (interactive, one-time)
 phala login
-phala cvms list   # sanity — should show hivemind-core + hivemind-pg
+phala cvms list   # sanity — should show the intended deploy target(s)
 
 # 3. Add a read-only GitHub deploy key so the relay can pull
 ssh-keygen -t ed25519 -C "hivemind-core-ec2-deploy-key@github" \
@@ -104,6 +104,14 @@ Actions → "Deploy to Phala CVM (via EC2 relay)" → Run workflow:
 - `ref`: branch / tag / commit to deploy (default `main`)
 - `image_sha`: optional override; rewrites `hivemind-core`'s image pin
   in the working tree for that run only (not committed)
+- `node_id`: set only for a first-time create. For a data-preserving
+  prod repair, run `target=core`, `node_id=18`, `core_name=hivemind-core`,
+  and leave `db_url_override` empty so the new core reuses the existing
+  production database.
+
+Do not use `target=postgres`, `target=all`, or `db_url_override` as part
+of a routine core deploy. Those are database-migration controls and can
+strand tenant data if used casually.
 
 ### Directly on the relay (ops / debugging)
 

@@ -123,6 +123,60 @@ env_vars() {
         | sort -u
 }
 
+cvm_exists() {
+    local name="$1"
+    phala_timeout "${PHALA_QUERY_TIMEOUT}" \
+        phala cvms get --cvm-id "${name}" --json >/dev/null 2>&1
+}
+
+phala_workspace_summary() {
+    local profile visible
+    profile=$(phala status 2>/dev/null \
+        | awk -F: '/Current Profile|Current Workspace/ {gsub(/^[ \t]+|[ \t]+$/, "", $2); printf "%s=%s ", $1, $2}' \
+        || true)
+    visible=$(phala_timeout "${PHALA_QUERY_TIMEOUT}" phala cvms list --json 2>/dev/null \
+        | python3 -c '
+import json, sys
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    print("")
+    raise SystemExit(0)
+items = data.get("items") or data.get("cvms") or (data if isinstance(data, list) else [])
+names = []
+for item in items:
+    name = item.get("name") or item.get("cvm_name") or item.get("id") or ""
+    app_id = item.get("app_id") or item.get("appId") or ""
+    status = item.get("status") or ""
+    if name:
+        suffix = f" ({status}, {app_id})" if app_id or status else ""
+        names.append(f"{name}{suffix}")
+print(", ".join(names))
+' 2>/dev/null || true)
+    [ -n "${profile}" ] && warn "Phala context: ${profile}"
+    warn "Visible CVMs: ${visible:-none}"
+}
+
+require_target_mode_is_safe() {
+    local name="$1"
+    local kind="$2"
+
+    if [ -n "${NODE_ID}" ]; then
+        if cvm_exists "${name}"; then
+            phala_workspace_summary
+            die "${kind} CVM '${name}' already exists but NODE_ID=${NODE_ID} requested create-mode. Unset NODE_ID to update it in place."
+        fi
+        return 0
+    fi
+
+    if cvm_exists "${name}"; then
+        return 0
+    fi
+
+    phala_workspace_summary
+    die "${kind} CVM '${name}' not found in the active Phala workspace. Use workflow_dispatch with NODE_ID for a first-time create, or set CORE_NAME/PG_NAME to an existing CVM name. Do not create a new postgres CVM unless you are intentionally migrating data."
+}
+
 # Bail out BEFORE touching the CVM if the env file is missing any
 # hard-required compose var. This is what catches the "silently
 # dropped admin key" failure mode.
@@ -544,6 +598,7 @@ wait_healthy() {
 # ── Per-service entry points ──
 
 deploy_core() {
+    require_target_mode_is_safe "${CORE_NAME}" "core"
     sync_pinning_gateway "${CORE_NAME}" "${ENV_FILE}"
     sync_default_llm_model "${ENV_FILE}"
     sync_self_serve_billing_policy "${ENV_FILE}"
@@ -561,6 +616,7 @@ deploy_core() {
 }
 
 deploy_postgres() {
+    require_target_mode_is_safe "${PG_NAME}" "postgres"
     precheck_env  "${PG_COMPOSE}" "${ENV_FILE}"
     deploy_and_seal "${PG_NAME}"  "${PG_COMPOSE}" "${ENV_FILE}"
     local url

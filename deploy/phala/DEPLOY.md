@@ -155,6 +155,31 @@ curl https://hivemind.teleport.computer/v1/healthz
 # {"ok": true}
 ```
 
+### Data-preserving core repair / workspace cutover
+
+If the current Phala API key can no longer see the public App CVM, do
+**not** create a new Postgres CVM just to make deploys work. Production
+tenant data, including watch-history rooms, lives behind the existing
+`HIVEMIND_DATABASE_URL`. The safe repair is a **core-only** create/update
+that reuses that URL.
+
+Use GitHub Actions → `Deploy to Phala CVM (via EC2 relay)`:
+
+```text
+target=core
+ref=main
+image_sha=<short sha whose images were built>
+node_id=18                    # first-time create on prod9 only
+core_name=hivemind-core
+pg_name=
+db_url_override=              # leave empty to preserve the existing DB
+```
+
+After the first successful create, leave `node_id` empty so future deploys
+update `hivemind-core` in place. Only use `target=postgres`, `target=all`,
+or `db_url_override` when you have an explicit database migration plan and
+a verified backup.
+
 > **Prod9 TLS topology (dstack-ingress).** The shipped compose uses HTTP
 > from the Phala gateway / `dstack-ingress` sidecar to the hivemind
 > container. Public TLS still terminates at the gateway or the LE-issued

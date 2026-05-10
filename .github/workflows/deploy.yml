@@ -37,6 +37,9 @@ name: Deploy to Phala CVM (via EC2 relay)
 #   EC2_SSH_PRIVATE_KEY   — OpenSSH private key authorized on the relay
 #   PHALA_CLOUD_API_KEY   — optional; injected per-run so the relay
 #                           doesn't depend on stale stored creds
+#   Repository variables:
+#     PHALA_CORE_NAME / PHALA_PG_NAME — optional defaults for non-canonical
+#       CVM names. workflow_dispatch inputs still win.
 #   CLOUDFLARE_API_TOKEN  — optional override; if set, replaces the
 #                           token in the relay's .env for this deploy
 #                           only. Must be a Zone.DNS:Edit token on the
@@ -125,8 +128,8 @@ jobs:
       IMAGE_SHA: ${{ github.event.inputs.image_sha }}
       WORKFLOW_RUN_SHA: ${{ github.event.workflow_run.head_sha }}
       NODE_ID: ${{ github.event.inputs.node_id }}
-      CORE_NAME: ${{ github.event.inputs.core_name }}
-      PG_NAME: ${{ github.event.inputs.pg_name }}
+      CORE_NAME: ${{ github.event.inputs.core_name || vars.PHALA_CORE_NAME }}
+      PG_NAME: ${{ github.event.inputs.pg_name || vars.PHALA_PG_NAME }}
       DB_URL_OVERRIDE: ${{ github.event.inputs.db_url_override }}
 
     steps:
@@ -330,6 +333,9 @@ jobs:
           PRIVATE_KEY: ${{ secrets.PRIVATE_KEY }}
           CONTRACT: "0x29b475E6D2e10bd3266569D4c5cf27BFd4f8c36E"
           RPC_URL: "https://ethereum-sepolia-rpc.publicnode.com"
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_USER: ${{ secrets.EC2_USER }}
+          PHALA_CLOUD_API_KEY: ${{ secrets.PHALA_CLOUD_API_KEY }}
           # GIT_SHA is sourced from the event context so we don't need
           # actions/checkout in this workflow (all git work happens on
           # the EC2 relay). For workflow_dispatch this is the SHA of
@@ -345,12 +351,42 @@ jobs:
             exit 0
           fi
 
-          # Fetch the *live* compose_hash from the freshly-deployed
-          # CVM rather than re-deriving it locally. This is the same
-          # hash the CLI's TOFU prompt would show, sourced from
-          # `mr_config_id` in the TDX quote — i.e. what dstack
-          # actually measured, not what we *thought* we shipped.
+          q() {
+            printf "'%s'" "$(printf "%s" "$1" | sed "s/'/'\\\\''/g")"
+          }
+
+          # Fetch the *live* compose_hash from the freshly-deployed CVM
+          # rather than re-deriving it locally. Prefer the raw gateway URL
+          # for the CVM we just deployed; the friendly hostname can still be
+          # pointing at the previous app while dstack-ingress/ACME/DNS cutover
+          # finishes, which would approve the wrong hash.
           ATTEST_URL="https://hivemind.teleport.computer/v1/attestation"
+          if [ "${TARGET:-}" != "postgres" ]; then
+            CVM_NAME="${CORE_NAME:-hivemind-core}"
+            fetch_core_meta() {
+              local remote_prefix="$1"
+              ssh -i ~/.ssh/id_ed25519 -o BatchMode=yes \
+                -o ServerAliveInterval=30 -o ServerAliveCountMax=20 \
+                -o TCPKeepAlive=yes \
+                "${EC2_USER}@${EC2_HOST}" \
+                "${remote_prefix}CORE_NAME=$(q "$CVM_NAME") bash -lc $(q 'phala cvms get --cvm-id "$CORE_NAME" --json')" \
+                2>/dev/null || true
+            }
+
+            CORE_META=""
+            if [ -n "${PHALA_CLOUD_API_KEY:-}" ]; then
+              CORE_META="$(fetch_core_meta "PHALA_CLOUD_API_KEY=$(q "$PHALA_CLOUD_API_KEY") ")"
+            fi
+            if [ -z "${CORE_META}" ]; then
+              CORE_META="$(fetch_core_meta "")"
+            fi
+            CORE_ATTEST_URL="$(printf '%s' "${CORE_META}" | python3 -c 'import json, sys; d=json.load(sys.stdin); app=d.get("app_id") or d.get("appId"); base=(d.get("gateway") or {}).get("base_domain"); print(f"https://{app}-8100.{base}/v1/attestation" if app and base else "")' 2>/dev/null || true)"
+            if [ -n "${CORE_ATTEST_URL}" ]; then
+              ATTEST_URL="${CORE_ATTEST_URL}"
+            else
+              echo "::warning::could not derive raw attestation URL for ${CVM_NAME}; falling back to friendly hostname"
+            fi
+          fi
           echo "fetching compose_hash from ${ATTEST_URL}"
           # Right after a deploy the gateway routes are sometimes still
           # propagating (curl exits 35 = SSL connect error, or 28 = timeout).

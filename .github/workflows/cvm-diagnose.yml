@@ -50,6 +50,7 @@ jobs:
         env:
           EC2_HOST: ${{ secrets.EC2_HOST }}
           EC2_USER: ${{ secrets.EC2_USER }}
+          PHALA_CLOUD_API_KEY: ${{ secrets.PHALA_CLOUD_API_KEY }}
           CVM_ID: ${{ github.event.inputs.cvm_id }}
           TAIL_LINES: ${{ github.event.inputs.tail_lines }}
           ACTION: ${{ github.event.inputs.action }}
@@ -58,11 +59,15 @@ jobs:
           q() {
             printf "'%s'" "$(printf "%s" "$1" | sed "s/'/'\\\\''/g")"
           }
+          REMOTE_PREFIX=""
+          if [ -n "${PHALA_CLOUD_API_KEY:-}" ]; then
+            REMOTE_PREFIX="PHALA_CLOUD_API_KEY=$(q "$PHALA_CLOUD_API_KEY") "
+          fi
           ssh -i ~/.ssh/id_ed25519 -o BatchMode=yes \
             -o ServerAliveInterval=30 -o ServerAliveCountMax=20 \
             -o TCPKeepAlive=yes \
             "${EC2_USER}@${EC2_HOST}" \
-            "CVM_ID=$(q "$CVM_ID") TAIL_LINES=$(q "$TAIL_LINES") ACTION=$(q "$ACTION") bash -s" <<'REMOTE'
+            "${REMOTE_PREFIX}CVM_ID=$(q "$CVM_ID") TAIL_LINES=$(q "$TAIL_LINES") ACTION=$(q "$ACTION") bash -s" <<'REMOTE'
           set -euo pipefail
 
           echo "── phala status ─────────────────────────────────"

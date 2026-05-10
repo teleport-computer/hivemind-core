@@ -45,3 +45,12 @@ def test_phala_deploy_syncs_default_room_agents_to_hermes():
     assert "env_file_has_key HIVEMIND_ENCLAVE_TLS" in deploy_sh
     assert "compose_tls_default" in deploy_sh
     assert "is_truthy" in deploy_sh
+
+
+def test_phala_deploy_guards_update_vs_create_mode():
+    deploy_sh = Path("deploy/phala/deploy.sh").read_text()
+
+    assert "require_target_mode_is_safe" in deploy_sh
+    assert "already exists but NODE_ID" in deploy_sh
+    assert "not found in the active Phala workspace" in deploy_sh
+    assert "Do not create a new postgres CVM" in deploy_sh

@@ -19,6 +19,7 @@ set -euo pipefail
 # Env:
 #   CORE_URL=https://<core_cvm_id>-8100.app.phala.network   (required)
 #   HIVEMIND_ADMIN_KEY=...                                   (required)
+#   HIVEMIND_ALLOW_LEGACY_DB_RENAME=rename-legacy-db          (required)
 #   LEGACY_DB=hivemind                                       (optional, default "hivemind")
 #   TENANT_NAME="migrated-legacy"                            (optional)
 #
@@ -26,6 +27,11 @@ set -euo pipefail
 
 : "${CORE_URL:?CORE_URL required (e.g. https://<cvm_id>-8100.app.phala.network)}"
 : "${HIVEMIND_ADMIN_KEY:?HIVEMIND_ADMIN_KEY required}"
+if [ "${HIVEMIND_ALLOW_LEGACY_DB_RENAME:-}" != "rename-legacy-db" ]; then
+    echo "Refusing to rename a legacy database without explicit opt-in." >&2
+    echo "Set HIVEMIND_ALLOW_LEGACY_DB_RENAME=rename-legacy-db after taking a backup." >&2
+    exit 2
+fi
 LEGACY_DB="${LEGACY_DB:-hivemind}"
 TENANT_NAME="${TENANT_NAME:-migrated-legacy}"
 
