@@ -1238,7 +1238,8 @@ class Pipeline:
             # the query-agent turn via /sandbox/artifact-upload. No post-
             # mediator commit needed — failed runs are swept by the TTL
             # job in hivemind.core.
-            final_output = (query_output or "")[:10000]
+            output_cap = max(0, int(self.settings.max_run_output_chars))
+            final_output = (query_output or "")[:output_cap]
             attestation_envelope = await asyncio.to_thread(
                 self._build_run_attestation,
                 run_id=run_id,

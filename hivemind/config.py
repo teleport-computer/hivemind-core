@@ -111,6 +111,10 @@ class Settings(BaseSettings):
     # no external object store. 24h default keeps disk bounded.
     artifact_retention_seconds: int = 86400
     artifact_sweep_interval_seconds: int = 3600
+    # Maximum text returned inline on the run row. Full artifacts can be
+    # larger; this cap prevents accidental huge responses while still
+    # allowing deep report-style answers in hmctl.
+    max_run_output_chars: int = 50_000
 
     # On-chain governance (feedling's third attestation binding).
     # `app_auth_contract` is the deployed HivemindAppAuth address; when

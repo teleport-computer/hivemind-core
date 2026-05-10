@@ -822,6 +822,69 @@ class TestTrackedRunFailsClosedOnScopeError:
         assert captured["agent_store"] is agent_store
         assert captured["statuses"][-1] == "completed"
 
+    @pytest.mark.asyncio
+    async def test_tracked_run_uses_configured_output_char_cap(self, monkeypatch):
+        from hivemind.config import Settings
+
+        settings = Settings(
+            database_url="unused",
+            llm_api_key="test",
+            default_mediator_agent="",
+            max_run_output_chars=12_000,
+        )
+        agent_store = MagicMock(spec=AgentStore)
+        agent_store.get.return_value = AgentConfig(
+            agent_id="query-agent",
+            name="query",
+            description="",
+            agent_type="query",
+            image="hivemind-agent-tenant-query:latest",
+        )
+        pipeline = Pipeline(settings, MagicMock(spec=Database), agent_store)
+        pipeline._run_scope_agent = AsyncMock(
+            return_value=(
+                lambda sql, params, rows: {"allow": True, "rows": rows},
+                "def scope(sql, params, rows): return {'allow': True, 'rows': rows}",
+                {"total_tokens": 0},
+            )
+        )
+        pipeline._build_run_attestation = MagicMock(return_value={"signed": True})
+
+        captured: dict = {}
+
+        class FakeBackend:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            async def run(self, **kwargs):
+                return "x" * 15_000, {"total_tokens": 0}
+
+        class FakeRunStore:
+            def update_status(self, run_id, status, **kwargs):
+                captured.setdefault("statuses", []).append(status)
+                if status == "completed":
+                    captured["output"] = kwargs.get("output")
+
+            def update_stage(self, *args, **kwargs):
+                pass
+
+            def get(self, _run_id):
+                return {"mediator_started_at": None}
+
+        monkeypatch.setattr(pipeline_module, "SandboxBackend", FakeBackend)
+
+        await pipeline.run_query_agent_tracked(
+            agent_id="query-agent",
+            run_id="run-output-cap",
+            run_store=FakeRunStore(),
+            prompt="write a report",
+            scope_agent_id="scope-agent",
+            allowed_llm_providers=[],
+        )
+
+        assert captured["statuses"][-1] == "completed"
+        assert len(captured["output"]) == 12_000
+
 
 class TestQueryRequestProvider:
     def test_provider_field_default_none(self):
