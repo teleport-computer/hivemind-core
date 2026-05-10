@@ -10,6 +10,7 @@ Retention: artifacts are purged after ARTIFACT_RETENTION_SECONDS (default
 
 from __future__ import annotations
 
+import base64
 import time
 
 from ..db import Database, HttpDatabase
@@ -37,16 +38,17 @@ class ArtifactStore:
         """
         now = time.time()
         size = len(content)
+        content_base64 = base64.b64encode(content).decode("ascii")
         self.db.execute_commit(
             "INSERT INTO _hivemind_query_artifacts "
             "(run_id, filename, content, content_type, size_bytes, created_at) "
-            "VALUES (%s, %s, %s, %s, %s, %s) "
+            "VALUES (%s, %s, decode(%s, 'base64'), %s, %s, %s) "
             "ON CONFLICT (run_id, filename) DO UPDATE SET "
             "content = EXCLUDED.content, "
             "content_type = EXCLUDED.content_type, "
             "size_bytes = EXCLUDED.size_bytes, "
             "created_at = EXCLUDED.created_at",
-            [run_id, filename, content, content_type, size, now],
+            [run_id, filename, content_base64, content_type, size, now],
         )
         return {
             "run_id": run_id,
@@ -58,11 +60,17 @@ class ArtifactStore:
     def get(self, run_id: str, filename: str) -> dict | None:
         """Fetch one artifact. Returns None if missing."""
         rows = self.db.execute(
-            "SELECT run_id, filename, content, content_type, size_bytes, created_at "
+            "SELECT run_id, filename, encode(content, 'base64') AS content_base64, "
+            "content_type, size_bytes, created_at "
             "FROM _hivemind_query_artifacts WHERE run_id = %s AND filename = %s",
             [run_id, filename],
         )
-        return rows[0] if rows else None
+        if not rows:
+            return None
+        row = dict(rows[0])
+        content_base64 = row.pop("content_base64", "") or ""
+        row["content"] = base64.b64decode(str(content_base64))
+        return row
 
     def list_for_run(self, run_id: str) -> list[dict]:
         """List artifact metadata for a run (no content)."""

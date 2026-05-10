@@ -332,7 +332,8 @@ class _FakeDB:
         self.commit_calls.append((sql, list(params)))
         sql_upper = sql.upper()
         if sql_upper.startswith("INSERT"):
-            run_id, filename, content, ctype, size, created = params
+            run_id, filename, content_base64, ctype, size, created = params
+            content = base64.b64decode(content_base64)
             # upsert by (run_id, filename)
             self.rows = [
                 r for r in self.rows
@@ -360,10 +361,19 @@ class _FakeDB:
         self.select_calls.append((sql, list(params)))
         if "WHERE run_id = %s AND filename = %s" in sql:
             run_id, filename = params
-            return [
+            rows = [
                 r for r in self.rows
                 if r["run_id"] == run_id and r["filename"] == filename
             ]
+            if "content_base64" in sql:
+                return [
+                    {
+                        **{k: v for k, v in r.items() if k != "content"},
+                        "content_base64": base64.b64encode(r["content"]).decode("ascii"),
+                    }
+                    for r in rows
+                ]
+            return rows
         if "WHERE run_id = %s" in sql:
             run_id = params[0]
             return [
