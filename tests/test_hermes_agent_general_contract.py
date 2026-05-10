@@ -309,6 +309,11 @@ def test_scope_agent_uses_ai_agent_for_aggregate_policy(monkeypatch, capsys):
     assert "POLICY" in body
     assert policy in body
     init_kwargs = calls["inits"][0]["kwargs"]
+    assert init_kwargs["max_tokens"] >= 4096
+    system_prompt = init_kwargs["ephemeral_system_prompt"]
+    assert "Treat policy as both permissions and restrictions" in system_prompt
+    assert "Return an empty list" in system_prompt
+    assert "no policy-compliant useful disclosure" in system_prompt
     assert init_kwargs["reasoning_config"] == {"enabled": False, "effort": "none"}
     assert init_kwargs["request_overrides"]["extra_body"]["reasoning"] == {
         "effort": "none",

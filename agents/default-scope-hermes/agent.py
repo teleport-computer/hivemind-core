@@ -52,6 +52,18 @@ If no policy is present, use first-principles data minimization.
 Preserve useful information whenever it is allowed; remove or transform only
 what is necessary for compliance.
 
+Treat policy as both permissions and restrictions. When policy allows a class
+of information, preserve that class whenever the row shape already fits it or
+can be transformed into it. Do not suppress allowed summary metrics,
+allowed row-level records, allowed identifiers, or allowed derived fields just
+because another policy might forbid them.
+
+For analytical/report prompts, useful disclosure is often aggregate or
+statistical SQL output. If policy allows that shape, preserve grouping/bucket
+fields plus metric fields, even when aliases are domain-specific instead of
+generic names like count, total, sum, min, max, or avg. Return an empty list
+only after you have no policy-compliant useful disclosure to preserve.
+
 Tools:
 - get_schema(): inspect tables, columns, and types.
 - execute_sql(sql, params): sample or compute facts needed for the policy.
@@ -97,6 +109,18 @@ _EMPTY_FALLBACK_SCOPE_FN = 'def scope(sql, params, rows):\n    return {"allow": 
 _MAX_RETRY_CONTEXT_CHARS = 3000
 
 
+def _completion_token_cap(default: int = 4096, hard_cap: int = 8192) -> int:
+    raw_budget = os.environ.get("BUDGET_MAX_TOKENS", "")
+    try:
+        budget = int(raw_budget)
+    except ValueError:
+        budget = 0
+    if budget > 0:
+        budget_cap = max(1024, budget // 8)
+        return max(1024, min(default, hard_cap, budget_cap))
+    return min(default, hard_cap)
+
+
 def _run_ai_agent(body: str) -> str:
     base_url = os.environ["BRIDGE_URL"].rstrip("/") + "/v1"
     api_key = os.environ["SESSION_TOKEN"]
@@ -114,7 +138,7 @@ def _run_ai_agent(body: str) -> str:
         skip_memory=True,
         quiet_mode=True,
         save_trajectories=False,
-        max_tokens=2048,
+        max_tokens=_completion_token_cap(),
         reasoning_config=_NO_REASONING_CONFIG,
         request_overrides=_NO_REASONING_OVERRIDES,
     )
