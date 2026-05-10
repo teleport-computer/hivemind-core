@@ -84,6 +84,9 @@ Process:
 4. Use verify_scope_fn on the exact function you will emit. Use simulate_query
    or simulate_multi only when comparing candidates would materially clarify
    the privacy/utility frontier.
+For analytical/report prompts, your verified function should preserve useful
+summary rows in tests; a function that compiles but drops every useful metric
+row is not a good frontier.
 
 Function contract:
 - Signature exactly `def scope(sql, params, rows):`.
@@ -114,11 +117,15 @@ _VERIFY_TESTS = [
         "sql": "SELECT bucket, COUNT(*)::int AS total FROM events GROUP BY bucket",
         "params": [],
         "rows": [{"bucket": "2026-04-15", "total": 482237}],
+        "expect_allow": True,
+        "label": "summary metric row is preserved",
     },
     {
         "sql": "SELECT hashtag, watches FROM events ORDER BY watches DESC LIMIT 10",
         "params": [],
         "rows": [{"hashtag": "fyp", "watches": 2442}],
+        "expect_allow": True,
+        "label": "top-N summary row is preserved",
     },
 ]
 
@@ -133,6 +140,21 @@ def _completion_token_cap(default: int = 4096, hard_cap: int = 8192) -> int:
         budget_cap = max(1024, budget // 8)
         return max(1024, min(default, hard_cap, budget_cap))
     return min(default, hard_cap)
+
+
+def _is_analytical_prompt() -> bool:
+    text = QUERY_PROMPT.lower()
+    markers = (
+        "research",
+        "report",
+        "study",
+        "analysis",
+        "lifecycle",
+        "deep dive",
+        "memo",
+        "findings",
+    )
+    return any(marker in text for marker in markers)
 
 
 def _run_ai_agent(body: str) -> str:
@@ -214,6 +236,16 @@ def _verify_scope_source(source: str) -> tuple[bool, str]:
         return False, str(data.get("compile_error") or "compile failed")
     if not data.get("all_tests_passed"):
         return False, json.dumps(data.get("results", [])[:3])
+    if _is_analytical_prompt():
+        empty_results = [
+            item for item in data.get("results", [])
+            if int(item.get("rows_returned") or 0) == 0
+        ]
+        if empty_results:
+            return False, (
+                "scope_fn dropped useful synthetic summary rows: "
+                + json.dumps(empty_results[:3])
+            )
     return True, "ok"
 
 

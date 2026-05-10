@@ -443,6 +443,60 @@ def test_scope_agent_retries_unparseable_response_before_empty_fallback(
     assert "RECOVERY INSTRUCTION" in calls["chats"][1]
 
 
+def test_scope_agent_retries_empty_scope_for_report_prompt(monkeypatch, capsys):
+    empty_scope_fn = 'def scope(sql, params, rows):\n    return {"allow": True, "rows": []}\n'
+    passthrough_scope_fn = (
+        'def scope(sql, params, rows):\n    return {"allow": True, "rows": rows}\n'
+    )
+    monkeypatch.setenv(
+        "QUERY_PROMPT",
+        "Write a research report with evidence-backed findings.",
+    )
+    mod, calls = _load_agent(
+        monkeypatch,
+        "agents/default-scope-hermes/agent.py",
+        "default_scope_hermes_retry_empty_report_scope_test",
+        response=[
+            json.dumps({"scope_fn": empty_scope_fn}),
+            json.dumps({"scope_fn": passthrough_scope_fn}),
+        ],
+    )
+
+    class FakeVerifyResponse:
+        def __init__(self, rows_returned: int):
+            self.rows_returned = rows_returned
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "compiles": True,
+                "all_tests_passed": True,
+                "results": [
+                    {
+                        "label": "summary metric row is preserved",
+                        "allow": True,
+                        "rows_returned": self.rows_returned,
+                    }
+                ],
+            }
+
+    def fake_post(_url, *, json, headers, timeout):
+        rows_returned = 0 if 'rows": []' in json["source"] else 1
+        return FakeVerifyResponse(rows_returned)
+
+    monkeypatch.setattr(mod.httpx, "post", fake_post)
+
+    mod.main()
+
+    captured = capsys.readouterr()
+    emitted = json.loads(captured.out)
+    assert emitted == {"scope_fn": passthrough_scope_fn}
+    assert len(calls["chats"]) == 2
+    assert "dropped useful synthetic summary rows" in captured.err
+
+
 def test_scope_prompt_centers_privacy_utility_frontier():
     source = (ROOT / "agents/default-scope-hermes/agent.py").read_text()
 
