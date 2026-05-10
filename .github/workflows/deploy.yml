@@ -161,12 +161,22 @@ jobs:
         env:
           EC2_HOST: ${{ secrets.EC2_HOST }}
           EC2_USER: ${{ secrets.EC2_USER }}
+          PHALA_CLOUD_API_KEY: ${{ secrets.PHALA_CLOUD_API_KEY }}
         run: |
+          set -euo pipefail
+          q() {
+            printf "'%s'" "$(printf "%s" "$1" | sed "s/'/'\\\\''/g")"
+          }
+          REMOTE_STATUS='set -e; echo "relay: $(hostname) $(whoami)"; phala --version; phala status > /tmp/hivemind-phala-status.txt; head -10 /tmp/hivemind-phala-status.txt'
+          REMOTE_PREFIX=""
+          if [ -n "${PHALA_CLOUD_API_KEY:-}" ]; then
+            REMOTE_PREFIX="PHALA_CLOUD_API_KEY=$(q "$PHALA_CLOUD_API_KEY") "
+          fi
           ssh -i ~/.ssh/id_ed25519 -o BatchMode=yes \
             -o ServerAliveInterval=30 -o ServerAliveCountMax=20 \
             -o TCPKeepAlive=yes \
             "${EC2_USER}@${EC2_HOST}" \
-            'set -e; echo "relay: $(hostname) $(whoami)"; phala --version; phala status > /tmp/hivemind-phala-status.txt; head -10 /tmp/hivemind-phala-status.txt'
+            "${REMOTE_PREFIX}bash -lc $(q "$REMOTE_STATUS")"
 
       - name: Deploy via relay
         timeout-minutes: 24
