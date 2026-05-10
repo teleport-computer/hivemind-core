@@ -13,6 +13,13 @@ from .graders import grade_text
 from .scenarios import SCENARIOS
 
 
+def _int_value(value: object) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 def _read_text(path: str) -> str:
     if path == "-":
         return sys.stdin.read()
@@ -34,8 +41,66 @@ def _cmd_grade(args: argparse.Namespace) -> int:
     return 0 if result.passed else 1
 
 
-def _hmctl_base() -> list[str]:
-    return shlex.split(os.environ.get("HMCTL_BIN", "uv run hmctl"))
+def _hmctl_base(profile: str | None = None) -> list[str]:
+    cmd = shlex.split(os.environ.get("HMCTL_BIN", "uv run hmctl"))
+    if profile:
+        cmd.extend(["--profile", profile])
+    return cmd
+
+
+def _stage_seconds(run: dict, stage: str) -> float | None:
+    started = run.get(f"{stage}_started_at")
+    ended = run.get(f"{stage}_ended_at")
+    try:
+        if started is None or ended is None:
+            return None
+        return round(float(ended) - float(started), 3)
+    except (TypeError, ValueError):
+        return None
+
+
+def _run_seconds(run: dict) -> float | None:
+    try:
+        return round(float(run["updated_at"]) - float(run["created_at"]), 3)
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _coerce_usage(run: dict) -> dict:
+    usage = run.get("usage") or run.get("usage_json") or {}
+    if isinstance(usage, str):
+        try:
+            parsed = json.loads(usage)
+        except json.JSONDecodeError:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return usage if isinstance(usage, dict) else {}
+
+
+def _extract_run_metrics(run: dict) -> dict:
+    usage = _coerce_usage(run)
+    prompt_tokens = _int_value(usage.get("prompt_tokens"))
+    completion_tokens = _int_value(usage.get("completion_tokens"))
+    total_tokens = _int_value(usage.get("total_tokens")) or (
+        prompt_tokens + completion_tokens
+    )
+    stages = {
+        stage: seconds
+        for stage in ("build", "scope", "query", "mediator")
+        if (seconds := _stage_seconds(run, stage)) is not None
+    }
+    return {
+        "run_status": run.get("status") or "",
+        "billing_status": run.get("billing_status") or "",
+        "billing_cost_micro_usd": _int_value(run.get("billing_cost_micro_usd")),
+        "llm_calls": _int_value(usage.get("calls") or usage.get("llm_calls")),
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "total_tokens": total_tokens,
+        "duration_seconds": _run_seconds(run),
+        "stage_seconds": stages,
+        "telemetry_artifact_count": len(run.get("artifacts") or []),
+    }
 
 
 def _cmd_run_room(args: argparse.Namespace) -> int:
@@ -49,7 +114,7 @@ def _cmd_run_room(args: argparse.Namespace) -> int:
         safe_model = model.replace("/", "_").replace(":", "_")
         run_path = out_dir / f"{scenario.id}__{safe_model}.json"
         cmd = [
-            *_hmctl_base(),
+            *_hmctl_base(args.hmctl_profile),
             "--allow-degraded-attestation",
             "room",
             "ask",
@@ -86,6 +151,9 @@ def _cmd_run_room(args: argparse.Namespace) -> int:
         output = ""
         run_id = ""
         artifacts = []
+        telemetry = {}
+        telemetry_path = None
+        telemetry_stderr_path = None
         if proc.stdout.strip():
             try:
                 data = json.loads(proc.stdout)
@@ -93,6 +161,39 @@ def _cmd_run_room(args: argparse.Namespace) -> int:
                 run_id = data.get("run_id") or ""
                 artifacts = data.get("artifacts") or []
             except json.JSONDecodeError:
+                exit_code = 1
+        if run_id:
+            telemetry_path = out_dir / f"{scenario.id}__{safe_model}__run.json"
+            telemetry_stderr_path = telemetry_path.with_suffix(".stderr.txt")
+            telemetry_cmd = [
+                *_hmctl_base(args.hmctl_profile),
+                "--allow-degraded-attestation",
+                "room",
+                "runs",
+                run_id,
+                "--json",
+            ]
+            telemetry_proc = subprocess.run(
+                telemetry_cmd,
+                text=True,
+                capture_output=True,
+                timeout=60,
+            )
+            telemetry_path.write_text(
+                telemetry_proc.stdout or "", encoding="utf-8"
+            )
+            telemetry_stderr_path.write_text(
+                telemetry_proc.stderr or "", encoding="utf-8"
+            )
+            if telemetry_proc.stdout.strip():
+                try:
+                    parsed = json.loads(telemetry_proc.stdout)
+                    if isinstance(parsed, dict):
+                        telemetry = parsed
+                        artifacts = telemetry.get("artifacts") or artifacts
+                except json.JSONDecodeError:
+                    exit_code = 1
+            if telemetry_proc.returncode != 0:
                 exit_code = 1
         grade = grade_text(output, scenario)
         row = {
@@ -106,6 +207,11 @@ def _cmd_run_room(args: argparse.Namespace) -> int:
             "artifact_count": len(artifacts),
             "stdout_path": str(run_path),
             "stderr_path": str(stderr_path),
+            "telemetry_path": str(telemetry_path) if telemetry_path else "",
+            "telemetry_stderr_path": (
+                str(telemetry_stderr_path) if telemetry_stderr_path else ""
+            ),
+            **_extract_run_metrics(telemetry),
         }
         rows.append(row)
         print(json.dumps(row, sort_keys=True))
@@ -150,6 +256,10 @@ def build_parser() -> argparse.ArgumentParser:
     run_room.add_argument("--max-llm-calls", type=int, default=60)
     run_room.add_argument("--timeout", type=int, default=900)
     run_room.add_argument("--fetch", action="store_true")
+    run_room.add_argument(
+        "--hmctl-profile",
+        help="Optional hmctl profile to pass before room commands.",
+    )
     run_room.add_argument(
         "--output-dir",
         default="eval/results/live",

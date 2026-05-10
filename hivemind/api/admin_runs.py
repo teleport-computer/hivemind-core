@@ -42,6 +42,13 @@ def _coerce_usage(usage_json: Any) -> dict:
     return {}
 
 
+def _int_value(value: Any) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 def _enrich_run(
     run: dict,
     tenant_id: str,
@@ -56,10 +63,12 @@ def _enrich_run(
         out["room_name"] = room_name_by_id.get(out["room_id"]) or ""
     usage = _coerce_usage(out.get("usage_json"))
     out["usage"] = usage
-    out["llm_calls"] = int(usage.get("llm_calls") or 0)
-    out["prompt_tokens"] = int(usage.get("prompt_tokens") or 0)
-    out["completion_tokens"] = int(usage.get("completion_tokens") or 0)
-    out["total_tokens"] = out["prompt_tokens"] + out["completion_tokens"]
+    out["llm_calls"] = _int_value(usage.get("calls") or usage.get("llm_calls"))
+    out["prompt_tokens"] = _int_value(usage.get("prompt_tokens"))
+    out["completion_tokens"] = _int_value(usage.get("completion_tokens"))
+    out["total_tokens"] = _int_value(usage.get("total_tokens")) or (
+        out["prompt_tokens"] + out["completion_tokens"]
+    )
     # Drop the raw json blob from the wire response to keep it compact.
     out.pop("usage_json", None)
     return out
