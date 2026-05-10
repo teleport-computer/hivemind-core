@@ -4,6 +4,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import time
 from pathlib import Path
 from typing import Callable
@@ -21,7 +22,9 @@ from .models import (
 )
 from .sandbox.agents import AgentStore
 from .sandbox.backend import SandboxBackend
+from .sandbox.bridge import _render_markdown_to_simple_pdf
 from .sandbox.models import AgentConfig
+from .sandbox.models import MAX_ARTIFACT_BYTES, validate_artifact_filename
 from .sandbox.settings import build_sandbox_settings
 from .scope import compile_scope_fn
 from .tools import (
@@ -49,6 +52,70 @@ MEDIATOR_RESERVE_FRACTION = 0.3
 # + context) — if scope consumes the whole budget the bridge returns 429 to
 # query's very first call and the SDK subprocess exits with code 1.
 SCOPE_BUDGET_FRACTION = 0.5
+
+
+def _looks_like_report_output(prompt: str, output: str) -> bool:
+    text = (output or "").strip()
+    if len(re.findall(r"\S+", text)) < 500:
+        return False
+    prompt_lower = (prompt or "").lower()
+    if not any(
+        marker in prompt_lower
+        for marker in (
+            "report",
+            "research",
+            "study",
+            "memo",
+            "analysis",
+            "pdf",
+            "file",
+        )
+    ):
+        return False
+    output_lower = text.lower()
+    markers = (
+        "executive summary",
+        "methodology",
+        "findings",
+        "limitations",
+        "implications",
+    )
+    return text.startswith("#") or sum(marker in output_lower for marker in markers) >= 2
+
+
+def _artifact_stem_from_prompt(prompt: str) -> str:
+    stem = re.sub(r"[^A-Za-z0-9._-]+", "_", (prompt or "report").lower())
+    stem = stem.strip("._-")[:80] or "report"
+    if not re.match(r"^[A-Za-z0-9]", stem):
+        stem = f"report_{stem}"
+    return validate_artifact_filename(stem[:100])
+
+
+def _store_report_artifacts_if_needed(
+    *,
+    artifact_store,
+    artifacts_enabled: bool,
+    run_id: str,
+    prompt: str,
+    final_output: str,
+) -> None:
+    if not artifact_store or not artifacts_enabled:
+        return
+    markdown = (final_output or "").strip()
+    if not _looks_like_report_output(prompt, markdown):
+        return
+    stem = _artifact_stem_from_prompt(prompt)
+    markdown_bytes = markdown.encode("utf-8")
+    if len(markdown_bytes) <= MAX_ARTIFACT_BYTES:
+        artifact_store.put(
+            run_id,
+            f"{stem}.md",
+            markdown_bytes,
+            "text/markdown; charset=utf-8",
+        )
+    pdf_bytes = _render_markdown_to_simple_pdf(markdown)
+    if len(pdf_bytes) <= MAX_ARTIFACT_BYTES:
+        artifact_store.put(run_id, f"{stem}.pdf", pdf_bytes, "application/pdf")
 
 
 def _extract_scope_agent_json(raw: str) -> dict:
@@ -1249,10 +1316,15 @@ class Pipeline:
                         "filing it."
                     )
 
-            # Artifacts (if any) were written straight to Postgres during
-            # the query-agent turn via /sandbox/artifact-upload. No post-
-            # mediator commit needed — failed runs are swept by the TTL
-            # job in hivemind.core.
+            await asyncio.to_thread(
+                _store_report_artifacts_if_needed,
+                artifact_store=artifact_store,
+                artifacts_enabled=artifacts_enabled,
+                run_id=run_id,
+                prompt=prompt,
+                final_output=query_output or "",
+            )
+
             output_cap = max(0, int(self.settings.max_run_output_chars))
             final_output = (query_output or "")[:output_cap]
             attestation_envelope = await asyncio.to_thread(

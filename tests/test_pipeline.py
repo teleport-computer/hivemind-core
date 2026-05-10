@@ -885,6 +885,86 @@ class TestTrackedRunFailsClosedOnScopeError:
         assert captured["statuses"][-1] == "completed"
         assert len(captured["output"]) == 12_000
 
+    @pytest.mark.asyncio
+    async def test_tracked_run_stores_report_artifacts_from_final_output(
+        self, monkeypatch
+    ):
+        from hivemind.config import Settings
+
+        settings = Settings(
+            database_url="unused",
+            llm_api_key="test",
+            default_mediator_agent="",
+            max_run_output_chars=1_000,
+        )
+        agent_store = MagicMock(spec=AgentStore)
+        agent_store.get.return_value = AgentConfig(
+            agent_id="query-agent",
+            name="query",
+            description="",
+            agent_type="query",
+            image="hivemind-agent-tenant-query:latest",
+        )
+        pipeline = Pipeline(settings, MagicMock(spec=Database), agent_store)
+        pipeline._run_scope_agent = AsyncMock(
+            return_value=(
+                lambda sql, params, rows: {"allow": True, "rows": rows},
+                "def scope(sql, params, rows): return {'allow': True, 'rows': rows}",
+                {"total_tokens": 0},
+            )
+        )
+        pipeline._build_run_attestation = MagicMock(return_value={"signed": True})
+        report = "# Report\n\n" + ("finding evidence limitation implication " * 150)
+
+        class FakeBackend:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            async def run(self, **kwargs):
+                return report, {"total_tokens": 0}
+
+        class FakeRunStore:
+            def update_status(self, run_id, status, **kwargs):
+                pass
+
+            def update_stage(self, *args, **kwargs):
+                pass
+
+            def get(self, _run_id):
+                return {"mediator_started_at": None}
+
+        class FakeArtifactStore:
+            def __init__(self):
+                self.writes = []
+
+            def put(self, run_id, filename, content, content_type):
+                self.writes.append((run_id, filename, content, content_type))
+                return {"size_bytes": len(content)}
+
+        artifact_store = FakeArtifactStore()
+        monkeypatch.setattr(pipeline_module, "SandboxBackend", FakeBackend)
+
+        await pipeline.run_query_agent_tracked(
+            agent_id="query-agent",
+            run_id="run-report-artifact",
+            run_store=FakeRunStore(),
+            prompt="write a research report",
+            scope_agent_id="scope-agent",
+            allowed_llm_providers=[],
+            artifact_store=artifact_store,
+            artifacts_enabled=True,
+        )
+
+        filenames = [item[1] for item in artifact_store.writes]
+        assert filenames == [
+            "write_a_research_report.md",
+            "write_a_research_report.pdf",
+        ]
+        assert artifact_store.writes[0][2] == report.strip().encode("utf-8")
+        assert artifact_store.writes[0][3] == "text/markdown; charset=utf-8"
+        assert artifact_store.writes[1][2].startswith(b"%PDF-1.4")
+        assert artifact_store.writes[1][3] == "application/pdf"
+
 
 class TestQueryRequestProvider:
     def test_provider_field_default_none(self):
