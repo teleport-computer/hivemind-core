@@ -126,7 +126,7 @@ class SandboxSettings(BaseModel):
 
     # Shared limits
     global_max_llm_calls: int = Field(default=50, ge=1)
-    global_max_tokens: int = Field(default=300_000, ge=1)
+    global_max_tokens: int = Field(default=1_000_000, ge=1)
     global_timeout_seconds: int = Field(default=300, ge=1)
 
 

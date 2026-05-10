@@ -2,7 +2,7 @@
 
 Same role as agents/default-scope/agent.py: emit a `scope_fn` that
 transforms the query agent's rows before they reach the user, given a
-question + an optional MEDIATION_POLICY. Emits a single JSON object
+question + an optional room policy. Emits a single JSON object
 `{"scope_fn": "..."}` on the final line of stdout.
 
 Uses Hermes' Python AIAgent API. The system prompt below is a focused
@@ -18,7 +18,7 @@ Env (set automatically by the sandbox runner):
   HIVEMIND_MODEL             — model id passed to AIAgent
   QUERY_PROMPT               — the user's question
   QUERY_AGENT_ID             — the query agent simulate_* will run
-  POLICY_CONTEXT             — optional MEDIATION_POLICY to enforce
+  POLICY_CONTEXT             — optional room policy to enforce
 """
 
 from __future__ import annotations
@@ -45,18 +45,12 @@ HIVEMIND_MODEL = os.environ.get("HIVEMIND_MODEL", "moonshotai/kimi-2.6")
 DEFAULT_SYSTEM_PROMPT = """\
 You emit one Python row transformer for a hivemind room.
 
-Goal: preserve the most useful information the room policy permits while
-preventing what it forbids. Do not apply canned policies. If
-MEDIATION_POLICY is present, it is authoritative: enforce exactly that policy,
-with no extra categories and no missing categories. If no policy is present,
-use first-principles data minimization.
-
-Utility matters. Do not add unstated granularity rules. If the policy permits
-aggregate statistics, preserve compliant grouped or bucketed result rows such
-as counts, sums, averages, rankings, or trends unless the policy explicitly
-forbids that grouping key or field. Empty rows are appropriate only when the
-requested result shape violates the policy or when every returned row violates
-the policy.
+Goal: find the best privacy/utility frontier for this question and room. If
+POLICY is present, it is authoritative: enforce exactly that policy,
+with no extra categories and no missing categories. Do not apply canned policies.
+If no policy is present, use first-principles data minimization.
+Preserve useful information whenever it is allowed; remove or transform only
+what is necessary for compliance.
 
 Tools:
 - get_schema(): inspect tables, columns, and types.
@@ -69,15 +63,13 @@ Tools:
 
 Process:
 1. Read the policy and question.
-2. Inspect schema, and sample/compute only what is needed to understand the
-   privacy/utility tradeoff.
-3. Write the least destructive compliant transform on the privacy/utility
-   frontier: pass through, filter rows, drop or replace fields, derive safer
-   fields, summarize, or return no rows. Preserve allowed information when the
-   row shape already fits the policy.
-4. Call verify_scope_fn on the exact function you will emit. Include tests for
-   both an allowed result shape and a forbidden result shape when the policy
-   distinguishes them.
+2. Use get_schema and small execute_sql checks only when they help understand
+   the data shape or policy boundary.
+3. Draft the least destructive compliant transform: pass through, filter rows,
+   drop or replace fields, derive safer fields, summarize, or return no rows.
+4. Use verify_scope_fn on the exact function you will emit. Use simulate_query
+   or simulate_multi only when comparing candidates would materially clarify
+   the privacy/utility frontier.
 
 Function contract:
 - Signature exactly `def scope(sql, params, rows):`.
@@ -99,84 +91,10 @@ else:
 
 _NO_REASONING_CONFIG = {"enabled": False, "effort": "none"}
 _NO_REASONING_OVERRIDES = {"extra_body": {"reasoning": {"effort": "none", "exclude": True}}}
-_ENABLE_AGGREGATE_FALLBACK = os.environ.get(
-    "HIVEMIND_SCOPE_AGGREGATE_FALLBACK", ""
-).strip().lower() in {"1", "true", "yes", "on"}
 
 
 _EMPTY_FALLBACK_SCOPE_FN = 'def scope(sql, params, rows):\n    return {"allow": True, "rows": []}\n'
-
-_AGGREGATE_FALLBACK_SCOPE_FN = (
-    "def scope(sql, params, rows):\n"
-    "    sql_l = str(sql).lower()\n"
-    "    aggregate_sql = False\n"
-    '    for marker in ("group by", "count(", "sum(", "avg(", "min(", "max("):\n'
-    "        if marker in sql_l:\n"
-    "            aggregate_sql = True\n"
-    "    safe = []\n"
-    "    if aggregate_sql:\n"
-    "        for row in rows:\n"
-    "            if isinstance(row, dict):\n"
-    "                has_metric = False\n"
-    "                for value in row.values():\n"
-    "                    if isinstance(value, (int, float)) and not isinstance(value, bool):\n"
-    "                        has_metric = True\n"
-    "                if has_metric:\n"
-    "                    safe.append(dict(row))\n"
-    '    return {"allow": True, "rows": safe}\n'
-)
 _MAX_RETRY_CONTEXT_CHARS = 3000
-
-
-def _aggregate_fallback_is_policy_appropriate() -> bool:
-    text = f"{POLICY_CONTEXT}\n{QUERY_PROMPT}".lower()
-    policy = POLICY_CONTEXT.lower()
-    query = QUERY_PROMPT.lower()
-    aggregate_terms = (
-        "aggregate",
-        "statistic",
-        "statistics",
-        "count",
-        "counts",
-        "ranking",
-        "rankings",
-        "trend",
-        "trends",
-        "summary",
-        "summaries",
-        "highest",
-        "lowest",
-        "most",
-        "least",
-        "average",
-        "total",
-        "number of",
-    )
-    negative_aggregate_phrases = (
-        "not allowed: aggregate",
-        "not allowed aggregate",
-        "forbid aggregate",
-        "forbidden aggregate",
-        "disallow aggregate",
-        "disallowed aggregate",
-    )
-    policy_allows_aggregate = "allowed" in policy and any(
-        term in policy for term in aggregate_terms
-    )
-    query_asks_aggregate = any(term in query for term in aggregate_terms)
-    policy_denies_aggregate = any(phrase in text for phrase in negative_aggregate_phrases)
-    return policy_allows_aggregate and query_asks_aggregate and not policy_denies_aggregate
-
-
-def _statically_erases_rows(source: str) -> bool:
-    compact = re.sub(r"\s+", "", source)
-    return '"rows":[]' in compact or "'rows':[]" in compact
-
-
-def _fallback_scope_fn_source() -> str:
-    if _ENABLE_AGGREGATE_FALLBACK and _aggregate_fallback_is_policy_appropriate():
-        return _AGGREGATE_FALLBACK_SCOPE_FN
-    return _EMPTY_FALLBACK_SCOPE_FN
 
 
 def _run_ai_agent(body: str) -> str:
@@ -213,10 +131,8 @@ def _retry_body(body: str, reason: str, previous_response: str) -> str:
         "RECOVERY INSTRUCTION:\n"
         f"The previous scope attempt was not usable: {reason}.\n"
         "Return only one compact JSON object with a short scope_fn string. "
-        "No markdown, no explanation, no audit report. If the policy permits "
-        "aggregate statistics, do not erase compliant grouped or bucketed "
-        "result rows unless the policy explicitly forbids the grouping key or "
-        "field. Still block raw row dumps and fields the policy forbids.\n\n"
+        "No markdown, no explanation, no audit report. Enforce the policy "
+        "exactly and preserve allowed information when possible.\n\n"
         f"PREVIOUS RESPONSE:\n{previous}"
     )
 
@@ -229,14 +145,6 @@ def _retry_scope_emit(body: str, *, reason: str, previous_response: str) -> dict
         return None
     parsed = _extract_json_emit(retry_response)
     if parsed and isinstance(parsed.get("scope_fn"), str) and parsed["scope_fn"].strip():
-        if _aggregate_fallback_is_policy_appropriate() and _statically_erases_rows(
-            parsed["scope_fn"]
-        ):
-            print(
-                "scope agent retry still erased rows for allowed aggregate.",
-                file=sys.stderr,
-            )
-            return None
         return parsed
     print(
         f"scope agent retry produced no parseable JSON after {reason}. "
@@ -347,7 +255,7 @@ def main() -> None:
 
     parts: list[str] = []
     if POLICY_CONTEXT:
-        parts.append(f"MEDIATION_POLICY:\n{POLICY_CONTEXT}")
+        parts.append(f"POLICY:\n{POLICY_CONTEXT}")
     parts.append(f"QUESTION:\n{QUERY_PROMPT}")
     body = "\n\n".join(parts)
 
@@ -359,35 +267,6 @@ def main() -> None:
 
     parsed = _extract_json_emit(response)
     if parsed and isinstance(parsed.get("scope_fn"), str) and parsed["scope_fn"].strip():
-        if (
-            _ENABLE_AGGREGATE_FALLBACK
-            and _aggregate_fallback_is_policy_appropriate()
-            and _statically_erases_rows(parsed["scope_fn"])
-        ):
-            print(
-                "scope agent emitted static empty rows for allowed aggregate; "
-                "using aggregate fallback.",
-                file=sys.stderr,
-            )
-            print(json.dumps({"scope_fn": _AGGREGATE_FALLBACK_SCOPE_FN}))
-            return
-        if (
-            not _ENABLE_AGGREGATE_FALLBACK
-            and _aggregate_fallback_is_policy_appropriate()
-            and _statically_erases_rows(parsed["scope_fn"])
-        ):
-            print(
-                "scope agent emitted static empty rows for allowed aggregate; retrying.",
-                file=sys.stderr,
-            )
-            retry = _retry_scope_emit(
-                body,
-                reason="static empty rows for policy-allowed aggregate",
-                previous_response=response,
-            )
-            if retry:
-                print(json.dumps({"scope_fn": retry["scope_fn"]}))
-                return
         # Re-emit canonically so the pipeline parses cleanly.
         print(json.dumps({"scope_fn": parsed["scope_fn"]}))
         return
@@ -406,7 +285,7 @@ def main() -> None:
         f"scope agent produced no parseable JSON; using fallback. raw={response[:500]!r}",
         file=sys.stderr,
     )
-    print(json.dumps({"scope_fn": _fallback_scope_fn_source()}))
+    print(json.dumps({"scope_fn": _EMPTY_FALLBACK_SCOPE_FN}))
 
 
 if __name__ == "__main__":

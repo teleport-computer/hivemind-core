@@ -780,9 +780,9 @@ def test_room_help_documents_spec_and_budget_defaults():
 
     ask = runner.invoke(_cli_mod.cli, ["room", "ask", "--help"])
     assert ask.exit_code == 0
-    assert "--timeout 600" in ask.output
-    assert "--max-llm-calls 20" in ask.output
-    assert "--max-tokens 100000" in ask.output
+    assert "--timeout 900" in ask.output
+    assert "--max-llm-calls 60" in ask.output
+    assert "--max-tokens 1000000" in ask.output
     assert "hosted cap" in ask.output
     assert "active hmk_" in ask.output
 

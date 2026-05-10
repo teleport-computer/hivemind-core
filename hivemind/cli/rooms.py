@@ -1184,7 +1184,7 @@ def trust_room(
 @click.option(
     "--timeout",
     type=int,
-    default=600,
+    default=900,
     show_default=True,
     help=(
         "Seconds to give the run and local poll. CLI sends at most 3600; "
@@ -1195,14 +1195,14 @@ def trust_room(
 @click.option(
     "--max-llm-calls",
     type=int,
-    default=20,
+    default=60,
     show_default=True,
     help="LLM call budget for scope/query/mediator; hosted cap is usually 100.",
 )
 @click.option(
     "--max-tokens",
     type=int,
-    default=100_000,
+    default=1_000_000,
     show_default=True,
     help="Token budget for scope/query/mediator; hosted cap is usually 1000000.",
 )
@@ -1233,9 +1233,8 @@ def ask_room(
 ):
     """Ask a question through a room invite.
 
-    Defaults are tuned for short runs: --timeout 600, --max-llm-calls 20,
-    --max-tokens 100000. Dynamic scope/query/mediator rooms may need larger
-    budgets such as --timeout 900 --max-tokens 1000000 --max-llm-calls 60.
+    Defaults are tuned for dynamic scope/query/mediator rooms:
+    --timeout 900, --max-llm-calls 60, --max-tokens 1000000.
     Invite-token room asks are billed to the active hmk_ tenant profile.
     """
     if query_agent and agent_path:
