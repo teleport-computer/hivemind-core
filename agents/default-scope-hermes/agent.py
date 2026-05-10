@@ -30,6 +30,8 @@ import sys
 from contextlib import redirect_stdout
 from pathlib import Path
 
+import httpx
+
 _PLUGINS_DIR = os.environ.get("HERMES_BUNDLED_PLUGINS", "/opt/hivemind/plugins")
 if _PLUGINS_DIR not in sys.path:
     sys.path.insert(0, _PLUGINS_DIR)
@@ -107,6 +109,18 @@ _NO_REASONING_OVERRIDES = {"extra_body": {"reasoning": {"effort": "none", "exclu
 
 _EMPTY_FALLBACK_SCOPE_FN = 'def scope(sql, params, rows):\n    return {"allow": True, "rows": []}\n'
 _MAX_RETRY_CONTEXT_CHARS = 3000
+_VERIFY_TESTS = [
+    {
+        "sql": "SELECT bucket, COUNT(*)::int AS total FROM events GROUP BY bucket",
+        "params": [],
+        "rows": [{"bucket": "2026-04-15", "total": 482237}],
+    },
+    {
+        "sql": "SELECT hashtag, watches FROM events ORDER BY watches DESC LIMIT 10",
+        "params": [],
+        "rows": [{"hashtag": "fyp", "watches": 2442}],
+    },
+]
 
 
 def _completion_token_cap(default: int = 4096, hard_cap: int = 8192) -> int:
@@ -176,6 +190,31 @@ def _retry_scope_emit(body: str, *, reason: str, previous_response: str) -> dict
         file=sys.stderr,
     )
     return None
+
+
+def _verify_scope_source(source: str) -> tuple[bool, str]:
+    bridge_url = os.environ.get("BRIDGE_URL", "").rstrip("/")
+    session_token = os.environ.get("SESSION_TOKEN", "")
+    if not bridge_url or not session_token:
+        return True, "bridge verification unavailable"
+    try:
+        resp = httpx.post(
+            f"{bridge_url}/sandbox/verify_scope_fn",
+            json={"source": source, "tests": _VERIFY_TESTS},
+            headers={"Authorization": f"Bearer {session_token}"},
+            timeout=30.0,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as e:
+        print(f"scope self-verify unavailable: {e}", file=sys.stderr)
+        return True, "bridge verification unavailable"
+
+    if not data.get("compiles"):
+        return False, str(data.get("compile_error") or "compile failed")
+    if not data.get("all_tests_passed"):
+        return False, json.dumps(data.get("results", [])[:3])
+    return True, "ok"
 
 
 def _extract_json_emit(text: str) -> dict | None:
@@ -291,9 +330,29 @@ def main() -> None:
 
     parsed = _extract_json_emit(response)
     if parsed and isinstance(parsed.get("scope_fn"), str) and parsed["scope_fn"].strip():
-        # Re-emit canonically so the pipeline parses cleanly.
-        print(json.dumps({"scope_fn": parsed["scope_fn"]}))
-        return
+        verified, reason = _verify_scope_source(parsed["scope_fn"])
+        if not verified:
+            print(f"scope self-verify failed: {reason}", file=sys.stderr)
+            retry = _retry_scope_emit(
+                body,
+                reason=f"scope_fn failed self verification: {reason}",
+                previous_response=response,
+            )
+            if retry:
+                retry_verified, retry_reason = _verify_scope_source(retry["scope_fn"])
+                if retry_verified:
+                    print(json.dumps({"scope_fn": retry["scope_fn"]}))
+                    return
+                print(
+                    f"scope retry self-verify failed: {retry_reason}",
+                    file=sys.stderr,
+                )
+            print(json.dumps({"scope_fn": _EMPTY_FALLBACK_SCOPE_FN}))
+            return
+        else:
+            # Re-emit canonically so the pipeline parses cleanly.
+            print(json.dumps({"scope_fn": parsed["scope_fn"]}))
+            return
 
     # Fail closed with no disclosure so the pipeline can complete rather
     # than HARD FAIL on bad JSON.
