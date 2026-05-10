@@ -16,6 +16,14 @@ from .. import trust as _trust
 from ._http import _api_error, _hget, _pin_service_cert
 
 
+def _attestation_fetch_timeout_seconds() -> float:
+    raw = os.environ.get("HIVEMIND_ATTESTATION_FETCH_TIMEOUT", "30")
+    try:
+        return max(1.0, float(raw))
+    except ValueError:
+        return 30.0
+
+
 # ── Remote attestation / compose-hash consent ──
 #
 # Every command that hits the service calls ``_require_trust`` before
@@ -78,7 +86,7 @@ def _fetch_attestation(service: str) -> tuple[dict, bytes | None]:
         return _fetch_attestation_https(parsed)
     # Plain http — no TLS, no fingerprint to pin.
     try:
-        r = _hget(url, timeout=5)
+        r = _hget(url, timeout=_attestation_fetch_timeout_seconds())
     except (httpx.ConnectError, httpx.TimeoutException) as e:
         return ({"ready": False, "reason": f"fetch_failed: {e!r}"}, None)
     if r.status_code != 200:
@@ -113,7 +121,12 @@ def _fetch_attestation_https(parsed) -> tuple[dict, bytes | None]:
     ctx.check_hostname = False
     ctx.verify_mode = _ssl.CERT_NONE
     try:
-        conn = _httpc.HTTPSConnection(host, port, timeout=5, context=ctx)
+        conn = _httpc.HTTPSConnection(
+            host,
+            port,
+            timeout=_attestation_fetch_timeout_seconds(),
+            context=ctx,
+        )
         conn.request("GET", path)
         resp = conn.getresponse()
         body = resp.read()

@@ -184,6 +184,20 @@ def test_hermes_default_agents_do_not_include_deterministic_fallbacks():
             assert term not in source, f"{path} still contains {term}"
 
 
+def test_hermes_default_images_do_not_shadow_hermes_agent_package():
+    dockerfiles = (
+        ROOT / "agents/default-index-hermes/Dockerfile",
+        ROOT / "agents/default-query-hermes/Dockerfile",
+        ROOT / "agents/default-scope-hermes/Dockerfile",
+        ROOT / "agents/default-mediator-hermes/Dockerfile",
+    )
+
+    for path in dockerfiles:
+        source = path.read_text()
+        assert "/app/agent.py" not in source
+        assert "hivemind_agent.py" in source
+
+
 def test_query_agent_uses_bridge_tool_loop_for_benchmark_like_aggregate_prompt(
     monkeypatch,
     capsys,

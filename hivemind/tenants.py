@@ -91,10 +91,11 @@ __all__ = [
 
 
 # Initial pricing snapshots. Operators can override these in the control DB.
-# Values are micro-USD per million tokens, derived from OpenRouter's public
-# model list. Unknown providers/models are still metered as token usage but
-# are not charged until a price row is configured.
+# Values are micro-USD per million tokens, derived from provider public model
+# lists. Unknown providers/models are still metered as token usage but are not
+# charged until a price row is configured.
 _DEFAULT_MODEL_PRICES: tuple[tuple[str, str, int, int, str], ...] = (
+    ("tinfoil", "z-ai/glm-5", 1_000_000, 3_200_000, "z-ai-pricing"),
     ("openrouter", "z-ai/glm-5", 600_000, 2_080_000, "openrouter"),
     ("openrouter", "moonshotai/kimi-k2.6", 750_000, 3_500_000, "openrouter"),
     ("openrouter", "moonshotai/kimi-k2.5", 440_000, 2_000_000, "openrouter"),

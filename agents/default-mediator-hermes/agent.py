@@ -25,6 +25,25 @@ from pathlib import Path
 _PLUGINS_DIR = os.environ.get("HERMES_BUNDLED_PLUGINS", "/opt/hivemind/plugins")
 if _PLUGINS_DIR not in sys.path:
     sys.path.insert(0, _PLUGINS_DIR)
+
+
+def _isolate_hivemind_toolset() -> None:
+    """Keep Hermes startup from importing unrelated built-in tool modules."""
+    if os.environ.get("HIVEMIND_HERMES_ENABLE_BUILTIN_TOOLS", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }:
+        return
+    try:
+        from tools import registry as hermes_registry  # type: ignore
+    except Exception:
+        return
+    hermes_registry.discover_builtin_tools = lambda *args, **kwargs: []
+
+
+_isolate_hivemind_toolset()
 import hivemind  # noqa: E402, F401  (registers nothing for role=mediator)
 
 from run_agent import AIAgent  # noqa: E402

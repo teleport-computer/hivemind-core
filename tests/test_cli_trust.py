@@ -52,6 +52,7 @@ def _sandbox(tmp_path, monkeypatch):
         "HIVEMIND_TRUST_HASH",
         "HIVEMIND_NO_TRUST_CHECK",
         "HIVEMIND_ALLOW_DEGRADED_ATTESTATION",
+        "HIVEMIND_ATTESTATION_FETCH_TIMEOUT",
         "HIVEMIND_REQUIRE_DCAP",
         "HIVEMIND_REQUIRE_TLS_PIN",
     ):
@@ -112,6 +113,40 @@ def test_fetch_verified_room_retries_slow_attest_read(_sandbox, monkeypatch):
     assert {call["timeout"] for call in calls} == {
         _rooms_cli._ROOM_ATTEST_TIMEOUT_SECONDS
     }
+
+
+def test_fetch_attestation_uses_prod_safe_timeout(monkeypatch):
+    calls: list[dict] = []
+
+    class Resp:
+        status_code = 200
+
+        def json(self):
+            return {"ready": True, "attestation": {"compose_hash": "ab" * 32}}
+
+    def fake_get(url, **kwargs):
+        calls.append({"url": url, **kwargs})
+        return Resp()
+
+    monkeypatch.delenv("HIVEMIND_ATTESTATION_FETCH_TIMEOUT", raising=False)
+    monkeypatch.setattr(_cli_trust, "_hget", fake_get)
+
+    bundle, fp = _cli_trust._fetch_attestation("http://cvm.example")
+
+    assert fp is None
+    assert bundle["ready"] is True
+    assert calls == [
+        {
+            "url": "http://cvm.example/v1/attestation",
+            "timeout": 30.0,
+        }
+    ]
+
+
+def test_fetch_attestation_timeout_env_override(monkeypatch):
+    monkeypatch.setenv("HIVEMIND_ATTESTATION_FETCH_TIMEOUT", "45")
+
+    assert _cli_trust._attestation_fetch_timeout_seconds() == 45.0
 
 
 def test_remote_https_requires_full_attestation_by_default(

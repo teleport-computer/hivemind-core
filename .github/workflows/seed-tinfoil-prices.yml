@@ -71,8 +71,11 @@ jobs:
 
           # Default seed list: tinfoil/<model> with the rates inferred
           # from the operator's actual upstream bill. Adjust as Tinfoil's
-          # rates change.
+          # rates change. z-ai/glm-5 uses Z.AI's published GLM-5 pricing as
+          # the conservative baseline until a Tinfoil-specific contracted
+          # rate is known.
           DEFAULTS='[
+            {"provider":"tinfoil","model":"z-ai/glm-5","prompt":1.00,"completion":3.20},
             {"provider":"tinfoil","model":"kimi-k2-6","prompt":1.50,"completion":5.00},
             {"provider":"tinfoil","model":"kimi-k2","prompt":0.60,"completion":2.50},
             {"provider":"tinfoil","model":"kimi-k2-thinking","prompt":0.60,"completion":2.50},
