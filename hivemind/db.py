@@ -169,7 +169,7 @@ _INTERNAL_DDL: tuple[str, ...] = (
         query_mode TEXT NOT NULL,
         output_visibility TEXT NOT NULL,
         allowed_llm_providers TEXT NOT NULL DEFAULT '[]',
-        allow_artifacts BOOLEAN NOT NULL DEFAULT FALSE,
+        allow_artifacts BOOLEAN NOT NULL DEFAULT TRUE,
         room_policy TEXT NOT NULL DEFAULT '',
         created_at DOUBLE PRECISION NOT NULL,
         revoked_at DOUBLE PRECISION

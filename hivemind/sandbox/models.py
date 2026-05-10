@@ -326,3 +326,28 @@ class BridgeArtifactUploadResponse(BaseModel):
     size_bytes: int
     retention_seconds: int
     error: str | None = None
+
+
+class BridgeReportArtifactRequest(BaseModel):
+    """Request to store a Markdown report plus an optional rendered PDF."""
+
+    filename: str = "report"
+    markdown: str = Field(..., min_length=1)
+    include_pdf: bool = True
+
+    @field_validator("filename")
+    @classmethod
+    def _safe_report_stem(cls, v: str) -> str:
+        raw = (v or "report").strip()
+        if raw.endswith(".md"):
+            raw = raw[:-3]
+        if raw.endswith(".pdf"):
+            raw = raw[:-4]
+        return validate_artifact_filename(raw or "report")
+
+
+class BridgeReportArtifactResponse(BaseModel):
+    """Artifacts written by POST /sandbox/report-artifact."""
+
+    artifacts: list[BridgeArtifactUploadResponse] = Field(default_factory=list)
+    error: str | None = None

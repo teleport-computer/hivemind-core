@@ -278,6 +278,42 @@ class TestBridgeArtifactUpload:
             await client.aclose()
             await server.stop()
 
+    @pytest.mark.asyncio
+    async def test_report_artifact_writes_markdown_and_pdf(self):
+        records: dict = {}
+        store = _fake_artifact_store(records)
+        server = _bridge_with_artifacts(store=store)
+        port = await server.start()
+        client = httpx.AsyncClient(base_url=f"http://127.0.0.1:{port}")
+
+        try:
+            resp = await client.post(
+                "/sandbox/report-artifact",
+                headers={"Authorization": "Bearer test-token"},
+                json={
+                    "filename": "watch_report",
+                    "markdown": "# Title\n\nA concise report body.",
+                    "include_pdf": True,
+                },
+            )
+            assert resp.status_code == 200
+            data = resp.json()
+            paths = [item["path"] for item in data["artifacts"]]
+            assert paths == [
+                "/v1/runs/test-run-123/artifacts/watch_report.md",
+                "/v1/runs/test-run-123/artifacts/watch_report.pdf",
+            ]
+
+            md = records[("test-run-123", "watch_report.md")]
+            pdf = records[("test-run-123", "watch_report.pdf")]
+            assert md["content"] == b"# Title\n\nA concise report body."
+            assert md["content_type"] == "text/markdown; charset=utf-8"
+            assert pdf["content"].startswith(b"%PDF-1.4")
+            assert pdf["content_type"] == "application/pdf"
+        finally:
+            await client.aclose()
+            await server.stop()
+
 
 # ═══════════════════════════════════════════════════════════════════════
 # 2. ArtifactStore unit tests (pure in-memory MagicMock DB)

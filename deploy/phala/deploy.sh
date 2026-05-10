@@ -393,6 +393,7 @@ sync_hermes_default_agents() {
         default-query-hermes
     sync_env_value "${env_file}" HIVEMIND_DEFAULT_MEDIATOR_AGENT \
         default-mediator-hermes
+    sync_env_value "${env_file}" HIVEMIND_MEDIATOR_ALWAYS_LLM true
     sync_env_value "${env_file}" HIVEMIND_DEFAULT_INDEX_HERMES_IMAGE \
         "${image_prefix}/hivemind-default-index-hermes:${image_tag}"
     sync_env_value "${env_file}" HIVEMIND_DEFAULT_SCOPE_HERMES_IMAGE \

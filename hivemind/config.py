@@ -46,6 +46,10 @@ class Settings(BaseSettings):
     scope_model: str = ""
     query_model: str = ""
     mediator_model: str = ""
+    # When true, pinned mediators always make an LLM pass over the query
+    # output. Disable only for low-latency rooms that rely entirely on the
+    # scope function plus deterministic secret-marker checks.
+    mediator_always_llm: bool = True
 
     # Docker sandbox
     bridge_host: str = "0.0.0.0"

@@ -488,6 +488,9 @@ def register_room_routes(
             max_llm_calls=req.max_llm_calls,
             timeout_seconds=req.timeout_seconds,
             model=req.model,
+            scope_model=req.scope_model,
+            query_model=req.query_model,
+            mediator_model=req.mediator_model,
             provider=req.provider,
         )
         qreq = apply_room_to_query_request(qreq, room)

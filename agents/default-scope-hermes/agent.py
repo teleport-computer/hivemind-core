@@ -88,6 +88,15 @@ For analytical/report prompts, your verified function should preserve useful
 summary rows in tests; a function that compiles but drops every useful metric
 row is not a good frontier.
 
+Stay in your lane: scope designs the privacy transform. The query agent will
+do the research. Do not spend turns researching trends, lifecycles, categories,
+or final report evidence. For broad analytical/report prompts with no explicit
+restrictive policy, prefer a compact transform that preserves aggregate and
+summary rows, redacts obvious raw identifiers/URLs/secrets if they appear, and
+then verify it. Target one get_schema call, zero or one execute_sql shape check,
+and one verify_scope_fn call. Avoid simulate_query/simulate_multi unless the
+policy boundary is genuinely ambiguous.
+
 Function contract:
 - Signature exactly `def scope(sql, params, rows):`.
 - Return exactly `{"allow": True, "rows": <list of dicts>}`.
@@ -160,13 +169,18 @@ def _run_ai_agent(body: str) -> str:
     base_url = os.environ["BRIDGE_URL"].rstrip("/") + "/v1"
     api_key = os.environ["SESSION_TOKEN"]
 
+    try:
+        max_iterations = int(os.environ.get("HIVEMIND_SCOPE_MAX_ITERATIONS", "8"))
+    except ValueError:
+        max_iterations = 8
+    max_iterations = max(4, min(20, max_iterations))
+
     agent = AIAgent(
         base_url=base_url,
         api_key=api_key,
         provider="custom",
         model=HIVEMIND_MODEL,
-        # Match agents/default-scope: hard cap 20, target emit by 10.
-        max_iterations=20,
+        max_iterations=max_iterations,
         enabled_toolsets=["hivemind"],
         ephemeral_system_prompt=SYSTEM_PROMPT,
         skip_context_files=True,

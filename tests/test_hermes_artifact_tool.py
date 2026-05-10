@@ -46,10 +46,18 @@ def _load_plugin(monkeypatch, role: str):
 def test_query_role_registers_artifact_upload_tool(monkeypatch):
     _module, registrations = _load_plugin(monkeypatch, "query")
 
-    assert set(registrations) == {"execute_sql", "get_schema", "upload_artifact"}
+    assert set(registrations) == {
+        "execute_sql",
+        "get_schema",
+        "upload_artifact",
+        "upload_report_artifact",
+    }
     schema = registrations["upload_artifact"]["schema"]
     assert schema["name"] == "upload_artifact"
     assert "application/pdf" in schema["parameters"]["properties"]["content_type"]["description"]
+    report_schema = registrations["upload_report_artifact"]["schema"]
+    assert report_schema["name"] == "upload_report_artifact"
+    assert "rendered PDF" in report_schema["description"]
 
 
 @pytest.mark.asyncio
@@ -110,3 +118,44 @@ async def test_upload_artifact_tool_accepts_base64_pdf(monkeypatch):
     assert captured["payload"]["content_base64"] == pdf_b64
     assert captured["payload"]["content_type"] == "application/pdf"
     assert json.loads(result)["path"].endswith("/report.pdf")
+
+
+@pytest.mark.asyncio
+async def test_upload_report_artifact_tool_posts_markdown(monkeypatch):
+    module, registrations = _load_plugin(monkeypatch, "query")
+    captured = {}
+
+    async def fake_post(path, payload):
+        captured["path"] = path
+        captured["payload"] = payload
+        return {
+            "artifacts": [
+                {
+                    "path": "/v1/runs/run-1/artifacts/report.md",
+                    "size_bytes": 8,
+                    "retention_seconds": 86400,
+                },
+                {
+                    "path": "/v1/runs/run-1/artifacts/report.pdf",
+                    "size_bytes": 100,
+                    "retention_seconds": 86400,
+                },
+            ]
+        }
+
+    module._post = fake_post
+    result = await registrations["upload_report_artifact"]["handler"](
+        {
+            "filename": "report",
+            "markdown": "# Report",
+            "include_pdf": True,
+        }
+    )
+
+    assert captured["path"] == "/sandbox/report-artifact"
+    assert captured["payload"] == {
+        "filename": "report",
+        "markdown": "# Report",
+        "include_pdf": True,
+    }
+    assert json.loads(result)["artifacts"][1]["path"].endswith("/report.pdf")

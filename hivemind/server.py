@@ -284,7 +284,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             roles.append("mediator")
         models: list[str] = []
         for role in roles:
-            model = hm.pipeline._model_for(role, req.model)
+            role_override = {
+                "scope": req.scope_model,
+                "query": req.query_model,
+                "mediator": req.mediator_model,
+            }.get(role)
+            model = hm.pipeline._model_for(role, role_override or req.model)
             if model and model not in models:
                 models.append(model)
         return models
@@ -589,6 +594,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 max_calls=req.max_llm_calls,
                 timeout_seconds=req.timeout_seconds,
                 model=req.model,
+                scope_model=req.scope_model,
+                query_model=req.query_model,
+                mediator_model=req.mediator_model,
                 provider=req.provider,
                 policy=req.policy,
                 room_id=(room or {}).get("room_id"),

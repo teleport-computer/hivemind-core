@@ -252,6 +252,12 @@ def test_room_ask_omits_room_id_from_path_scoped_run_body(
             "tinfoil",
             "--model",
             "kimi-k2-6",
+            "--scope-model",
+            "z-ai/glm-5",
+            "--query-model",
+            "moonshotai/kimi-k2.6",
+            "--mediator-model",
+            "anthropic/claude-haiku-4.5",
             "Show me top hashtags.",
         ],
         input="y\n",
@@ -263,6 +269,9 @@ def test_room_ask_omits_room_id_from_path_scoped_run_body(
     assert captured["payload"]["query"] == "Show me top hashtags."
     assert captured["payload"]["provider"] == "tinfoil"
     assert captured["payload"]["model"] == "kimi-k2-6"
+    assert captured["payload"]["scope_model"] == "z-ai/glm-5"
+    assert captured["payload"]["query_model"] == "moonshotai/kimi-k2.6"
+    assert captured["payload"]["mediator_model"] == "anthropic/claude-haiku-4.5"
     assert captured["headers"]["Authorization"] == "Bearer hmq_test"
     assert captured["headers"]["X-Hivemind-Api-Key"] == "hmk_test"
     assert "room_id" not in captured["payload"]

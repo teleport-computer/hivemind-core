@@ -661,7 +661,12 @@ def rooms_cli():
     is_flag=True,
     help="Disable bridge LLM egress for pinned non-LLM agents.",
 )
-@click.option("--allow-artifacts", is_flag=True, help="Allow artifact uploads.")
+@click.option(
+    "--allow-artifacts/--no-artifacts",
+    default=True,
+    show_default=True,
+    help="Allow query agents to upload generated artifacts.",
+)
 @click.option(
     "--trust-mode",
     type=click.Choice(["operator_updates", "pinned", "owner_approved"]),
@@ -1238,7 +1243,10 @@ def trust_room(
         "billing credit against this budget and may allow higher explicit values."
     ),
 )
-@click.option("--model", type=str, default=None, help="LLM model override.")
+@click.option("--model", type=str, default=None, help="LLM model override for all roles.")
+@click.option("--scope-model", type=str, default=None, help="Scope-stage model override.")
+@click.option("--query-model", type=str, default=None, help="Query-stage model override.")
+@click.option("--mediator-model", type=str, default=None, help="Mediator-stage model override.")
 @click.option("--provider", type=str, default=None, help="LLM provider override.")
 @click.option("--json", "as_json", is_flag=True, help="Emit JSON on stdout.")
 @click.option("--fetch", is_flag=True, help="Download visible artifacts.")
@@ -1258,6 +1266,9 @@ def ask_room(
     max_llm_calls: int,
     max_tokens: int,
     model: str | None,
+    scope_model: str | None,
+    query_model: str | None,
+    mediator_model: str | None,
     provider: str | None,
     as_json: bool,
     fetch: bool,
@@ -1310,6 +1321,12 @@ def ask_room(
         payload["timeout_seconds"] = min(timeout, 3600)
     if model:
         payload["model"] = model
+    if scope_model:
+        payload["scope_model"] = scope_model
+    if query_model:
+        payload["query_model"] = query_model
+    if mediator_model:
+        payload["mediator_model"] = mediator_model
     if provider:
         payload["provider"] = provider
 

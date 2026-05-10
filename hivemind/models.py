@@ -31,6 +31,11 @@ class QueryRequest(BaseModel):
     # to the global HIVEMIND_LLM_MODEL. Use to A/B different models per
     # query, e.g. "z-ai/glm-5" or "moonshotai/kimi-k2.5".
     model: str | None = None
+    # Optional per-role model overrides. These let scope stay on a reliable
+    # tool-loop model while query uses a stronger prose/research model.
+    scope_model: str | None = None
+    query_model: str | None = None
+    mediator_model: str | None = None
     # Per-call LLM provider override. Accepts "openrouter" (default) or
     # "tinfoil" (requires HIVEMIND_TINFOIL_API_KEY on the server). Lets a
     # recipient flip provider per-question without re-deploying.

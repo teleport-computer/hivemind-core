@@ -96,7 +96,7 @@ class RoomEgress(BaseModel):
     """
 
     llm_providers: list[str] = Field(default_factory=lambda: ["tinfoil"])
-    allow_artifacts: bool = False
+    allow_artifacts: bool = True
 
     @model_validator(mode="after")
     def _normalize(self):
@@ -197,6 +197,9 @@ class RoomRunRequest(BaseModel):
     max_llm_calls: int | None = Field(default=None, ge=1)
     timeout_seconds: int | None = Field(default=None, ge=1)
     model: str | None = None
+    scope_model: str | None = None
+    query_model: str | None = None
+    mediator_model: str | None = None
     provider: str | None = None
 
     @model_validator(mode="after")

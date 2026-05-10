@@ -894,3 +894,86 @@ class TestQueryRequestProvider:
     def test_provider_field_round_trip(self):
         req = QueryRequest(query="hi", provider="tinfoil")
         assert req.provider == "tinfoil"
+
+
+class TestRoleModelRouting:
+    @pytest.mark.asyncio
+    async def test_run_query_uses_per_role_model_overrides(self):
+        settings = Settings(
+            database_url="unused",
+            llm_api_key="test",
+            default_query_agent="query-default",
+            default_scope_agent="scope-default",
+            default_mediator_agent="mediator-default",
+        )
+        pipeline = Pipeline(settings, MagicMock(spec=Database), MagicMock(spec=AgentStore))
+        pipeline._run_scope_agent = AsyncMock(
+            return_value=(
+                lambda sql, params, rows: {"allow": True, "rows": rows},
+                "def scope(sql, params, rows): return {'allow': True, 'rows': rows}",
+                {"total_tokens": 1},
+            )
+        )
+        pipeline._run_query_agent = AsyncMock(
+            return_value=("draft", {"total_tokens": 1})
+        )
+        pipeline._run_mediator_agent = AsyncMock(
+            return_value=("final", {"total_tokens": 1})
+        )
+
+        resp = await pipeline.run_query(
+            QueryRequest(
+                query="write report",
+                scope_model="z-ai/glm-5",
+                query_model="moonshotai/kimi-k2.6",
+                mediator_model="anthropic/claude-haiku-4.5",
+            )
+        )
+
+        assert resp.output == "final"
+        assert pipeline._run_scope_agent.await_args.kwargs["model"] == "z-ai/glm-5"
+        assert (
+            pipeline._run_query_agent.await_args.kwargs["model"]
+            == "moonshotai/kimi-k2.6"
+        )
+        assert (
+            pipeline._run_mediator_agent.await_args.kwargs["model"]
+            == "anthropic/claude-haiku-4.5"
+        )
+
+    @pytest.mark.asyncio
+    async def test_mediator_env_defaults_to_always_llm(self, monkeypatch):
+        settings = Settings(
+            database_url="unused",
+            llm_api_key="test",
+            mediator_always_llm=True,
+        )
+        agent_store = MagicMock(spec=AgentStore)
+        agent_store.get.return_value = AgentConfig(
+            agent_id="mediator",
+            name="mediator",
+            description="",
+            agent_type="mediator",
+            image="mediator:latest",
+        )
+        pipeline = Pipeline(settings, MagicMock(spec=Database), agent_store)
+        captured: dict = {}
+
+        class FakeBackend:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            async def run(self, **kwargs):
+                captured["env"] = kwargs["env"]
+                return "filtered", {"total_tokens": 0}
+
+        monkeypatch.setattr(pipeline_module, "SandboxBackend", FakeBackend)
+
+        output, _usage = await pipeline._run_mediator_agent(
+            mediator_agent_id="mediator",
+            raw_output="safe aggregate report",
+            prompt="write report",
+        )
+
+        assert output == "filtered"
+        assert captured["env"]["HIVEMIND_MEDIATOR_ALWAYS_LLM"] == "true"

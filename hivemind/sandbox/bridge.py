@@ -19,6 +19,8 @@ from .models import (
     BridgeLLMResponse,
     BridgeArtifactUploadRequest,
     BridgeArtifactUploadResponse,
+    BridgeReportArtifactRequest,
+    BridgeReportArtifactResponse,
     BridgeToolRequest,
     BridgeToolResponse,
     OpenAIChatRequest,
@@ -50,6 +52,89 @@ def _estimate_prompt_tokens(messages: list[dict]) -> int:
             except Exception:
                 total_chars += len(str(content))
     return max(1, total_chars // 3)
+
+
+def _pdf_escape(value: str) -> str:
+    return (
+        value.replace("\\", "\\\\")
+        .replace("(", "\\(")
+        .replace(")", "\\)")
+        .encode("latin-1", "replace")
+        .decode("latin-1")
+    )
+
+
+def _render_markdown_to_simple_pdf(markdown: str) -> bytes:
+    """Render readable Markdown text into a small dependency-free PDF.
+
+    This intentionally avoids HTML/CSS fidelity; it gives agents a real PDF
+    artifact path in minimal sandbox/server images where pandoc/weasyprint are
+    not installed.
+    """
+    import textwrap
+
+    lines: list[str] = []
+    for raw in (markdown or "").splitlines():
+        line = raw.rstrip()
+        if not line:
+            lines.append("")
+            continue
+        width = 78 if line.startswith("#") else 92
+        lines.extend(textwrap.wrap(line, width=width) or [""])
+
+    page_line_count = 52
+    pages = [
+        lines[i : i + page_line_count] for i in range(0, len(lines), page_line_count)
+    ] or [[]]
+
+    objects: list[str | None] = [None]
+
+    def add(obj: str) -> int:
+        objects.append(obj)
+        return len(objects) - 1
+
+    pages_id = add("")
+    font_id = add("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>")
+    page_ids: list[int] = []
+    for page in pages:
+        body = ["BT", "/F1 10 Tf", "50 750 Td", "14 TL"]
+        for line in page:
+            body.append(f"({_pdf_escape(line)}) Tj")
+            body.append("T*")
+        body.append("ET")
+        stream = "\n".join(body).encode("latin-1", "replace")
+        content_id = add(
+            f"<< /Length {len(stream)} >>\nstream\n"
+            + stream.decode("latin-1")
+            + "\nendstream"
+        )
+        page_id = add(
+            f"<< /Type /Page /Parent {pages_id} 0 R /MediaBox [0 0 612 792] "
+            f"/Resources << /Font << /F1 {font_id} 0 R >> >> "
+            f"/Contents {content_id} 0 R >>"
+        )
+        page_ids.append(page_id)
+
+    kids = " ".join(f"{pid} 0 R" for pid in page_ids)
+    objects[pages_id] = f"<< /Type /Pages /Kids [{kids}] /Count {len(page_ids)} >>"
+    catalog_id = add(f"<< /Type /Catalog /Pages {pages_id} 0 R >>")
+
+    out = bytearray(b"%PDF-1.4\n")
+    offsets = [0]
+    for idx, obj in enumerate(objects[1:], start=1):
+        offsets.append(len(out))
+        out.extend(f"{idx} 0 obj\n{obj}\nendobj\n".encode("latin-1", "replace"))
+    xref_at = len(out)
+    out.extend(f"xref\n0 {len(objects)}\n0000000000 65535 f \n".encode("ascii"))
+    for off in offsets[1:]:
+        out.extend(f"{off:010d} 00000 n \n".encode("ascii"))
+    out.extend(
+        (
+            f"trailer\n<< /Size {len(objects)} /Root {catalog_id} 0 R >>\n"
+            f"startxref\n{xref_at}\n%%EOF\n"
+        ).encode("ascii")
+    )
+    return bytes(out)
 
 
 def _anthropic_to_internal(req: AnthropicMessagesRequest) -> dict:
@@ -1040,6 +1125,69 @@ class BridgeServer:
                     size_bytes=result["size_bytes"],
                     retention_seconds=bridge.artifact_retention_seconds,
                 )
+
+            @app.post(
+                "/sandbox/report-artifact",
+                dependencies=[Depends(_check_token)],
+                response_model=BridgeReportArtifactResponse,
+            )
+            async def report_artifact(
+                req: BridgeReportArtifactRequest,
+            ) -> BridgeReportArtifactResponse:
+                stem = req.filename
+                markdown_bytes = req.markdown.encode("utf-8")
+                if len(markdown_bytes) > MAX_ARTIFACT_BYTES:
+                    raise HTTPException(
+                        413,
+                        (
+                            f"Markdown artifact too large ({len(markdown_bytes)} bytes). "
+                            f"Max: {MAX_ARTIFACT_BYTES} bytes."
+                        ),
+                    )
+
+                written: list[BridgeArtifactUploadResponse] = []
+                md_name = f"{stem}.md"
+                md_result = await asyncio.to_thread(
+                    bridge.artifact_store.put,
+                    bridge.run_id,
+                    md_name,
+                    markdown_bytes,
+                    "text/markdown; charset=utf-8",
+                )
+                written.append(
+                    BridgeArtifactUploadResponse(
+                        path=f"/v1/runs/{bridge.run_id}/artifacts/{md_name}",
+                        size_bytes=md_result["size_bytes"],
+                        retention_seconds=bridge.artifact_retention_seconds,
+                    )
+                )
+
+                if req.include_pdf:
+                    pdf_bytes = _render_markdown_to_simple_pdf(req.markdown)
+                    if len(pdf_bytes) > MAX_ARTIFACT_BYTES:
+                        raise HTTPException(
+                            413,
+                            (
+                                f"PDF artifact too large ({len(pdf_bytes)} bytes). "
+                                f"Max: {MAX_ARTIFACT_BYTES} bytes."
+                            ),
+                        )
+                    pdf_name = f"{stem}.pdf"
+                    pdf_result = await asyncio.to_thread(
+                        bridge.artifact_store.put,
+                        bridge.run_id,
+                        pdf_name,
+                        pdf_bytes,
+                        "application/pdf",
+                    )
+                    written.append(
+                        BridgeArtifactUploadResponse(
+                            path=f"/v1/runs/{bridge.run_id}/artifacts/{pdf_name}",
+                            size_bytes=pdf_result["size_bytes"],
+                            retention_seconds=bridge.artifact_retention_seconds,
+                        )
+                    )
+                return BridgeReportArtifactResponse(artifacts=written)
 
         return app
 

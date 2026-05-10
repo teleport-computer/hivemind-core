@@ -221,6 +221,27 @@ def test_room_create_omitted_query_pins_service_default(room_env):
     assert room["manifest"]["query"]["agent_id"] == "query-a"
 
 
+def test_room_create_defaults_artifacts_on(room_env):
+    client, tenant, _hive = room_env
+    resp = client.post(
+        "/v1/rooms",
+        json={
+            "name": "artifact default",
+            "rules": "Use the service default query agent.",
+            "scope_agent_id": "scope-a",
+        },
+        headers=_headers(tenant["api_key"]),
+    )
+
+    assert resp.status_code == 200, resp.text
+    room = resp.json()["room"]
+    assert room["manifest"]["egress"]["allow_artifacts"] is True
+
+    who = client.get("/v1/whoami", headers=_headers(resp.json()["token"]))
+    assert who.status_code == 200
+    assert who.json()["constraints"]["allow_artifacts"] is True
+
+
 def test_room_create_explicit_uploadable_bypasses_service_default(room_env):
     client, tenant, _hive = room_env
     resp = client.post(

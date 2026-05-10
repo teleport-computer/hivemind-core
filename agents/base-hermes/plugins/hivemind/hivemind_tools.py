@@ -152,6 +152,36 @@ UPLOAD_ARTIFACT_SCHEMA = {
     },
 }
 
+UPLOAD_REPORT_ARTIFACT_SCHEMA = {
+    "name": "upload_report_artifact",
+    "description": (
+        "Upload a Markdown report and, when possible, a rendered PDF version "
+        "to the room artifact store. Use for substantial reports, studies, "
+        "memos, research writeups, or when the user asks for a file/PDF. "
+        "Only available when the room allows artifacts."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "filename": {
+                "type": "string",
+                "description": "Safe basename/stem, e.g. report or watch_history_report.",
+                "default": "report",
+            },
+            "markdown": {
+                "type": "string",
+                "description": "The complete Markdown report content.",
+            },
+            "include_pdf": {
+                "type": "boolean",
+                "description": "Also render and upload a PDF copy.",
+                "default": True,
+            },
+        },
+        "required": ["markdown"],
+    },
+}
+
 VERIFY_SCOPE_FN_SCHEMA = {
     "name": "verify_scope_fn",
     "description": (
@@ -329,6 +359,26 @@ async def upload_artifact_handler(args: dict[str, Any], **_kw) -> str:
     return json.dumps(data)
 
 
+async def upload_report_artifact_handler(args: dict[str, Any], **_kw) -> str:
+    filename = (args.get("filename") or "report").strip() or "report"
+    markdown = args.get("markdown", "")
+    include_pdf = bool(args.get("include_pdf", True))
+    if not str(markdown).strip():
+        return "Error: markdown is required"
+    try:
+        data = await _post(
+            "/sandbox/report-artifact",
+            {
+                "filename": filename,
+                "markdown": str(markdown),
+                "include_pdf": include_pdf,
+            },
+        )
+    except Exception as e:
+        return f"Error: {e}"
+    return json.dumps(data)
+
+
 async def verify_scope_fn_handler(args: dict[str, Any], **_kw) -> str:
     source = args.get("source", "") or ""
     tests_raw = args.get("tests", "[]")
@@ -436,7 +486,8 @@ async def simulate_multi_handler(args: dict[str, Any], **_kw) -> str:
 # is defense-in-depth, NOT the primary boundary.
 #
 # Roles match the access levels in hivemind/sandbox/tools.py:
-#   query        → execute_sql, get_schema, upload_artifact
+#   query        → execute_sql, get_schema, upload_artifact,
+#                  upload_report_artifact
 #   index        → execute_sql, get_schema
 #   scope        → execute_sql, get_schema, verify_scope_fn,
 #                  simulate_query, simulate_multi
@@ -451,7 +502,12 @@ import logging as _logging
 _log = _logging.getLogger(__name__)
 
 _ROLE_TOOLS: dict[str, set[str]] = {
-    "query": {"execute_sql", "get_schema", "upload_artifact"},
+    "query": {
+        "execute_sql",
+        "get_schema",
+        "upload_artifact",
+        "upload_report_artifact",
+    },
     "index": {"execute_sql", "get_schema"},
     "scope": {
         "execute_sql",
@@ -488,6 +544,11 @@ _ALL_TOOLS = (
     ("execute_sql", EXECUTE_SQL_SCHEMA, execute_sql_handler),
     ("get_schema", GET_SCHEMA_SCHEMA, get_schema_handler),
     ("upload_artifact", UPLOAD_ARTIFACT_SCHEMA, upload_artifact_handler),
+    (
+        "upload_report_artifact",
+        UPLOAD_REPORT_ARTIFACT_SCHEMA,
+        upload_report_artifact_handler,
+    ),
     ("verify_scope_fn", VERIFY_SCOPE_FN_SCHEMA, verify_scope_fn_handler),
     ("simulate_query", SIMULATE_QUERY_SCHEMA, simulate_query_handler),
     ("simulate_multi", SIMULATE_MULTI_SCHEMA, simulate_multi_handler),

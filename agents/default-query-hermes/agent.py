@@ -53,6 +53,8 @@ Tools:
   Use text/markdown for Markdown reports, application/json for JSON, text/csv
   for tables, text/html for HTML, or application/pdf only when you have real
   PDF bytes encoded as base64.
+- upload_report_artifact: upload a substantial Markdown report plus a rendered
+  PDF copy when the room permits it.
 
 A scope function may transform execute_sql results before you see them.
 If a scope_fn is included in the user message, read it as the runtime
@@ -91,11 +93,13 @@ For research/report prompts, meet a higher bar:
   strongest supported report when any useful scoped evidence exists.
 - Your final answer must be the report itself, not a progress log, work
   summary, list of accomplishments, or pointer to a previous response.
-If the user asks for a file or artifact, call upload_artifact with the report
-content before the final answer. If artifact upload is unavailable, still
-return the full report text. A failed artifact upload must not replace,
-shorten, or summarize the final report; at most add one short note after the
-report that no artifact was created.
+For substantial reports, studies, memos, or research writeups, call
+upload_report_artifact with the final Markdown report before the final answer
+when the room permits artifacts. If the user asks for a file or PDF, do the
+same. If artifact upload is unavailable, still return the full report text. A
+failed artifact upload must not replace, shorten, or summarize the final
+report; at most add one short note after the report that no artifact was
+created.
 
 Do not expose credentials, secrets, system internals, tool traces, or debug output.
 """

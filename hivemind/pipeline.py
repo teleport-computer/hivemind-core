@@ -339,7 +339,9 @@ class Pipeline:
 
         req_timeout = req.timeout_seconds
         req_max_calls = req.max_llm_calls
-        req_model = req.model
+        req_scope_model = req.scope_model or req.model
+        req_query_model = req.query_model or req.model
+        req_mediator_model = req.mediator_model or req.model
         req_provider = req.provider
         # Eagerly resolve so an unknown provider fails the whole request
         # before we burn scope-stage budget.
@@ -360,7 +362,7 @@ class Pipeline:
             scope_fn, scope_fn_source, scope_usage = await self._run_scope_agent(
                 req, max_tokens=scope_budget,
                 max_calls=req_max_calls, timeout_seconds=req_timeout,
-                model=req_model, provider=req_provider,
+                model=req_scope_model, provider=req_provider,
             )
             used = scope_usage.get("total_tokens", 0)
             total_tokens += used
@@ -369,7 +371,7 @@ class Pipeline:
             scope_fn, scope_fn_source, scope_usage = await self._run_scope_agent(
                 req, max_tokens=scope_budget,
                 max_calls=req_max_calls, timeout_seconds=req_timeout,
-                model=req_model, provider=req_provider,
+                model=req_scope_model, provider=req_provider,
             )
             used = scope_usage.get("total_tokens", 0)
             total_tokens += used
@@ -389,7 +391,7 @@ class Pipeline:
             max_tokens=query_max_tokens,
             timeout_seconds=req_timeout,
             return_usage=True,
-            model=req_model,
+            model=req_query_model,
             provider=req_provider,
         )
         used = query_usage.get("total_tokens", 0)
@@ -415,7 +417,7 @@ class Pipeline:
                     max_calls=req_max_calls,
                     timeout_seconds=req_timeout,
                     policy=req.policy,
-                    model=req_model,
+                    model=req_mediator_model,
                     provider=req_provider,
                 )
             except ValueError as e:
@@ -774,6 +776,9 @@ class Pipeline:
             "RAW_OUTPUT": raw_output,
             "QUERY_PROMPT": prompt,
             "MEDIATION_POLICY": policy or "",
+            "HIVEMIND_MEDIATOR_ALWAYS_LLM": (
+                "true" if self.settings.mediator_always_llm else "false"
+            ),
         }
 
         # Mediator has NO data access tools
@@ -939,6 +944,9 @@ class Pipeline:
         max_calls: int | None = None,
         timeout_seconds: int | None = None,
         model: str | None = None,
+        scope_model: str | None = None,
+        query_model: str | None = None,
+        mediator_model: str | None = None,
         provider: str | None = None,
         policy: str | None = None,
         room_id: str | None = None,
@@ -990,6 +998,9 @@ class Pipeline:
             effective_max = min(requested_max, global_max)
             remaining = effective_max
             usage_total = _new_usage_summary(effective_max)
+            scope_model_override = scope_model or model
+            query_model_override = query_model or model
+            mediator_model_override = mediator_model or model
 
             # -- Stage 0: Scope resolution --
             scope_fn = None
@@ -1013,11 +1024,13 @@ class Pipeline:
                 )
                 try:
                     scope_budget = max(1, int(remaining * SCOPE_BUDGET_FRACTION))
-                    scope_model = self._model_for("scope", model)
+                    resolved_scope_model = self._model_for(
+                        "scope", scope_model_override
+                    )
                     scope_fn, scope_fn_source, scope_usage = await self._run_scope_agent(
                         req_for_scope, max_tokens=scope_budget,
                         max_calls=max_calls, timeout_seconds=timeout_seconds,
-                        model=model, provider=provider,
+                        model=scope_model_override, provider=provider,
                         llm_egress_enabled=llm_egress_enabled,
                         room_vault_items=room_vault_items,
                         allowed_tables=allowed_tables,
@@ -1029,7 +1042,7 @@ class Pipeline:
                         "scope",
                         scope_usage,
                         provider=provider,
-                        model=scope_model,
+                        model=resolved_scope_model,
                     )
                 finally:
                     await asyncio.to_thread(
@@ -1100,7 +1113,7 @@ class Pipeline:
 
             backend = SandboxBackend(
                 self._client_for(provider),
-                self._model_for("query", model),
+                self._model_for("query", query_model_override),
                 self._sandbox_settings,
                 agent_config,
                 agent_store=self.agent_store,
@@ -1128,7 +1141,7 @@ class Pipeline:
                 "query",
                 query_usage,
                 provider=provider,
-                model=self._model_for("query", model),
+                model=self._model_for("query", query_model_override),
             )
             await asyncio.to_thread(
                 run_store.update_stage, run_id, "query",
@@ -1167,7 +1180,9 @@ class Pipeline:
                     started_at=mediator_t0,
                 )
                 try:
-                    mediator_model = self._model_for("mediator", model)
+                    resolved_mediator_model = self._model_for(
+                        "mediator", mediator_model_override
+                    )
                     query_output, mediator_usage = await self._run_mediator_agent(
                         mediator_agent_id=resolved_mediator_id,
                         raw_output=query_output,
@@ -1176,7 +1191,7 @@ class Pipeline:
                         max_calls=max_calls,
                         timeout_seconds=timeout_seconds,
                         policy=policy,
-                        model=model,
+                        model=mediator_model_override,
                         provider=provider,
                         llm_egress_enabled=llm_egress_enabled,
                     )
@@ -1185,7 +1200,7 @@ class Pipeline:
                         "mediator",
                         mediator_usage,
                         provider=provider,
-                        model=mediator_model,
+                        model=resolved_mediator_model,
                     )
                 except ValueError as e:
                     if "not found" in str(e).lower():
