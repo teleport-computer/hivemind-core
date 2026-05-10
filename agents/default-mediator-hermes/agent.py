@@ -50,9 +50,10 @@ compliant, return it unchanged.
 If POLICY is absent, pass the response through except for obvious credentials,
 secrets, system internals, tool traces, or debug output.
 
-If rewriting is needed, make the smallest policy-compliant edit. Return only
-the final user-facing text: no audit report, preamble, or commentary. Keep it
-concise.
+If rewriting is needed, make the smallest policy-compliant edit. Preserve the
+response's depth, structure, tables, and report length whenever they comply
+with policy. Return only the final user-facing text: no audit report, preamble,
+or commentary.
 """
 
 _PROMPT_FILE = Path("/app/prompt.md")
@@ -83,6 +84,18 @@ _HERMES_FAILURE_MARKERS = (
     "maximum iterations",
     "temporarily unavailable due to rate limiting",
 )
+
+
+def _completion_token_cap(default: int = 8192, hard_cap: int = 16384) -> int:
+    raw_budget = os.environ.get("BUDGET_MAX_TOKENS", "")
+    try:
+        budget = int(raw_budget)
+    except ValueError:
+        budget = 0
+    if budget > 0:
+        budget_cap = max(1024, budget // 4)
+        return max(1024, min(default, hard_cap, budget_cap))
+    return min(default, hard_cap)
 
 
 def _looks_like_runtime_failure(text: str) -> bool:
@@ -136,7 +149,7 @@ def main() -> None:
             skip_memory=True,
             quiet_mode=True,
             save_trajectories=False,
-            max_tokens=512,
+            max_tokens=_completion_token_cap(),
             reasoning_config=_NO_REASONING_CONFIG,
             request_overrides=_NO_REASONING_OVERRIDES,
         )

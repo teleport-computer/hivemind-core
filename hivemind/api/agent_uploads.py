@@ -365,7 +365,10 @@ def register_agent_upload_routes(
             run_id=run_id,
             provider=_billing_provider_for_room(provider, room),
             models=_billing_models_for_query(hm, billing_req),
-            max_tokens=min(max_tokens or hm.settings.max_tokens, hm.settings.max_tokens),
+            max_tokens=min(
+                max_tokens or hm.settings.default_query_max_tokens,
+                hm.settings.max_tokens,
+            ),
             billable_role="query",
         )
         await asyncio.to_thread(

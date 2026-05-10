@@ -71,14 +71,15 @@ class Settings(BaseSettings):
     container_read_only_fs: bool = True
     container_drop_all_caps: bool = True
     container_no_new_privileges: bool = True
-    # Global ceilings — apply across all agent runs (scope/query/mediator/
-    # index). Per-call ``QueryRequest.max_tokens`` / ``--max-llm-calls`` /
-    # ``--timeout`` and per-agent ``AgentConfig`` values are clamped to
-    # these ceilings, so set them at the highest your operator wants to
-    # tolerate. Override via HIVEMIND_MAX_LLM_CALLS / HIVEMIND_MAX_TOKENS /
-    # HIVEMIND_AGENT_TIMEOUT.
+    # Run budgets. ``default_query_max_tokens`` is the safe default when a
+    # caller omits a per-run budget. ``max_tokens`` is the operator ceiling:
+    # callers may request more than the default, and credit enforcement will
+    # reserve against that requested budget before the run starts.
+    # Override via HIVEMIND_DEFAULT_QUERY_MAX_TOKENS / HIVEMIND_MAX_LLM_CALLS
+    # / HIVEMIND_MAX_TOKENS / HIVEMIND_AGENT_TIMEOUT.
+    default_query_max_tokens: int = 1_000_000
     max_llm_calls: int = 100
-    max_tokens: int = 1_000_000
+    max_tokens: int = 100_000_000
     agent_timeout: int = 900
 
     # Billing/metering. Usage is always recorded on run rows when available.

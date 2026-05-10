@@ -61,12 +61,20 @@ Do not use SQLite/MySQL-only functions such as strftime.
 
 Compute requested statistics in SQL. If execute_sql returns an error, revise
 the SQL and retry instead of asking the user to provide schema or formatting.
+For broad analytical prompts, run multiple targeted SQL queries as needed
+within budget instead of stopping after the first usable result.
+
 Continue after tool results until you have a final answer. For row-level
 questions, request row-level data and let scope_fn apply the room policy.
-
 Answer only from scoped tool results. If they do not support an answer, say so.
-Keep the final response concise. Do not expose credentials, secrets, system
-internals, tool traces, or debug output.
+
+Match the user's requested depth and format. If asked for a report, study,
+memo, or lifecycle analysis, write a structured Markdown report with a title,
+executive summary, methodology/assumptions, evidence-backed findings, tables
+or timelines where useful, recommendations or implications, and limitations.
+Do not shorten a requested report into a terse aggregate answer.
+
+Do not expose credentials, secrets, system internals, tool traces, or debug output.
 """
 
 _PROMPT_FILE = Path("/app/prompt.md")
@@ -138,6 +146,18 @@ _UNRESOLVED_RESPONSE_MARKERS = (
 )
 
 
+def _completion_token_cap(default: int = 8192, hard_cap: int = 16384) -> int:
+    raw_budget = os.environ.get("BUDGET_MAX_TOKENS", "")
+    try:
+        budget = int(raw_budget)
+    except ValueError:
+        budget = 0
+    if budget > 0:
+        budget_cap = max(1024, budget // 4)
+        return max(1024, min(default, hard_cap, budget_cap))
+    return min(default, hard_cap)
+
+
 def _looks_like_runtime_failure(text: str) -> bool:
     lower = (text or "").lower()
     return any(marker in lower for marker in _HERMES_FAILURE_MARKERS)
@@ -183,7 +203,7 @@ def _run_ai_agent(body: str) -> str:
         skip_memory=True,
         quiet_mode=True,
         save_trajectories=False,
-        max_tokens=1024,
+        max_tokens=_completion_token_cap(),
         reasoning_config=_NO_REASONING_CONFIG,
         request_overrides=_NO_REASONING_OVERRIDES,
     )

@@ -326,7 +326,8 @@ class Pipeline:
     async def run_query(self, req: QueryRequest) -> QueryResponse:
         # Resolve effective budget
         global_max = self._sandbox_settings.global_max_tokens
-        effective_max = min(req.max_tokens or global_max, global_max)
+        requested_max = req.max_tokens or self.settings.default_query_max_tokens
+        effective_max = min(requested_max, global_max)
         remaining = effective_max
         total_tokens = 0
         mediator_agent_id = req.mediator_agent_id or self.settings.default_mediator_agent
@@ -985,7 +986,8 @@ class Pipeline:
             room_vault_items = list(room_vault_items or [])
 
             global_max = self._sandbox_settings.global_max_tokens
-            effective_max = min(max_tokens or global_max, global_max)
+            requested_max = max_tokens or self.settings.default_query_max_tokens
+            effective_max = min(requested_max, global_max)
             remaining = effective_max
             usage_total = _new_usage_summary(effective_max)
 

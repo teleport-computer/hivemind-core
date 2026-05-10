@@ -129,11 +129,11 @@ services:
       HIVEMIND_CONTAINER_MEMORY_MB: "1024"
       HIVEMIND_CONTAINER_USER: "${HIVEMIND_CONTAINER_USER:-1000:1000}"
 
-      # Global ceilings on per-call budget. Per-call --max-tokens /
-      # --max-llm-calls / --timeout flags are clamped to these. Bump
-      # them when scope agents need more iterations (e.g. complex
-      # GROUP BY policies on large tables).
-      HIVEMIND_MAX_TOKENS: ${HIVEMIND_MAX_TOKENS:-1000000}
+      # Run budgets. DEFAULT_QUERY_MAX_TOKENS is the default when callers
+      # omit a budget; MAX_TOKENS is the operator ceiling for explicit
+      # requests. Credit enforcement reserves against the requested budget.
+      HIVEMIND_DEFAULT_QUERY_MAX_TOKENS: ${HIVEMIND_DEFAULT_QUERY_MAX_TOKENS:-1000000}
+      HIVEMIND_MAX_TOKENS: ${HIVEMIND_MAX_TOKENS:-100000000}
       HIVEMIND_MAX_LLM_CALLS: ${HIVEMIND_MAX_LLM_CALLS:-100}
       HIVEMIND_AGENT_TIMEOUT: ${HIVEMIND_AGENT_TIMEOUT:-900}
       # Metering is always recorded when available. Credit enforcement

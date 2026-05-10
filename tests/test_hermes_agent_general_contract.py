@@ -97,6 +97,7 @@ def test_query_agent_uses_ai_agent_for_benchmark_like_aggregate_prompt(
     monkeypatch,
     capsys,
 ):
+    monkeypatch.delenv("BUDGET_MAX_TOKENS", raising=False)
     monkeypatch.setenv(
         "QUERY_PROMPT",
         "Aggregate only. Which day had the highest number of watches in "
@@ -128,6 +129,10 @@ def test_query_agent_uses_ai_agent_for_benchmark_like_aggregate_prompt(
     assert "def scope(sql, params, rows)" in body
     assert "Room policy: aggregate statistics are allowed" in body
     init_kwargs = calls["inits"][0]["kwargs"]
+    assert init_kwargs["max_tokens"] >= 8192
+    system_prompt = init_kwargs["ephemeral_system_prompt"]
+    assert "structured Markdown report" in system_prompt
+    assert "Do not shorten a requested report" in system_prompt
     assert init_kwargs["reasoning_config"] == {"enabled": False, "effort": "none"}
     assert init_kwargs["request_overrides"]["extra_body"]["reasoning"] == {
         "effort": "none",
@@ -426,6 +431,8 @@ def test_query_prompt_is_tool_aware_without_canned_policy():
     assert "Do not bypass it or" in source
     assert "invent policy beyond it" in source
     assert "Compute requested statistics in SQL" in source
+    assert "For broad analytical prompts" in source
+    assert "structured Markdown report" in source
     assert "Use get_schema before SQL" in source
 
 
@@ -489,6 +496,7 @@ def test_non_hermes_default_prompt_files_are_wired_into_images():
 def test_mediator_agent_uses_ai_agent_for_safe_aggregate_output(monkeypatch, capsys):
     raw = "watch_day: 2026-04-15\nvideos: 482237"
     policy = "Allowed: aggregate statistics and counts. Not allowed: raw rows."
+    monkeypatch.delenv("BUDGET_MAX_TOKENS", raising=False)
     monkeypatch.setenv("RAW_OUTPUT", raw)
     monkeypatch.setenv(
         "QUERY_PROMPT",
@@ -512,6 +520,10 @@ def test_mediator_agent_uses_ai_agent_for_safe_aggregate_output(monkeypatch, cap
     assert f"POLICY:\n{policy}" in body
     assert f"RESPONSE TO FILTER:\n{raw}" in body
     init_kwargs = calls["inits"][0]["kwargs"]
+    assert init_kwargs["max_tokens"] >= 8192
+    system_prompt = init_kwargs["ephemeral_system_prompt"]
+    assert "Preserve the" in system_prompt
+    assert "report length" in system_prompt
     assert init_kwargs["reasoning_config"] == {"enabled": False, "effort": "none"}
     assert init_kwargs["request_overrides"]["extra_body"]["reasoning"] == {
         "effort": "none",

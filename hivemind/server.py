@@ -532,10 +532,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             )
 
         run_id = uuid4().hex[:12]
-        effective_max_tokens = min(
-            req.max_tokens or hm.settings.max_tokens,
-            hm.settings.max_tokens,
-        )
+        requested_max_tokens = req.max_tokens or hm.settings.default_query_max_tokens
+        effective_max_tokens = min(requested_max_tokens, hm.settings.max_tokens)
         billing = {
             "payer_tenant_id": None,
             "payer_token_id": caller.token_id or "",
@@ -587,7 +585,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 prompt=req.query,
                 scope_agent_id=scope_agent_id,
                 mediator_agent_id=req.mediator_agent_id,
-                max_tokens=req.max_tokens,
+                max_tokens=effective_max_tokens,
                 max_calls=req.max_llm_calls,
                 timeout_seconds=req.timeout_seconds,
                 model=req.model,

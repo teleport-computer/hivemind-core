@@ -1204,7 +1204,10 @@ def trust_room(
     type=int,
     default=1_000_000,
     show_default=True,
-    help="Token budget for scope/query/mediator; hosted cap is usually 1000000.",
+    help=(
+        "Token budget for scope/query/mediator. Hosted services reserve "
+        "billing credit against this budget and may allow higher explicit values."
+    ),
 )
 @click.option("--model", type=str, default=None, help="LLM model override.")
 @click.option("--provider", type=str, default=None, help="LLM provider override.")

@@ -372,6 +372,12 @@ sync_self_serve_billing_policy() {
     sync_env_value "${env_file}" HIVEMIND_BILLING_ENFORCE_CREDITS true
 }
 
+sync_budget_policy() {
+    local env_file="$1"
+    sync_env_value "${env_file}" HIVEMIND_DEFAULT_QUERY_MAX_TOKENS 1000000
+    sync_env_value "${env_file}" HIVEMIND_MAX_TOKENS 100000000
+}
+
 sync_hermes_default_agents() {
     local env_file="$1"
     local image_tag="${IMAGE_SHA:-latest}"
@@ -540,6 +546,7 @@ deploy_core() {
     sync_pinning_gateway "${CORE_NAME}" "${ENV_FILE}"
     sync_default_llm_model "${ENV_FILE}"
     sync_self_serve_billing_policy "${ENV_FILE}"
+    sync_budget_policy "${ENV_FILE}"
     sync_hermes_default_agents "${ENV_FILE}"
     precheck_env  "${CORE_COMPOSE}" "${ENV_FILE}"
     deploy_and_seal "${CORE_NAME}"  "${CORE_COMPOSE}" "${ENV_FILE}"
