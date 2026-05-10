@@ -650,7 +650,7 @@ def rooms_cli():
     "--llm-provider",
     "llm_providers",
     multiple=True,
-    default=("tinfoil",),
+    default=("openrouter",),
     help=(
         "Allowed LLM provider. Repeat for multiple. "
         "Dynamic rooms need at least one unless --no-llm is intentional."

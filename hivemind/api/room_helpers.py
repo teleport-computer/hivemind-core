@@ -73,11 +73,10 @@ def validate_room_provider(req_provider: str | None, room: dict) -> None:
                 "this room disallows external LLM egress; omit provider",
             )
         return
-    selected = requested or allowed[0]
-    if selected not in allowed:
+    if requested and requested not in allowed:
         raise HTTPException(
             400,
-            f"provider '{selected}' is not allowed by this room "
+            f"provider '{requested}' is not allowed by this room "
             f"(allowed_llm_providers={allowed})",
         )
 

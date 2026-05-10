@@ -52,6 +52,7 @@ MEDIATOR_RESERVE_FRACTION = 0.3
 # + context) — if scope consumes the whole budget the bridge returns 429 to
 # query's very first call and the SDK subprocess exits with code 1.
 SCOPE_BUDGET_FRACTION = 0.5
+DEFAULT_ROOM_LLM_PROVIDER = "openrouter"
 
 
 def _looks_like_report_output(prompt: str, output: str) -> bool:
@@ -351,7 +352,12 @@ class Pipeline:
         if not allowed:
             return provider, False
 
-        selected = self._provider_key(provider) if provider else allowed[0]
+        if provider:
+            selected = self._provider_key(provider)
+        elif DEFAULT_ROOM_LLM_PROVIDER in allowed:
+            selected = DEFAULT_ROOM_LLM_PROVIDER
+        else:
+            selected = allowed[0]
         if selected not in allowed:
             raise ValueError(
                 f"provider '{selected}' is not allowed by this room; "

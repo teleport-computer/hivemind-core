@@ -40,6 +40,7 @@ RoomTrustMode = Literal[
 ]
 
 _KNOWN_LLM_PROVIDERS = {"openrouter", "tinfoil"}
+_DEFAULT_ROOM_LLM_PROVIDER = "openrouter"
 
 
 def _canonical_json(value: dict) -> str:
@@ -95,7 +96,7 @@ class RoomEgress(BaseModel):
     upload endpoint from query-agent bridge sessions.
     """
 
-    llm_providers: list[str] = Field(default_factory=lambda: ["tinfoil"])
+    llm_providers: list[str] = Field(default_factory=lambda: [_DEFAULT_ROOM_LLM_PROVIDER])
     allow_artifacts: bool = True
 
     @model_validator(mode="after")

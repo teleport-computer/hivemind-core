@@ -1,6 +1,6 @@
 from hivemind.api.rooms import _apply_room_query_default
 from hivemind.config import Settings
-from hivemind.rooms import RoomCreateRequest
+from hivemind.rooms import RoomCreateRequest, RoomEgress
 
 
 def test_omitted_room_query_pins_service_default():
@@ -34,3 +34,7 @@ def test_omitted_room_query_stays_uploadable_without_service_default():
 
     assert req.query_mode == "uploadable"
     assert req.query_agent_id is None
+
+
+def test_room_egress_defaults_to_primary_openrouter_provider():
+    assert RoomEgress().llm_providers == ["openrouter"]

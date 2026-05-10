@@ -40,6 +40,7 @@ from .tenants import Caller, Role, TenantRegistry
 from .version import APP_VERSION
 
 logger = logging.getLogger(__name__)
+DEFAULT_ROOM_LLM_PROVIDER = "openrouter"
 
 
 class _AttestationBootstrapTimeout(TimeoutError):
@@ -276,7 +277,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         ]
         if not allowed:
             return ""
-        return (req_provider or allowed[0]).strip().lower()
+        if req_provider:
+            return req_provider.strip().lower()
+        if DEFAULT_ROOM_LLM_PROVIDER in allowed:
+            return DEFAULT_ROOM_LLM_PROVIDER
+        return allowed[0]
 
     def _billing_models_for_query(hm: Hivemind, req: QueryRequest) -> list[str]:
         roles = ["scope", "query"]

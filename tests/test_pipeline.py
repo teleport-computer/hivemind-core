@@ -623,6 +623,25 @@ class TestProviderRouting:
         # AsyncOpenAI exposes ``base_url`` (httpx URL) — compare as string.
         assert "tinfoil.sh" in str(tinfoil_client.base_url)
 
+    def test_room_allowlist_prefers_openrouter_when_provider_omitted(self):
+        pipeline = self._bare_pipeline(tinfoil="tk_test")
+
+        provider, enabled = pipeline._resolve_provider_for_egress(
+            None,
+            ["tinfoil", "openrouter"],
+        )
+
+        assert enabled is True
+        assert provider == "openrouter"
+
+    def test_room_allowlist_keeps_tinfoil_when_it_is_the_only_option(self):
+        pipeline = self._bare_pipeline(tinfoil="tk_test")
+
+        provider, enabled = pipeline._resolve_provider_for_egress(None, ["tinfoil"])
+
+        assert enabled is True
+        assert provider == "tinfoil"
+
 
 class TestTrackedRunFailsClosedOnScopeError:
     """C1 regression: when a scope agent is configured for a tracked run,
