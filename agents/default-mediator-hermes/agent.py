@@ -115,9 +115,18 @@ def _looks_like_runtime_failure(text: str) -> bool:
     return any(marker in lower for marker in _HERMES_FAILURE_MARKERS)
 
 
-def _needs_policyless_filter(text: str) -> bool:
+def _needs_safety_filter(text: str) -> bool:
     lower = (text or "").lower()
     return any(marker in lower for marker in _SECRET_MARKERS)
+
+
+def _always_llm_filter_enabled() -> bool:
+    return os.environ.get("HIVEMIND_MEDIATOR_ALWAYS_LLM", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
 
 
 def _mediator_internal_error() -> str:
@@ -135,7 +144,10 @@ def main() -> None:
             "agent runtime failed before producing a usable answer."
         )
         return
-    if not MEDIATION_POLICY.strip() and not _needs_policyless_filter(RAW_OUTPUT):
+    # The scope function is the privacy boundary for database access. Default
+    # mediator behavior preserves utility by passing clean outputs through;
+    # operators can opt into LLM rewriting for stricter policy experiments.
+    if not _always_llm_filter_enabled() and not _needs_safety_filter(RAW_OUTPUT):
         print(RAW_OUTPUT)
         return
 

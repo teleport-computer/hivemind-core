@@ -493,7 +493,7 @@ def test_non_hermes_default_prompt_files_are_wired_into_images():
     assert "COPY mediator-prompt.md ." in mediator_dockerfile
 
 
-def test_mediator_agent_uses_ai_agent_for_safe_aggregate_output(monkeypatch, capsys):
+def test_mediator_agent_passes_through_safe_policy_output(monkeypatch, capsys):
     raw = "watch_day: 2026-04-15\nvideos: 482237"
     policy = "Allowed: aggregate statistics and counts. Not allowed: raw rows."
     monkeypatch.delenv("BUDGET_MAX_TOKENS", raising=False)
@@ -507,6 +507,32 @@ def test_mediator_agent_uses_ai_agent_for_safe_aggregate_output(monkeypatch, cap
         monkeypatch,
         "agents/default-mediator-hermes/agent.py",
         "default_mediator_hermes_general_contract_test",
+        response=raw,
+    )
+
+    mod.main()
+
+    captured = capsys.readouterr()
+    assert captured.out.strip() == raw
+    assert calls["inits"] == []
+    assert calls["chats"] == []
+
+
+def test_mediator_agent_can_opt_into_llm_filter(monkeypatch, capsys):
+    raw = "watch_day: 2026-04-15\nvideos: 482237"
+    policy = "Allowed: aggregate statistics and counts. Not allowed: raw rows."
+    monkeypatch.delenv("BUDGET_MAX_TOKENS", raising=False)
+    monkeypatch.setenv("HIVEMIND_MEDIATOR_ALWAYS_LLM", "true")
+    monkeypatch.setenv("RAW_OUTPUT", raw)
+    monkeypatch.setenv(
+        "QUERY_PROMPT",
+        "Which day had the highest number of watches? Return day and count only.",
+    )
+    monkeypatch.setenv("MEDIATION_POLICY", policy)
+    mod, calls = _load_agent(
+        monkeypatch,
+        "agents/default-mediator-hermes/agent.py",
+        "default_mediator_hermes_opt_in_llm_contract_test",
         response=raw,
     )
 
@@ -555,6 +581,7 @@ def test_mediator_agent_does_not_emit_hermes_runtime_diagnostics(monkeypatch, ca
     monkeypatch.setenv("RAW_OUTPUT", "watch_day: 2026-04-15\nvideos: 482237")
     monkeypatch.setenv("QUERY_PROMPT", "Which day had the highest count?")
     monkeypatch.setenv("MEDIATION_POLICY", "Allowed: aggregate statistics.")
+    monkeypatch.setenv("HIVEMIND_MEDIATOR_ALWAYS_LLM", "true")
     mod, _calls = _load_agent(
         monkeypatch,
         "agents/default-mediator-hermes/agent.py",
@@ -580,6 +607,7 @@ def test_mediator_agent_redirects_ai_agent_stdout_diagnostics(monkeypatch, capsy
     monkeypatch.setenv("RAW_OUTPUT", raw)
     monkeypatch.setenv("QUERY_PROMPT", "Which day had the highest count?")
     monkeypatch.setenv("MEDIATION_POLICY", "Allowed: aggregate statistics.")
+    monkeypatch.setenv("HIVEMIND_MEDIATOR_ALWAYS_LLM", "true")
     mod, _calls = _load_agent(
         monkeypatch,
         "agents/default-mediator-hermes/agent.py",
