@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import os
+import base64
 from urllib.parse import quote
 from typing import Any
 
@@ -105,6 +106,50 @@ GET_SCHEMA_SCHEMA = {
         "defaults. Use this BEFORE writing queries to learn the data model."
     ),
     "parameters": {"type": "object", "properties": {}, "required": []},
+}
+
+UPLOAD_ARTIFACT_SCHEMA = {
+    "name": "upload_artifact",
+    "description": (
+        "Upload a query-run artifact to the room artifact store. Use this "
+        "for generated reports, tables, JSON, CSV, Markdown, HTML, images, "
+        "or PDFs. Pass text content with encoding='text' or prebuilt binary "
+        "content as base64 with encoding='base64'. Artifact uploads are only "
+        "available when the room allows artifacts."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "filename": {
+                "type": "string",
+                "description": (
+                    "Safe basename only, e.g. report.md, report.json, report.pdf."
+                ),
+            },
+            "content": {
+                "type": "string",
+                "description": (
+                    "Artifact content. UTF-8 text when encoding='text'; "
+                    "base64 bytes when encoding='base64'."
+                ),
+            },
+            "content_type": {
+                "type": "string",
+                "description": (
+                    "MIME type, e.g. text/markdown, application/json, "
+                    "text/csv, text/html, application/pdf."
+                ),
+                "default": "text/plain; charset=utf-8",
+            },
+            "encoding": {
+                "type": "string",
+                "enum": ["text", "base64"],
+                "description": "How to interpret content.",
+                "default": "text",
+            },
+        },
+        "required": ["filename", "content"],
+    },
 }
 
 VERIFY_SCOPE_FN_SCHEMA = {
@@ -250,6 +295,40 @@ async def get_schema_handler(_args: dict[str, Any], **_kw) -> str:
     return await _bridge_tool("get_schema", {})
 
 
+async def upload_artifact_handler(args: dict[str, Any], **_kw) -> str:
+    filename = (args.get("filename") or "").strip()
+    content = args.get("content", "")
+    content_type = (
+        args.get("content_type") or "text/plain; charset=utf-8"
+    ).strip() or "text/plain; charset=utf-8"
+    encoding = (args.get("encoding") or "text").strip().lower()
+    if not filename:
+        return "Error: filename is required"
+    if encoding == "base64":
+        try:
+            base64.b64decode(str(content), validate=True)
+        except Exception:
+            return "Error: content is not valid base64"
+        content_base64 = str(content)
+    elif encoding == "text":
+        content_base64 = base64.b64encode(str(content).encode("utf-8")).decode("ascii")
+    else:
+        return "Error: encoding must be 'text' or 'base64'"
+
+    try:
+        data = await _post(
+            "/sandbox/artifact-upload",
+            {
+                "filename": filename,
+                "content_base64": content_base64,
+                "content_type": content_type,
+            },
+        )
+    except Exception as e:
+        return f"Error: {e}"
+    return json.dumps(data)
+
+
 async def verify_scope_fn_handler(args: dict[str, Any], **_kw) -> str:
     source = args.get("source", "") or ""
     tests_raw = args.get("tests", "[]")
@@ -357,7 +436,8 @@ async def simulate_multi_handler(args: dict[str, Any], **_kw) -> str:
 # is defense-in-depth, NOT the primary boundary.
 #
 # Roles match the access levels in hivemind/sandbox/tools.py:
-#   query, index → execute_sql, get_schema
+#   query        → execute_sql, get_schema, upload_artifact
+#   index        → execute_sql, get_schema
 #   scope        → execute_sql, get_schema, verify_scope_fn,
 #                  simulate_query, simulate_multi
 #   mediator     → nothing (tools=[] in current default-mediator)
@@ -371,7 +451,7 @@ import logging as _logging
 _log = _logging.getLogger(__name__)
 
 _ROLE_TOOLS: dict[str, set[str]] = {
-    "query": {"execute_sql", "get_schema"},
+    "query": {"execute_sql", "get_schema", "upload_artifact"},
     "index": {"execute_sql", "get_schema"},
     "scope": {
         "execute_sql",
@@ -407,6 +487,7 @@ _REG_KW = dict(
 _ALL_TOOLS = (
     ("execute_sql", EXECUTE_SQL_SCHEMA, execute_sql_handler),
     ("get_schema", GET_SCHEMA_SCHEMA, get_schema_handler),
+    ("upload_artifact", UPLOAD_ARTIFACT_SCHEMA, upload_artifact_handler),
     ("verify_scope_fn", VERIFY_SCOPE_FN_SCHEMA, verify_scope_fn_handler),
     ("simulate_query", SIMULATE_QUERY_SCHEMA, simulate_query_handler),
     ("simulate_multi", SIMULATE_MULTI_SCHEMA, simulate_multi_handler),
