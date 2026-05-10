@@ -27,6 +27,10 @@ def test_phala_compose_defaults_rooms_to_hermes_agents():
     ) in compose
     assert "HIVEMIND_ENCLAVE_TLS: ${HIVEMIND_ENCLAVE_TLS:-0}" in compose
     assert 'TARGET_ENDPOINT: "http://hivemind:8100"' in compose
+    assert (
+        "HIVEMIND_DISABLED_LLM_PROVIDERS: "
+        "${HIVEMIND_DISABLED_LLM_PROVIDERS-tinfoil}"
+    ) in compose
 
 
 def test_phala_deploy_syncs_default_room_agents_to_hermes():

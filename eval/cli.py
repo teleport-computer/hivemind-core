@@ -77,6 +77,35 @@ def _coerce_usage(run: dict) -> dict:
     return usage if isinstance(usage, dict) else {}
 
 
+def _merge_counts(dst: dict[str, int], src: object) -> None:
+    if not isinstance(src, dict):
+        return
+    for key, value in src.items():
+        dst[str(key)] = dst.get(str(key), 0) + _int_value(value)
+
+
+def _extract_bridge_counts(usage: dict) -> tuple[dict[str, int], dict[str, int]]:
+    tool_counts: dict[str, int] = {}
+    llm_tool_counts: dict[str, int] = {}
+    bridge = usage.get("bridge") if isinstance(usage, dict) else {}
+    if isinstance(bridge, dict):
+        _merge_counts(tool_counts, bridge.get("tool_call_counts"))
+        _merge_counts(llm_tool_counts, bridge.get("llm_tool_call_counts"))
+    stages = usage.get("stages") if isinstance(usage, dict) else {}
+    if isinstance(stages, dict):
+        for stage in stages.values():
+            if not isinstance(stage, dict):
+                continue
+            stage_bridge = stage.get("bridge") or {}
+            if isinstance(stage_bridge, dict):
+                _merge_counts(tool_counts, stage_bridge.get("tool_call_counts"))
+                _merge_counts(
+                    llm_tool_counts,
+                    stage_bridge.get("llm_tool_call_counts"),
+                )
+    return tool_counts, llm_tool_counts
+
+
 def _extract_run_metrics(run: dict) -> dict:
     usage = _coerce_usage(run)
     prompt_tokens = _int_value(usage.get("prompt_tokens"))
@@ -89,6 +118,7 @@ def _extract_run_metrics(run: dict) -> dict:
         for stage in ("build", "scope", "query", "mediator")
         if (seconds := _stage_seconds(run, stage)) is not None
     }
+    tool_counts, llm_tool_counts = _extract_bridge_counts(usage)
     return {
         "run_status": run.get("status") or "",
         "billing_status": run.get("billing_status") or "",
@@ -99,6 +129,8 @@ def _extract_run_metrics(run: dict) -> dict:
         "total_tokens": total_tokens,
         "duration_seconds": _run_seconds(run),
         "stage_seconds": stages,
+        "tool_call_counts": tool_counts,
+        "llm_tool_call_counts": llm_tool_counts,
         "telemetry_artifact_count": len(run.get("artifacts") or []),
     }
 

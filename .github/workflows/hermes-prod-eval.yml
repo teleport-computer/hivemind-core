@@ -1,0 +1,117 @@
+name: Hermes prod eval (manual, via EC2 relay)
+
+# Runs the deterministic eval harness against an existing prod room from the
+# EC2 relay. The relay keeps hmctl profiles and tenant keys local; GitHub logs
+# receive only summary rows, not raw private room output.
+
+on:
+  workflow_dispatch:
+    inputs:
+      room:
+        description: "Room id or hmroom:// URI to evaluate"
+        required: true
+      scenario:
+        description: "eval scenario id"
+        required: true
+        default: "watch_history_report_artifact"
+      models:
+        description: "Comma-separated OpenRouter model ids"
+        required: true
+        default: "z-ai/glm-5"
+      provider:
+        description: "LLM provider"
+        required: true
+        default: "openrouter"
+      hmctl_profile:
+        description: "hmctl profile on the relay that pays for room asks"
+        required: true
+        default: "bootstrap"
+      fetch:
+        description: "Fetch artifacts through hmctl after completion"
+        required: true
+        type: boolean
+        default: true
+
+concurrency:
+  group: hermes-prod-eval-${{ github.event.inputs.scenario }}
+  cancel-in-progress: false
+
+jobs:
+  eval:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Configure SSH
+        env:
+          SSH_KEY: ${{ secrets.EC2_SSH_PRIVATE_KEY }}
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -H "$EC2_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Run eval on relay
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_USER: ${{ secrets.EC2_USER }}
+          ROOM: ${{ github.event.inputs.room }}
+          SCENARIO: ${{ github.event.inputs.scenario }}
+          MODELS: ${{ github.event.inputs.models }}
+          PROVIDER: ${{ github.event.inputs.provider }}
+          HMCTL_PROFILE: ${{ github.event.inputs.hmctl_profile }}
+          FETCH: ${{ github.event.inputs.fetch }}
+        run: |
+          set -euo pipefail
+          q() {
+            printf "'%s'" "$(printf "%s" "$1" | sed "s/'/'\\\\''/g")"
+          }
+          ssh -i ~/.ssh/id_ed25519 -o BatchMode=yes \
+            -o ServerAliveInterval=30 -o ServerAliveCountMax=20 \
+            -o TCPKeepAlive=yes \
+            "${EC2_USER}@${EC2_HOST}" \
+            "ROOM=$(q "$ROOM") SCENARIO=$(q "$SCENARIO") MODELS=$(q "$MODELS") PROVIDER=$(q "$PROVIDER") HMCTL_PROFILE=$(q "$HMCTL_PROFILE") FETCH=$(q "$FETCH") bash -s" <<'REMOTE'
+          set -euo pipefail
+          cd ~/hivemind-core
+
+          git fetch --prune origin
+          git checkout --detach origin/main
+          echo "HEAD: $(git rev-parse --short HEAD)"
+
+          if ! command -v uv >/dev/null 2>&1; then
+            export PATH="$HOME/.local/bin:$PATH"
+          fi
+          if ! command -v uv >/dev/null 2>&1; then
+            curl -LsSf https://astral.sh/uv/install.sh | sh
+            export PATH="$HOME/.local/bin:$PATH"
+          fi
+
+          out_dir="eval/results/prod/$(date -u +%Y%m%dT%H%M%SZ)-${SCENARIO}"
+          mkdir -p "$out_dir"
+
+          args=(python -m eval run-room "$SCENARIO" "$ROOM"
+            --provider "$PROVIDER"
+            --hmctl-profile "$HMCTL_PROFILE"
+            --max-tokens 1000000
+            --max-llm-calls 60
+            --timeout 900
+            --output-dir "$out_dir")
+          IFS=',' read -ra models <<< "$MODELS"
+          for model in "${models[@]}"; do
+            model="$(printf '%s' "$model" | xargs)"
+            [ -n "$model" ] && args+=(--model "$model")
+          done
+          if [ "$FETCH" = "true" ]; then
+            args+=(--fetch)
+          fi
+
+          echo "Running ${SCENARIO} against ${ROOM}"
+          uv run --python 3.12 "${args[@]}"
+          echo "Eval results remain on relay at: $(pwd)/${out_dir}"
+          REMOTE
+
+      - name: Cleanup SSH key
+        if: always()
+        run: rm -f ~/.ssh/id_ed25519

@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import re
 import secrets
 import signal
 import threading
@@ -41,6 +42,8 @@ from .version import APP_VERSION
 
 logger = logging.getLogger(__name__)
 DEFAULT_ROOM_LLM_PROVIDER = "openrouter"
+_RUN_IDEMPOTENCY_HEADER = "x-hivemind-idempotency-key"
+_RUN_IDEMPOTENCY_RE = re.compile(r"^[a-f0-9]{12,64}$")
 
 
 class _AttestationBootstrapTimeout(TimeoutError):
@@ -299,6 +302,52 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 models.append(model)
         return models
 
+    def _route_error_status(exc: ValueError) -> int:
+        msg = str(exc).lower()
+        if "disabled by operator" in msg or "requires hivemind_" in msg:
+            return 503
+        return 400
+
+    def _run_id_for_request(request: Request | None) -> str:
+        if request is None:
+            return uuid4().hex[:12]
+        key = (request.headers.get(_RUN_IDEMPOTENCY_HEADER) or "").strip().lower()
+        if not key:
+            return uuid4().hex[:12]
+        if not _RUN_IDEMPOTENCY_RE.fullmatch(key):
+            raise HTTPException(
+                400,
+                "X-Hivemind-Idempotency-Key must be 12-64 lowercase hex "
+                "characters",
+            )
+        return key
+
+    def _run_response_for_existing(
+        existing: dict,
+        room: dict | None,
+        caller: Caller,
+    ) -> dict:
+        expected_room_id = (room or {}).get("room_id")
+        existing_room_id = existing.get("room_id")
+        if expected_room_id and existing_room_id != expected_room_id:
+            raise HTTPException(
+                409,
+                "idempotency key already belongs to a different room run",
+            )
+        if (existing.get("issuer_token_id") or "") != (caller.token_id or ""):
+            raise HTTPException(
+                409,
+                "idempotency key already belongs to a different caller",
+            )
+        return {
+            "run_id": existing["run_id"],
+            "query_agent_id": existing.get("agent_id"),
+            "scope_agent_id": existing.get("scope_agent_id"),
+            "room_id": existing_room_id,
+            "status": existing.get("status") or "pending",
+            "idempotent_replay": True,
+        }
+
     async def _prepare_billing_hold(
         request: Request,
         caller: Caller,
@@ -541,9 +590,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 bearer or "",
             )
 
-        run_id = uuid4().hex[:12]
+        run_id = _run_id_for_request(request)
+        existing = await asyncio.to_thread(hm.run_store.get, run_id)
+        if existing is not None:
+            return _run_response_for_existing(existing, room, caller)
+
         requested_max_tokens = req.max_tokens or hm.settings.default_query_max_tokens
         effective_max_tokens = min(requested_max_tokens, hm.settings.max_tokens)
+        try:
+            hm.pipeline.validate_llm_route(
+                req.provider,
+                (room or {}).get("allowed_llm_providers"),
+                _billing_models_for_query(hm, req),
+            )
+        except ValueError as e:
+            raise HTTPException(_route_error_status(e), str(e)) from e
         billing = {
             "payer_tenant_id": None,
             "payer_token_id": caller.token_id or "",

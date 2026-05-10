@@ -68,3 +68,5 @@ class HealthResponse(BaseModel):
     table_count: int
     version: str
     artifact_retention_seconds: int = 86400
+    disabled_llm_providers: str = ""
+    disabled_llm_routes: str = ""

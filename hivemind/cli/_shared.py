@@ -5,6 +5,7 @@ import json as _json
 import time
 from pathlib import Path
 from urllib.parse import quote
+from uuid import uuid4
 
 import click
 import httpx
@@ -145,6 +146,57 @@ def _verify_run_attestation(
 
 # ── ask / query helpers ──
 
+_RUN_SUBMIT_IDEMPOTENCY_HEADER = "X-Hivemind-Idempotency-Key"
+_RUN_SUBMIT_RETRY_STATUSES = {502, 503, 504}
+
+
+def _retryable_submit_response(resp: httpx.Response) -> bool:
+    if resp.status_code not in _RUN_SUBMIT_RETRY_STATUSES:
+        return False
+    content_type = (resp.headers.get("content-type") or "").lower()
+    if "application/json" not in content_type:
+        return True
+    try:
+        body = resp.json()
+    except ValueError:
+        return True
+    # FastAPI-generated JSON errors are authoritative application errors
+    # (for example provider disabled by operator), not transient gateway
+    # read timeouts. Do not hide them behind retries.
+    return not bool((body or {}).get("detail"))
+
+
+def _submit_tracked_query(
+    service: str,
+    submit_path: str,
+    headers: dict,
+    payload: dict,
+) -> httpx.Response:
+    submit_headers = dict(headers)
+    submit_headers.setdefault(_RUN_SUBMIT_IDEMPOTENCY_HEADER, uuid4().hex[:12])
+    last_error: Exception | None = None
+    for attempt in range(3):
+        try:
+            resp = _hpost(
+                f"{service}{submit_path}",
+                json=payload,
+                headers=submit_headers,
+                timeout=30,
+            )
+            if _retryable_submit_response(resp) and attempt < 2:
+                time.sleep(2 * (attempt + 1))
+                continue
+            return resp
+        except httpx.RequestError as e:
+            last_error = e
+            if attempt < 2:
+                time.sleep(2 * (attempt + 1))
+                continue
+            raise
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("query submit retry loop exited unexpectedly")
+
 
 def _query_tracked(
     service: str,
@@ -171,12 +223,7 @@ def _query_tracked(
     on the recipient side).
     """
     try:
-        resp = _hpost(
-            f"{service}{submit_path}",
-            json=payload,
-            headers=headers,
-            timeout=30,
-        )
+        resp = _submit_tracked_query(service, submit_path, headers, payload)
         resp.raise_for_status()
     except httpx.HTTPStatusError as e:
         click.echo(

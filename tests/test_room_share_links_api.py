@@ -82,6 +82,7 @@ def env():
         admin_key="admin-test-key",
         sql_proxy_admin_key="",
         autoload_default_agents=False,
+        tinfoil_api_key="tk_test",
         artifact_sweep_interval_seconds=9999,
         billing_enforce_credits=False,
     )

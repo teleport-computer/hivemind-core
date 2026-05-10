@@ -18,14 +18,22 @@ def test_extract_run_metrics_decodes_usage_and_stage_timings():
             "scope_ended_at": 12.0,
             "query_started_at": 12.0,
             "query_ended_at": 15.0,
-            "usage_json": json.dumps(
-                {
-                    "calls": 4,
-                    "prompt_tokens": 1000,
-                    "completion_tokens": 250,
-                    "total_tokens": 1300,
-                }
-            ),
+                    "usage_json": json.dumps(
+                        {
+                            "calls": 4,
+                            "prompt_tokens": 1000,
+                            "completion_tokens": 250,
+                            "total_tokens": 1300,
+                            "stages": {
+                                "query": {
+                                    "bridge": {
+                                        "tool_call_counts": {"execute_sql": 2},
+                                        "llm_tool_call_counts": {"get_schema": 1},
+                                    }
+                                }
+                            },
+                        }
+                    ),
             "artifacts": [{"filename": "report.md"}, {"filename": "report.pdf"}],
         }
     )
@@ -37,6 +45,8 @@ def test_extract_run_metrics_decodes_usage_and_stage_timings():
     assert metrics["total_tokens"] == 1300
     assert metrics["duration_seconds"] == 5.25
     assert metrics["stage_seconds"] == {"scope": 1.5, "query": 3.0}
+    assert metrics["tool_call_counts"] == {"execute_sql": 2}
+    assert metrics["llm_tool_call_counts"] == {"get_schema": 1}
     assert metrics["telemetry_artifact_count"] == 2
 
 

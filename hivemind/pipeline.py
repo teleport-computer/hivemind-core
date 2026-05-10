@@ -240,6 +240,14 @@ class Pipeline:
             "query": (settings.query_model or settings.llm_model),
             "mediator": (settings.mediator_model or settings.llm_model),
         }
+        self._disabled_llm_providers = {
+            p.strip().lower()
+            for p in (settings.disabled_llm_providers or "").split(",")
+            if p.strip()
+        }
+        self._disabled_llm_routes = self._parse_disabled_llm_routes(
+            settings.disabled_llm_routes
+        )
         self._sandbox_settings = build_sandbox_settings(settings)
 
     def _model_for(self, role: str, override: str | None = None) -> str:
@@ -252,6 +260,18 @@ class Pipeline:
             return override
         return self._role_models.get(role, self.llm_model)
 
+    @staticmethod
+    def _parse_disabled_llm_routes(raw: str) -> set[tuple[str, str]]:
+        routes: set[tuple[str, str]] = set()
+        for item in (raw or "").split(","):
+            entry = item.strip()
+            if not entry:
+                continue
+            provider, sep, model = entry.partition(":")
+            if sep and provider.strip() and model.strip():
+                routes.add((provider.strip().lower(), model.strip().lower()))
+        return routes
+
     def _client_for(self, provider: str | None) -> AsyncOpenAI:
         """Resolve which AsyncOpenAI client to use for a request.
 
@@ -261,6 +281,12 @@ class Pipeline:
         at request boundaries instead of silently falling back.
         """
         key = (provider or "").strip().lower()
+        resolved_key = key or "openrouter"
+        if resolved_key in self._disabled_llm_providers:
+            raise ValueError(
+                f"LLM provider '{resolved_key}' is disabled by operator "
+                "configuration. Omit provider or choose an enabled provider."
+            )
         if not key or key == "openrouter":
             return self.llm_clients["openrouter"]
         if key in self.llm_clients:
@@ -278,6 +304,31 @@ class Pipeline:
     def _provider_key(self, provider: str | None) -> str:
         key = (provider or "").strip().lower()
         return key or "openrouter"
+
+    def _ensure_llm_route_enabled(self, provider: str | None, model: str) -> None:
+        provider_key = self._provider_key(provider)
+        model_key = (model or "").strip().lower()
+        if model_key and (provider_key, model_key) in self._disabled_llm_routes:
+            raise ValueError(
+                f"LLM route '{provider_key}:{model}' is disabled by operator "
+                "configuration. Choose a different provider or model."
+            )
+
+    def validate_llm_route(
+        self,
+        provider: str | None,
+        allowed_llm_providers: list[str] | None,
+        models: list[str],
+    ) -> tuple[str | None, bool]:
+        """Validate provider/model egress before billing or sandbox startup."""
+        selected, enabled = self._resolve_provider_for_egress(
+            provider,
+            allowed_llm_providers,
+        )
+        if enabled:
+            for model in models:
+                self._ensure_llm_route_enabled(selected, model)
+        return selected, enabled
 
     async def _record_run_usage(
         self,
@@ -341,8 +392,9 @@ class Pipeline:
         tools and produce deterministic output.
         """
         if allowed_llm_providers is None:
-            self._client_for(provider)
-            return provider, True
+            selected = self._provider_key(provider)
+            self._client_for(selected)
+            return selected, True
 
         allowed = []
         for raw in allowed_llm_providers:
@@ -416,9 +468,21 @@ class Pipeline:
         req_query_model = req.query_model or req.model
         req_mediator_model = req.mediator_model or req.model
         req_provider = req.provider
-        # Eagerly resolve so an unknown provider fails the whole request
-        # before we burn scope-stage budget.
-        self._client_for(req_provider)
+        # Eagerly resolve so an unknown or operator-disabled LLM route fails
+        # the whole request before we burn scope-stage budget.
+        self.validate_llm_route(
+            req_provider,
+            None,
+            [
+                self._model_for("scope", req_scope_model),
+                self._model_for("query", req_query_model),
+                *(
+                    [self._model_for("mediator", req_mediator_model)]
+                    if mediator_agent_id
+                    else []
+                ),
+            ],
+        )
 
         query_agent_id = req.query_agent_id or self.settings.default_query_agent
         if not query_agent_id:
@@ -1075,6 +1139,15 @@ class Pipeline:
             scope_model_override = scope_model or model
             query_model_override = query_model or model
             mediator_model_override = mediator_model or model
+            if llm_egress_enabled:
+                self._ensure_llm_route_enabled(
+                    provider,
+                    self._model_for("scope", scope_model_override),
+                )
+                self._ensure_llm_route_enabled(
+                    provider,
+                    self._model_for("query", query_model_override),
+                )
 
             # -- Stage 0: Scope resolution --
             scope_fn = None
@@ -1266,6 +1339,11 @@ class Pipeline:
                     resolved_mediator_model = self._model_for(
                         "mediator", mediator_model_override
                     )
+                    if llm_egress_enabled:
+                        self._ensure_llm_route_enabled(
+                            provider,
+                            resolved_mediator_model,
+                        )
                     query_output, mediator_usage = await self._run_mediator_agent(
                         mediator_agent_id=resolved_mediator_id,
                         raw_output=query_output,

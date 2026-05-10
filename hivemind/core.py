@@ -500,6 +500,8 @@ class Hivemind:
             "status": "ok",
             "table_count": table_count,
             "artifact_retention_seconds": self.settings.artifact_retention_seconds,
+            "disabled_llm_providers": self.settings.disabled_llm_providers,
+            "disabled_llm_routes": self.settings.disabled_llm_routes,
             "version": APP_VERSION,
         }
 

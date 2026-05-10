@@ -208,6 +208,90 @@ jobs:
           cache-from: type=gha,scope=default-${{ matrix.role }}-hermes
           cache-to: type=gha,mode=max,scope=default-${{ matrix.role }}-hermes
 
+      - name: Smoke default Hermes image
+        env:
+          IMAGE: ${{ env.REGISTRY }}/${{ needs.prepare.outputs.ns }}/hivemind-default-${{ matrix.role }}-hermes:${{ needs.prepare.outputs.short_sha }}
+          ROLE: ${{ matrix.role }}
+        run: |
+          set -euo pipefail
+          docker pull "$IMAGE"
+          docker run --rm -i \
+            -e BRIDGE_URL=http://127.0.0.1:1 \
+            -e SESSION_TOKEN=ci-smoke \
+            -e HIVEMIND_AGENT_ROLE="$ROLE" \
+            -e QUERY_PROMPT=ci-smoke \
+            -e RAW_OUTPUT=ci-smoke \
+            "$IMAGE" python - <<'PY'
+          import importlib.util
+          import os
+          import sys
+          from pathlib import Path
+
+          role = os.environ["HIVEMIND_AGENT_ROLE"]
+          path = Path("/app/hivemind_agent.py")
+          if not path.exists():
+              raise SystemExit("/app/hivemind_agent.py missing")
+          if Path("/app/agent.py").exists():
+              raise SystemExit("/app/agent.py must not shadow the Hermes package")
+
+          spec = importlib.util.spec_from_file_location("hivemind_agent_smoke", path)
+          mod = importlib.util.module_from_spec(spec)
+          assert spec.loader is not None
+          spec.loader.exec_module(mod)
+
+          from tools.registry import registry
+
+          def registered_names() -> set[str]:
+              if hasattr(registry, "get_tool_names_for_toolset"):
+                  return set(registry.get_tool_names_for_toolset("hivemind"))
+              if hasattr(registry, "get_tools_for_toolset"):
+                  tools = registry.get_tools_for_toolset("hivemind")
+                  return {getattr(t, "name", str(t)) for t in tools}
+              for attr in ("tools", "_tools", "registry", "_registry"):
+                  value = getattr(registry, attr, None)
+                  if isinstance(value, dict):
+                      names = set()
+                      for key, tool in value.items():
+                          toolset = getattr(tool, "toolset", None)
+                          if toolset is None and isinstance(tool, dict):
+                              toolset = tool.get("toolset")
+                          if toolset == "hivemind" or str(key).startswith("hivemind."):
+                              names.add(getattr(tool, "name", None) or str(key).split(".")[-1])
+                      if names:
+                          return names
+              raise SystemExit(
+                  "could not inspect Hermes registry; attrs="
+                  + ",".join(sorted(a for a in dir(registry) if "tool" in a.lower()))
+              )
+
+          expected = {
+              "index": {"execute_sql", "get_schema"},
+              "query": {
+                  "execute_sql",
+                  "get_schema",
+                  "upload_artifact",
+                  "upload_report_artifact",
+              },
+              "scope": {
+                  "execute_sql",
+                  "get_schema",
+                  "verify_scope_fn",
+                  "simulate_query",
+                  "simulate_multi",
+                  "list_query_agent_files",
+                  "read_query_agent_file",
+              },
+              "mediator": set(),
+          }[role]
+          actual = registered_names()
+          if actual != expected:
+              raise SystemExit(
+                  f"{role} tool registry mismatch: expected={sorted(expected)} "
+                  f"actual={sorted(actual)}"
+              )
+          print(f"{role} Hermes image smoke OK: {sorted(actual)}")
+          PY
+
       - name: Print image info
         run: |
           echo "### hivemind-default-${{ matrix.role }}-hermes" >> "$GITHUB_STEP_SUMMARY"

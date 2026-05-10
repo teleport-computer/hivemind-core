@@ -90,6 +90,7 @@ def room_env():
         sql_proxy_admin_key="",
         autoload_default_agents=False,
         default_query_agent="query-a",
+        tinfoil_api_key="tk_test",
         artifact_sweep_interval_seconds=9999,
     )
     registry = TenantRegistry(settings)
@@ -523,6 +524,49 @@ def test_inspectable_query_visibility_persists_room_prompt(room_env):
     )
     assert owner_view.status_code == 200
     assert owner_view.json()["prompt"] == prompt
+
+
+def test_room_run_submit_is_idempotent_by_header(room_env):
+    client, tenant, hive = room_env
+    out = _create_fixed_room(client, tenant["api_key"])
+    headers = _query_headers(out["token"], tenant["api_key"])
+    headers["X-Hivemind-Idempotency-Key"] = "abc123abc123"
+
+    first = client.post(
+        f"/v1/rooms/{out['room_id']}/runs",
+        headers=headers,
+        json={"query": "first prompt"},
+    )
+    assert first.status_code == 200, first.text
+
+    replay = client.post(
+        f"/v1/rooms/{out['room_id']}/runs",
+        headers=headers,
+        json={"query": "different prompt should not create a second run"},
+    )
+    assert replay.status_code == 200, replay.text
+    assert replay.json()["idempotent_replay"] is True
+    assert replay.json()["run_id"] == first.json()["run_id"] == "abc123abc123"
+
+    run = hive.run_store.get("abc123abc123")
+    assert run is not None
+    assert run["prompt"] == "first prompt"
+
+
+def test_room_run_rejects_disabled_provider_before_create(room_env):
+    client, tenant, hive = room_env
+    out = _create_fixed_room(client, tenant["api_key"])
+    hive.pipeline._disabled_llm_providers.add("tinfoil")
+
+    resp = client.post(
+        f"/v1/rooms/{out['room_id']}/runs",
+        headers=_query_headers(out["token"], tenant["api_key"]),
+        json={"query": "should fail before run row"},
+    )
+
+    assert resp.status_code == 503
+    assert "disabled by operator" in resp.json()["detail"]
+    assert hive.run_store.list_recent(1) == []
 
 
 def test_room_query_token_requires_payer_header(room_env):

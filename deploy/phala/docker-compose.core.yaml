@@ -83,6 +83,12 @@ services:
       # different base_url + api_key. Empty disables the option.
       HIVEMIND_TINFOIL_API_KEY: ${HIVEMIND_TINFOIL_API_KEY:-}
       HIVEMIND_TINFOIL_BASE_URL: ${HIVEMIND_TINFOIL_BASE_URL:-https://inference.tinfoil.sh/v1}
+      # Current prod admission default: keep known-broken secondary provider
+      # routes out of room runs until the operator explicitly re-enables them.
+      # This is route admission, not agent behavior; default rooms still choose
+      # OpenRouter when no provider is specified.
+      HIVEMIND_DISABLED_LLM_PROVIDERS: ${HIVEMIND_DISABLED_LLM_PROVIDERS-tinfoil}
+      HIVEMIND_DISABLED_LLM_ROUTES: ${HIVEMIND_DISABLED_LLM_ROUTES-}
 
       # On-chain app-auth registry (Tier 1 attestation binding).
       # When set, the CLI auto-accepts an approved compose_hash and

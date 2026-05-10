@@ -38,6 +38,12 @@ class Settings(BaseSettings):
     # the same SDK is reused with a different ``base_url`` + ``api_key``.
     tinfoil_api_key: str = ""
     tinfoil_base_url: str = "https://inference.tinfoil.sh/v1"
+    # Operator-side admission controls for temporarily broken upstream routes.
+    # Comma-separated providers (e.g. "tinfoil") or provider:model routes
+    # (e.g. "tinfoil:z-ai/glm-5"). These fail at request boundaries before
+    # billing hold reservation or sandbox startup.
+    disabled_llm_providers: str = ""
+    disabled_llm_routes: str = ""
 
     # Per-role model overrides. Empty falls back to ``llm_model``. Set via
     # HIVEMIND_SCOPE_MODEL / HIVEMIND_QUERY_MODEL / HIVEMIND_MEDIATOR_MODEL.

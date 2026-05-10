@@ -564,12 +564,20 @@ class TestProviderRouting:
     poke the resolved client dict directly.
     """
 
-    def _bare_pipeline(self, *, tinfoil: str = "") -> Pipeline:
+    def _bare_pipeline(
+        self,
+        *,
+        tinfoil: str = "",
+        disabled_providers: str = "",
+        disabled_routes: str = "",
+    ) -> Pipeline:
         """Build a Pipeline without touching Postgres."""
         settings = Settings(
             database_url="unused",
             llm_api_key="test",
             tinfoil_api_key=tinfoil,
+            disabled_llm_providers=disabled_providers,
+            disabled_llm_routes=disabled_routes,
         )
         return Pipeline(settings, MagicMock(spec=Database), MagicMock(spec=AgentStore))
 
@@ -594,6 +602,28 @@ class TestProviderRouting:
         assert "tinfoil" in pipeline.llm_clients
         assert pipeline._client_for("tinfoil") is pipeline.llm_clients["tinfoil"]
         assert pipeline._client_for("tinfoil") is not pipeline.llm_clients["openrouter"]
+
+    def test_disabled_provider_raises_before_client_use(self):
+        pipeline = self._bare_pipeline(
+            tinfoil="tk_test",
+            disabled_providers="tinfoil",
+        )
+
+        with pytest.raises(ValueError, match="disabled by operator"):
+            pipeline._client_for("tinfoil")
+
+    def test_disabled_route_raises_after_room_provider_resolution(self):
+        pipeline = self._bare_pipeline(
+            tinfoil="tk_test",
+            disabled_routes="openrouter:z-ai/glm-5",
+        )
+
+        with pytest.raises(ValueError, match="openrouter:z-ai/glm-5"):
+            pipeline.validate_llm_route(
+                None,
+                ["tinfoil", "openrouter"],
+                ["z-ai/glm-5"],
+            )
 
     def test_unknown_provider_raises(self):
         pipeline = self._bare_pipeline()
