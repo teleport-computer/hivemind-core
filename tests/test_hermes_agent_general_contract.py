@@ -181,12 +181,39 @@ def test_query_agent_uses_deeper_loop_for_research_reports(monkeypatch, capsys):
     captured = capsys.readouterr()
     assert "Research Report" in captured.out
     init_kwargs = calls["inits"][0]["kwargs"]
-    assert init_kwargs["max_iterations"] == 12
+    assert init_kwargs["max_iterations"] == 16
     assert init_kwargs["max_tokens"] >= 12288
     system_prompt = init_kwargs["ephemeral_system_prompt"]
     assert "Pick a defensible thesis" in system_prompt
     assert "several independent evidence slices" in system_prompt
-    assert "Do not output a progress log" in system_prompt
+    assert "final answer must be the report itself" in system_prompt
+
+
+def test_query_agent_retries_meta_summary_instead_of_report(monkeypatch, capsys):
+    monkeypatch.setenv(
+        "QUERY_PROMPT",
+        "Write a deep research report on a lifecycle pattern in the data.",
+    )
+    mod, calls = _load_agent(
+        monkeypatch,
+        "agents/default-query-hermes/agent.py",
+        "default_query_hermes_retry_meta_summary_contract_test",
+        response=[
+            (
+                "I have completed a deep research-level report.\n\n"
+                "**Accomplishments:**\n1. Schema inspection.\n\n"
+                "The full report content is available in my previous response."
+            ),
+            "# Research Report\n\n## Executive Summary\nEvidence-backed findings.",
+        ],
+    )
+
+    mod.main()
+
+    captured = capsys.readouterr()
+    assert captured.out.startswith("# Research Report")
+    assert len(calls["chats"]) == 2
+    assert "final answer must be the report itself" in calls["chats"][1]
 
 
 def test_query_agent_does_not_emit_hermes_runtime_diagnostics(monkeypatch, capsys):

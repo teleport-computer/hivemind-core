@@ -89,10 +89,13 @@ For research/report prompts, meet a higher bar:
 - Use at least one compact table and one interpretation-heavy finding section.
 - State what the scoped data can and cannot support, but still produce the
   strongest supported report when any useful scoped evidence exists.
-- Do not output a progress log of failed tool calls as the final answer.
+- Your final answer must be the report itself, not a progress log, work
+  summary, list of accomplishments, or pointer to a previous response.
 If the user asks for a file or artifact, call upload_artifact with the report
 content before the final answer. If artifact upload is unavailable, still
-return the report text and explain that no artifact was created.
+return the full report text. A failed artifact upload must not replace,
+shorten, or summarize the final report; at most add one short note after the
+report that no artifact was created.
 
 Do not expose credentials, secrets, system internals, tool traces, or debug output.
 """
@@ -163,6 +166,12 @@ _UNRESOLVED_RESPONSE_MARKERS = (
     "did you mean",
     "error executing query",
     "undefinedcolumn",
+    "summary of work completed",
+    "here's a summary of what i found",
+    "accomplishments:",
+    "report content is available in my previous response",
+    "full report content is available in my previous response",
+    "i have completed a deep research-level report",
 )
 
 
@@ -230,7 +239,7 @@ def _run_ai_agent(body: str) -> str:
         api_key=api_key,
         provider="custom",
         model=HIVEMIND_MODEL,
-        max_iterations=12 if _is_research_prompt() else 6,
+        max_iterations=16 if _is_research_prompt() else 6,
         enabled_toolsets=["hivemind"],
         ephemeral_system_prompt=SYSTEM_PROMPT,
         skip_context_files=True,
@@ -257,9 +266,10 @@ def _retry_body(body: str, reason: str, previous_response: str) -> str:
         "write PostgreSQL SELECT statements, and if execute_sql returns an "
         "error, correct the SQL and retry. For report or research prompts, "
         "try narrower top-N, date-bucketed, sampled, or simpler grouped "
-        "queries before concluding the data cannot support a report. Do not "
-        "ask the user for schema, columns, or date formats that can be "
-        "discovered with tools.\n\n"
+        "queries before concluding the data cannot support a report. Your "
+        "final answer must be the report itself, not a work summary, progress "
+        "log, or reference to a previous response. Do not ask the user for "
+        "schema, columns, or date formats that can be discovered with tools.\n\n"
         f"PREVIOUS RESPONSE:\n{previous}"
     )
 
