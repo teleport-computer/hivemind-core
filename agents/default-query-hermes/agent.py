@@ -67,6 +67,10 @@ Compute requested statistics in SQL. If execute_sql returns an error, revise
 the SQL and retry instead of asking the user to provide schema or formatting.
 For broad analytical prompts, run multiple targeted SQL queries as needed
 within budget instead of stopping after the first usable result.
+If a broad query times out or returns an error, narrow it: add date buckets,
+top-N limits, smaller time windows, selected columns, or simpler GROUP BY
+queries. Do not ask the user for more data or stop at a tool-attempt summary
+while there are still narrower scoped queries you can run.
 
 Continue after tool results until you have a final answer. For row-level
 questions, request row-level data and let scope_fn apply the room policy.
@@ -77,6 +81,15 @@ memo, or lifecycle analysis, write a structured Markdown report with a title,
 executive summary, methodology/assumptions, evidence-backed findings, tables
 or timelines where useful, recommendations or implications, and limitations.
 Do not shorten a requested report into a terse aggregate answer.
+For research/report prompts, meet a higher bar:
+- Pick a defensible thesis from the scoped data, not merely the first table.
+- Gather several independent evidence slices when budget allows: dataset
+  size/range, top entities, temporal pattern, concentration/distribution,
+  trend/lifecycle movement, and data-quality checks.
+- Use at least one compact table and one interpretation-heavy finding section.
+- State what the scoped data can and cannot support, but still produce the
+  strongest supported report when any useful scoped evidence exists.
+- Do not output a progress log of failed tool calls as the final answer.
 If the user asks for a file or artifact, call upload_artifact with the report
 content before the final answer. If artifact upload is unavailable, still
 return the report text and explain that no artifact was created.
@@ -165,6 +178,22 @@ def _completion_token_cap(default: int = 8192, hard_cap: int = 16384) -> int:
     return min(default, hard_cap)
 
 
+def _is_research_prompt() -> bool:
+    text = f"{QUERY_PROMPT}\n{QUERY_CONTEXT}".lower()
+    markers = (
+        "research",
+        "report",
+        "study",
+        "analysis",
+        "lifecycle",
+        "deep dive",
+        "memo",
+        "whitepaper",
+        "findings",
+    )
+    return any(marker in text for marker in markers)
+
+
 def _looks_like_runtime_failure(text: str) -> bool:
     lower = (text or "").lower()
     return any(marker in lower for marker in _HERMES_FAILURE_MARKERS)
@@ -201,16 +230,14 @@ def _run_ai_agent(body: str) -> str:
         api_key=api_key,
         provider="custom",
         model=HIVEMIND_MODEL,
-        # Match agents/default-query/agent.py:113 — tool-heavy workflows
-        # destabilize at higher turn counts; cap to fail fast.
-        max_iterations=6,
+        max_iterations=12 if _is_research_prompt() else 6,
         enabled_toolsets=["hivemind"],
         ephemeral_system_prompt=SYSTEM_PROMPT,
         skip_context_files=True,
         skip_memory=True,
         quiet_mode=True,
         save_trajectories=False,
-        max_tokens=_completion_token_cap(),
+        max_tokens=_completion_token_cap(default=12288 if _is_research_prompt() else 8192),
         reasoning_config=_NO_REASONING_CONFIG,
         request_overrides=_NO_REASONING_OVERRIDES,
     )
@@ -228,8 +255,11 @@ def _retry_body(body: str, reason: str, previous_response: str) -> str:
         f"The previous attempt did not produce a usable final answer: {reason}.\n"
         "Continue the task using the available tools. Inspect schema if needed, "
         "write PostgreSQL SELECT statements, and if execute_sql returns an "
-        "error, correct the SQL and retry. Do not ask the user for schema, "
-        "columns, or date formats that can be discovered with tools.\n\n"
+        "error, correct the SQL and retry. For report or research prompts, "
+        "try narrower top-N, date-bucketed, sampled, or simpler grouped "
+        "queries before concluding the data cannot support a report. Do not "
+        "ask the user for schema, columns, or date formats that can be "
+        "discovered with tools.\n\n"
         f"PREVIOUS RESPONSE:\n{previous}"
     )
 

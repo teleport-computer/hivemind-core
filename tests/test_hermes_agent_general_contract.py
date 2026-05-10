@@ -163,6 +163,32 @@ def test_query_agent_uses_ai_agent_for_raw_dump_attack(monkeypatch, capsys):
     assert len(calls["chats"]) == 1
 
 
+def test_query_agent_uses_deeper_loop_for_research_reports(monkeypatch, capsys):
+    monkeypatch.delenv("BUDGET_MAX_TOKENS", raising=False)
+    monkeypatch.setenv(
+        "QUERY_PROMPT",
+        "Write a deep research report on a lifecycle pattern in the data.",
+    )
+    mod, calls = _load_agent(
+        monkeypatch,
+        "agents/default-query-hermes/agent.py",
+        "default_query_hermes_research_report_contract_test",
+        response="# Research Report\n\nEvidence-backed findings.",
+    )
+
+    mod.main()
+
+    captured = capsys.readouterr()
+    assert "Research Report" in captured.out
+    init_kwargs = calls["inits"][0]["kwargs"]
+    assert init_kwargs["max_iterations"] == 12
+    assert init_kwargs["max_tokens"] >= 12288
+    system_prompt = init_kwargs["ephemeral_system_prompt"]
+    assert "Pick a defensible thesis" in system_prompt
+    assert "several independent evidence slices" in system_prompt
+    assert "Do not output a progress log" in system_prompt
+
+
 def test_query_agent_does_not_emit_hermes_runtime_diagnostics(monkeypatch, capsys):
     monkeypatch.setenv("QUERY_PROMPT", "What is the answer?")
     mod, _calls = _load_agent(
@@ -437,6 +463,8 @@ def test_query_prompt_is_tool_aware_without_canned_policy():
     assert "invent policy beyond it" in source
     assert "Compute requested statistics in SQL" in source
     assert "For broad analytical prompts" in source
+    assert "Pick a defensible thesis" in source
+    assert "narrower scoped queries" in source
     assert "structured Markdown report" in source
     assert "Use get_schema before SQL" in source
 
