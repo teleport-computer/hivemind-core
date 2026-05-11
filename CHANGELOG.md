@@ -36,6 +36,9 @@ surface.
 - Tightened the scope verifier so analytical scope functions must preserve
   generic aggregate rows, including grouping labels and numeric metrics, rather
   than silently returning empty tables.
+- Improved scope-Hermes verifier retries so failed aggregate-preservation
+  checks are included in the retry prompt, letting the model repair too-narrow
+  scope transforms instead of repeating the same verifier failure.
 - Added a query-Hermes ranking-table quality retry for duplicate category
   labels or non-descending metrics, forcing the agent to regroup by the cleaned
   displayed label before answering.

@@ -294,14 +294,14 @@ def _verify_scope_source(source: str) -> tuple[bool, str]:
     return True, "ok"
 
 
-def _emit_verified_scope(source: str) -> bool:
+def _emit_verified_scope(source: str) -> tuple[bool, str]:
     verified, reason = _verify_scope_source(source)
     if verified:
         # Re-emit canonically so the pipeline parses cleanly.
         print(json.dumps({"scope_fn": source}))
-        return True
+        return True, "ok"
     print(f"scope self-verify failed: {reason}", file=sys.stderr)
-    return False
+    return False, reason
 
 
 def _fail_scope(reason: str, previous_response: str = "") -> None:
@@ -424,15 +424,22 @@ def main() -> None:
 
     parsed = _extract_json_emit(response)
     if parsed and isinstance(parsed.get("scope_fn"), str) and parsed["scope_fn"].strip():
-        if _emit_verified_scope(parsed["scope_fn"]):
+        verified, verify_reason = _emit_verified_scope(parsed["scope_fn"])
+        if verified:
             return
         retry = _retry_scope_emit(
             body,
-            reason="scope_fn failed self verification",
+            reason=f"scope_fn failed self verification: {verify_reason}",
             previous_response=response,
         )
-        if retry and _emit_verified_scope(retry["scope_fn"]):
-            return
+        if retry:
+            retry_verified, retry_reason = _emit_verified_scope(retry["scope_fn"])
+            if retry_verified:
+                return
+            _fail_scope(
+                f"scope_fn failed self verification after retry: {retry_reason}",
+                response,
+            )
         _fail_scope("scope_fn failed self verification", response)
 
     retry = _retry_scope_emit(
@@ -440,8 +447,14 @@ def main() -> None:
         reason="unparseable or truncated scope JSON",
         previous_response=response,
     )
-    if retry and _emit_verified_scope(retry["scope_fn"]):
-        return
+    if retry:
+        retry_verified, retry_reason = _emit_verified_scope(retry["scope_fn"])
+        if retry_verified:
+            return
+        _fail_scope(
+            f"retry scope_fn failed self verification: {retry_reason}",
+            response,
+        )
     _fail_scope("unparseable or unverifiable scope JSON", response)
 
 

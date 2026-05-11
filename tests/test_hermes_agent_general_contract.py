@@ -800,7 +800,88 @@ def test_scope_agent_retries_when_aggregate_rows_are_dropped(
     assert emitted == {"scope_fn": passthrough_scope_fn}
     assert len(calls["chats"]) == 2
     assert verify_calls[0]["tests"][0]["expect_min_rows"] == 2
+    assert "expected_min_rows" in calls["chats"][1]
     assert "dropped useful synthetic summary rows" not in captured.err
+
+
+def test_scope_agent_retry_includes_specific_verifier_failures(
+    monkeypatch,
+    capsys,
+):
+    narrow_scope_fn = (
+        'def scope(sql, params, rows):\n'
+        "    kept = []\n"
+        "    for row in rows:\n"
+        "        kept.append({k: row[k] for k in ('category', 'watches') if k in row})\n"
+        '    return {"allow": True, "rows": kept}\n'
+    )
+    passthrough_scope_fn = (
+        'def scope(sql, params, rows):\n    return {"allow": True, "rows": rows}\n'
+    )
+    monkeypatch.setenv(
+        "QUERY_PROMPT",
+        "Show me top hashtags and buckets by count as aggregate tables.",
+    )
+    mod, calls = _load_agent(
+        monkeypatch,
+        "agents/default-scope-hermes/agent.py",
+        "default_scope_hermes_retry_includes_verify_failure_test",
+        response=[
+            json.dumps({"scope_fn": narrow_scope_fn}),
+            json.dumps({"scope_fn": passthrough_scope_fn}),
+        ],
+    )
+
+    class FakeVerifyResponse:
+        def __init__(self, passed: bool):
+            self.passed = passed
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            if self.passed:
+                return {"compiles": True, "all_tests_passed": True, "results": []}
+            return {
+                "compiles": True,
+                "all_tests_passed": False,
+                "results": [
+                    {
+                        "label": "aggregate group labels and metrics are preserved",
+                        "sql": "SELECT category, COUNT(*)::int AS watches FROM allowed_events GROUP BY category",
+                        "allow": True,
+                        "rows_returned": 2,
+                        "expected_allow": True,
+                        "expected_min_rows": 2,
+                        "passed": True,
+                    },
+                    {
+                        "label": "aggregate bucket metrics are preserved",
+                        "sql": "SELECT bucket, COUNT(*)::int AS total FROM allowed_events GROUP BY bucket",
+                        "allow": True,
+                        "rows_returned": 0,
+                        "expected_allow": True,
+                        "expected_min_rows": 1,
+                        "passed": False,
+                    },
+                ],
+            }
+
+    def fake_post(_url, *, json, headers, timeout):
+        return FakeVerifyResponse(json["source"] == passthrough_scope_fn)
+
+    monkeypatch.setattr(mod.httpx, "post", fake_post)
+
+    mod.main()
+
+    emitted = json.loads(capsys.readouterr().out)
+    assert emitted == {"scope_fn": passthrough_scope_fn}
+    assert len(calls["chats"]) == 2
+    retry_body = calls["chats"][1]
+    assert "aggregate bucket metrics are preserved" in retry_body
+    assert "rows_returned" in retry_body
+    assert "expected_min_rows" in retry_body
+    assert "SELECT bucket" in retry_body
 
 
 def test_scope_agent_accepts_unparseable_retry_after_compile_verification(
