@@ -31,6 +31,9 @@ surface.
 - Fixed room table allowlist enforcement so valid aggregate SQL using CTEs,
   subqueries, or lateral function aliases is checked against the underlying
   base tables instead of rejecting the derived alias name.
+- Tightened the scope verifier so analytical scope functions must preserve
+  generic aggregate rows, including grouping labels and numeric metrics, rather
+  than silently returning empty tables.
 - Changed the hosted Hermes default model from `z-ai/glm-5` to
   `moonshotai/kimi-k2.6` and removed the scope-Hermes hardcoded synthetic
   summary-row gate that could fail otherwise valid analytical runs.

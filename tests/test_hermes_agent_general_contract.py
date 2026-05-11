@@ -704,11 +704,14 @@ def test_scope_agent_retries_unparseable_response_before_empty_fallback(
     assert "RECOVERY INSTRUCTION" in calls["chats"][1]
 
 
-def test_scope_agent_accepts_verified_scope_without_synthetic_utility_gate(
+def test_scope_agent_retries_when_aggregate_rows_are_dropped(
     monkeypatch,
     capsys,
 ):
     empty_scope_fn = 'def scope(sql, params, rows):\n    return {"allow": True, "rows": []}\n'
+    passthrough_scope_fn = (
+        'def scope(sql, params, rows):\n    return {"allow": True, "rows": rows}\n'
+    )
     monkeypatch.setenv(
         "QUERY_PROMPT",
         "Write a research report with evidence-backed findings.",
@@ -716,12 +719,16 @@ def test_scope_agent_accepts_verified_scope_without_synthetic_utility_gate(
     mod, calls = _load_agent(
         monkeypatch,
         "agents/default-scope-hermes/agent.py",
-        "default_scope_hermes_no_synthetic_utility_gate_test",
-        response=json.dumps({"scope_fn": empty_scope_fn}),
+        "default_scope_hermes_aggregate_preservation_retry_test",
+        response=[
+            json.dumps({"scope_fn": empty_scope_fn}),
+            json.dumps({"scope_fn": passthrough_scope_fn}),
+        ],
     )
 
     class FakeVerifyResponse:
-        def __init__(self, rows_returned: int):
+        def __init__(self, passed: bool, rows_returned: int):
+            self.passed = passed
             self.rows_returned = rows_returned
 
         def raise_for_status(self):
@@ -730,18 +737,25 @@ def test_scope_agent_accepts_verified_scope_without_synthetic_utility_gate(
         def json(self):
             return {
                 "compiles": True,
-                "all_tests_passed": True,
+                "all_tests_passed": self.passed,
                 "results": [
                     {
-                        "label": "summary metric row is preserved",
+                        "label": "aggregate group labels and metrics are preserved",
                         "allow": True,
                         "rows_returned": self.rows_returned,
+                        "expected_min_rows": 2,
+                        "passed": self.passed,
                     }
                 ],
             }
 
+    verify_calls = []
+
     def fake_post(_url, *, json, headers, timeout):
-        return FakeVerifyResponse(0)
+        verify_calls.append(json)
+        if "return {\"allow\": True, \"rows\": []}" in json["source"]:
+            return FakeVerifyResponse(False, 0)
+        return FakeVerifyResponse(True, 2)
 
     monkeypatch.setattr(mod.httpx, "post", fake_post)
 
@@ -749,8 +763,9 @@ def test_scope_agent_accepts_verified_scope_without_synthetic_utility_gate(
 
     captured = capsys.readouterr()
     emitted = json.loads(captured.out)
-    assert emitted == {"scope_fn": empty_scope_fn}
-    assert len(calls["chats"]) == 1
+    assert emitted == {"scope_fn": passthrough_scope_fn}
+    assert len(calls["chats"]) == 2
+    assert verify_calls[0]["tests"][0]["expect_min_rows"] == 2
     assert "dropped useful synthetic summary rows" not in captured.err
 
 
@@ -812,6 +827,8 @@ def test_scope_prompt_centers_privacy_utility_frontier():
     assert "simulate_multi" in source
     assert "verify_scope_fn" in source
     assert "Do not inspect query source just to answer ordinary" in source
+    assert "aggregate group labels" in source
+    assert "expect_min_rows" in source
 
 
 def test_query_prompt_is_tool_aware_without_canned_policy():

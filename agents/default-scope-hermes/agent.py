@@ -114,6 +114,11 @@ policy boundary is genuinely ambiguous.
 Use list_query_agent_files/read_query_agent_file only when the question asks
 about the query agent or the policy boundary depends on its implementation.
 Do not inspect query source just to answer ordinary analytical/report prompts.
+Your emitted scope_fn is host-verified before use. For aggregate/statistical
+questions, the verifier requires preserving generic grouped rows that contain
+string labels and numeric metrics. Do not drop aggregate rows or erase grouping
+labels such as category/hashtag/bucket unless the policy explicitly forbids
+that aggregate shape.
 
 Function contract:
 - Signature exactly `def scope(sql, params, rows):`.
@@ -138,7 +143,56 @@ _NO_REASONING_OVERRIDES = {"extra_body": {"reasoning": {"effort": "none", "exclu
 
 
 _MAX_RETRY_CONTEXT_CHARS = 3000
-_VERIFY_TESTS: list[dict] = []
+_AGGREGATE_VERIFY_TESTS: list[dict] = [
+    {
+        "label": "aggregate group labels and metrics are preserved",
+        "sql": (
+            "SELECT category, COUNT(*)::int AS watches "
+            "FROM allowed_events GROUP BY category ORDER BY watches DESC LIMIT 2"
+        ),
+        "params": [],
+        "rows": [
+            {"category": "alpha", "watches": 42},
+            {"category": "beta", "watches": 17},
+        ],
+        "expect_allow": True,
+        "expect_min_rows": 2,
+    },
+    {
+        "label": "aggregate bucket metrics are preserved",
+        "sql": (
+            "SELECT bucket, COUNT(*)::int AS total "
+            "FROM allowed_events GROUP BY bucket ORDER BY total DESC"
+        ),
+        "params": [],
+        "rows": [{"bucket": "night", "total": 100}],
+        "expect_allow": True,
+        "expect_min_rows": 1,
+    },
+]
+
+
+def _verification_tests() -> list[dict]:
+    text = f"{QUERY_PROMPT}\n{POLICY_CONTEXT}".lower()
+    aggregate_markers = (
+        "aggregate",
+        "statistic",
+        "summary",
+        "summarize",
+        "count",
+        "top ",
+        "rank",
+        "group",
+        "bucket",
+        "table",
+        "report",
+        "research",
+        "analysis",
+        "hashtag",
+    )
+    if any(marker in text for marker in aggregate_markers):
+        return _AGGREGATE_VERIFY_TESTS
+    return []
 
 
 def _completion_token_cap(default: int = 4096, hard_cap: int = 8192) -> int:
@@ -223,7 +277,7 @@ def _verify_scope_source(source: str) -> tuple[bool, str]:
     try:
         resp = httpx.post(
             f"{bridge_url}/sandbox/verify_scope_fn",
-            json={"source": source, "tests": _VERIFY_TESTS},
+            json={"source": source, "tests": _verification_tests()},
             headers={"Authorization": f"Bearer {session_token}"},
             timeout=30.0,
         )

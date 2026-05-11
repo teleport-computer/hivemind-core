@@ -258,6 +258,7 @@ class ScopeTestCase(BaseModel):
     params: list = Field(default_factory=list)
     rows: list[dict] = Field(default_factory=list)
     expect_allow: bool | None = None  # None = don't assert, just record outcome
+    expect_min_rows: int | None = None  # None = don't assert row preservation
     label: str = ""  # human-readable name
 
 
@@ -277,6 +278,7 @@ class ScopeTestResult(BaseModel):
     error: str | None = None
     rows_returned: int = 0
     expected_allow: bool | None = None
+    expected_min_rows: int | None = None
     passed: bool | None = None  # None if no expectation provided
 
 

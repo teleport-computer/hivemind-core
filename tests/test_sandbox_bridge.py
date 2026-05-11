@@ -129,6 +129,49 @@ async def test_list_tools(bridge):
 
 
 @pytest.mark.asyncio
+async def test_verify_scope_fn_enforces_expected_min_rows():
+    budget = Budget(max_calls=10, max_tokens=100_000)
+    server = BridgeServer(
+        session_token="test-token-123",
+        tools=_make_tools(),
+        on_tool_call=_mock_on_tool_call,
+        llm_caller=_mock_llm_caller,
+        budget=budget,
+        host="127.0.0.1",
+        role="scope",
+    )
+    port = await server.start()
+    client = httpx.AsyncClient(base_url=f"http://127.0.0.1:{port}")
+    try:
+        resp = await client.post(
+            "/sandbox/verify_scope_fn",
+            headers={"Authorization": "Bearer test-token-123"},
+            json={
+                "source": 'def scope(sql, params, rows):\n    return {"allow": True, "rows": []}\n',
+                "tests": [
+                    {
+                        "label": "aggregate rows survive",
+                        "sql": "SELECT category, COUNT(*) AS watches FROM events GROUP BY category",
+                        "rows": [{"category": "alpha", "watches": 2}],
+                        "expect_allow": True,
+                        "expect_min_rows": 1,
+                    }
+                ],
+            },
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["compiles"] is True
+        assert data["all_tests_passed"] is False
+        assert data["results"][0]["rows_returned"] == 0
+        assert data["results"][0]["expected_min_rows"] == 1
+        assert data["results"][0]["passed"] is False
+    finally:
+        await client.aclose()
+        await server.stop()
+
+
+@pytest.mark.asyncio
 async def test_llm_chat(bridge):
     server, client, budget = bridge
     headers = {"Authorization": "Bearer test-token-123"}

@@ -187,7 +187,7 @@ VERIFY_SCOPE_FN_SCHEMA = {
     "description": (
         "Compile + test a candidate scope_fn against synthetic test cases. "
         "Pass `source` as the full Python function text and `tests` as a "
-        "JSON array of {sql, params, rows, expect_allow?, label?}. Returns "
+        "JSON array of {sql, params, rows, expect_allow?, expect_min_rows?, label?}. Returns "
         "{compiles, compile_error, all_tests_passed, results}. Fast (ms), "
         "no LLM call. Scope-agent only."
     ),
@@ -201,7 +201,8 @@ VERIFY_SCOPE_FN_SCHEMA = {
             "tests": {
                 "type": "string",
                 "description": (
-                    "JSON array of test cases. Each: {sql, params, rows, expect_allow?, label?}."
+                    "JSON array of test cases. Each: {sql, params, rows, "
+                    "expect_allow?, expect_min_rows?, label?}."
                 ),
             },
         },

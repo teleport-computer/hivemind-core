@@ -1135,6 +1135,11 @@ class BridgeServer:
                         passed = allow == tc.expect_allow
                         if not passed:
                             all_passed = False
+                    if tc.expect_min_rows is not None:
+                        row_count_passed = allow and rows_returned >= tc.expect_min_rows
+                        passed = row_count_passed if passed is None else passed and row_count_passed
+                        if not row_count_passed:
+                            all_passed = False
                     results.append(
                         ScopeTestResult(
                             label=tc.label,
@@ -1143,6 +1148,7 @@ class BridgeServer:
                             error=str(error) if error else None,
                             rows_returned=rows_returned,
                             expected_allow=tc.expect_allow,
+                            expected_min_rows=tc.expect_min_rows,
                             passed=passed,
                         )
                     )
