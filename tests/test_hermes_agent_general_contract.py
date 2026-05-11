@@ -4,8 +4,6 @@ import sys
 import types
 from pathlib import Path
 
-import pytest
-
 from hivemind.scope import compile_scope_fn
 
 
@@ -706,11 +704,11 @@ def test_scope_agent_retries_unparseable_response_before_empty_fallback(
     assert "RECOVERY INSTRUCTION" in calls["chats"][1]
 
 
-def test_scope_agent_retries_empty_scope_for_report_prompt(monkeypatch, capsys):
+def test_scope_agent_accepts_verified_scope_without_synthetic_utility_gate(
+    monkeypatch,
+    capsys,
+):
     empty_scope_fn = 'def scope(sql, params, rows):\n    return {"allow": True, "rows": []}\n'
-    passthrough_scope_fn = (
-        'def scope(sql, params, rows):\n    return {"allow": True, "rows": rows}\n'
-    )
     monkeypatch.setenv(
         "QUERY_PROMPT",
         "Write a research report with evidence-backed findings.",
@@ -718,11 +716,8 @@ def test_scope_agent_retries_empty_scope_for_report_prompt(monkeypatch, capsys):
     mod, calls = _load_agent(
         monkeypatch,
         "agents/default-scope-hermes/agent.py",
-        "default_scope_hermes_retry_empty_report_scope_test",
-        response=[
-            json.dumps({"scope_fn": empty_scope_fn}),
-            json.dumps({"scope_fn": passthrough_scope_fn}),
-        ],
+        "default_scope_hermes_no_synthetic_utility_gate_test",
+        response=json.dumps({"scope_fn": empty_scope_fn}),
     )
 
     class FakeVerifyResponse:
@@ -746,8 +741,7 @@ def test_scope_agent_retries_empty_scope_for_report_prompt(monkeypatch, capsys):
             }
 
     def fake_post(_url, *, json, headers, timeout):
-        rows_returned = 0 if 'rows": []' in json["source"] else 1
-        return FakeVerifyResponse(rows_returned)
+        return FakeVerifyResponse(0)
 
     monkeypatch.setattr(mod.httpx, "post", fake_post)
 
@@ -755,12 +749,12 @@ def test_scope_agent_retries_empty_scope_for_report_prompt(monkeypatch, capsys):
 
     captured = capsys.readouterr()
     emitted = json.loads(captured.out)
-    assert emitted == {"scope_fn": passthrough_scope_fn}
-    assert len(calls["chats"]) == 2
-    assert "dropped useful synthetic summary rows" in captured.err
+    assert emitted == {"scope_fn": empty_scope_fn}
+    assert len(calls["chats"]) == 1
+    assert "dropped useful synthetic summary rows" not in captured.err
 
 
-def test_scope_agent_rejects_unparseable_retry_empty_scope_for_report_prompt(
+def test_scope_agent_accepts_unparseable_retry_after_compile_verification(
     monkeypatch,
     capsys,
 ):
@@ -772,7 +766,7 @@ def test_scope_agent_rejects_unparseable_retry_empty_scope_for_report_prompt(
     mod, calls = _load_agent(
         monkeypatch,
         "agents/default-scope-hermes/agent.py",
-        "default_scope_hermes_reject_empty_retry_contract_test",
+        "default_scope_hermes_accept_compile_verified_retry_test",
         response=["not json", json.dumps({"scope_fn": empty_scope_fn})],
     )
 
@@ -799,15 +793,13 @@ def test_scope_agent_rejects_unparseable_retry_empty_scope_for_report_prompt(
         lambda _url, *, json, headers, timeout: FakeVerifyResponse(),
     )
 
-    with pytest.raises(SystemExit) as exc:
-        mod.main()
+    mod.main()
 
     captured = capsys.readouterr()
-    assert exc.value.code == 2
-    assert captured.out == ""
+    assert json.loads(captured.out) == {"scope_fn": empty_scope_fn}
     assert len(calls["chats"]) == 2
-    assert "scope self-verify failed" in captured.err
-    assert "unparseable or unverifiable scope JSON" in captured.err
+    assert "scope self-verify failed" not in captured.err
+    assert "unparseable or unverifiable scope JSON" not in captured.err
 
 
 def test_scope_prompt_centers_privacy_utility_frontier():

@@ -24,6 +24,13 @@ surface.
   request/response path, query-run index columns, default index agents, index
   image builds, and `agent_type=index` upload path are gone. Room execution is
   scope → query → mediator.
+- **Breaking — unrestricted room mode removed.** New rooms always sign an
+  explicit `allowed_tables` list, `hmctl room create` sends that list (empty by
+  default), and room runs reject old manifests that omit it instead of falling
+  back to unrestricted SQL access.
+- Changed the hosted Hermes default model from `z-ai/glm-5` to
+  `moonshotai/kimi-k2.6` and removed the scope-Hermes hardcoded synthetic
+  summary-row gate that could fail otherwise valid analytical runs.
 - Added repository hygiene docs: contributing guide, security policy, changelog,
   and GitHub issue templates.
 - Added README badges and a shorter top-level capability summary.

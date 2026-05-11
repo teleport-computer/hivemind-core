@@ -378,7 +378,7 @@ sync_pinning_gateway() {
 # value is treated as an intentional operator override and left alone.
 sync_default_llm_model() {
     local env_file="$1"
-    local desired="z-ai/glm-5"
+    local desired="moonshotai/kimi-k2.6"
     local current
     current=$(grep -E '^HIVEMIND_LLM_MODEL=' "${env_file}" 2>/dev/null | head -1 | sed -E 's|^HIVEMIND_LLM_MODEL=||' || true)
 
@@ -387,7 +387,7 @@ sync_default_llm_model() {
             log "sync_default_llm_model: appending HIVEMIND_LLM_MODEL=${desired} (was unset)"
             echo "HIVEMIND_LLM_MODEL=${desired}" >> "${env_file}"
             ;;
-        "anthropic/claude-sonnet-4.5"|"moonshotai/kimi-k2.6")
+        "anthropic/claude-sonnet-4.5"|"z-ai/glm-5")
             warn "sync_default_llm_model: rewriting old default HIVEMIND_LLM_MODEL (${current} -> ${desired})"
             sed -i -E "s|^HIVEMIND_LLM_MODEL=.*|HIVEMIND_LLM_MODEL=${desired}|" "${env_file}"
             ;;

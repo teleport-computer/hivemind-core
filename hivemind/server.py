@@ -24,6 +24,7 @@ from .api.runs import register_run_routes
 from .api.room_helpers import (
     room_prompt_for_run as _room_prompt_for_run,
     room_wrap_id as _room_wrap_id,
+    signed_allowed_tables as _signed_allowed_tables,
 )
 from .api.rooms import register_room_routes
 from .api.signup import register_signup_routes
@@ -673,11 +674,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 allowed_llm_providers=(room or {}).get("allowed_llm_providers"),
                 artifacts_enabled=bool((room or {}).get("allow_artifacts", True)),
                 room_vault_items=room_vault_items,
-                # Per-room SQL data sources from the signed manifest. Legacy
-                # rooms without this field pass None and keep the old
-                # unrestricted behavior — see hivemind/tools.py for enforcement.
                 allowed_tables=(
-                    ((room or {}).get("manifest") or {}).get("allowed_tables")
+                    _signed_allowed_tables(room) if room is not None else []
                 ),
                 payer_tenant_id=billing.get("payer_tenant_id"),
                 payer_token_id=billing.get("payer_token_id"),

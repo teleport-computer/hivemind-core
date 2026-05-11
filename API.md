@@ -168,6 +168,7 @@ Create a signed room manifest and invite token.
   "query_agent_id": null,
   "query_visibility": "sealed",
   "output_visibility": "querier_only",
+  "allowed_tables": ["watch_history"],
   "egress": {
     "llm_providers": ["openrouter"],
     "allow_artifacts": true
@@ -178,6 +179,10 @@ Create a signed room manifest and invite token.
   }
 }
 ```
+
+`allowed_tables` is always signed into the room manifest. Use an empty list, or
+omit the field, for a room with no SQL table access. Obsolete manifests that are
+missing this signed field are rejected at run time.
 
 Response includes:
 

@@ -47,7 +47,7 @@ SESSION_TOKEN = os.environ["SESSION_TOKEN"]
 QUERY_AGENT_ID = os.environ.get("QUERY_AGENT_ID", "")
 QUERY_PROMPT = os.environ.get("QUERY_PROMPT", "")
 POLICY_CONTEXT = os.environ.get("POLICY_CONTEXT", "").strip()
-LLM_MODEL = os.environ.get("HIVEMIND_LLM_MODEL", "z-ai/glm-5")
+LLM_MODEL = os.environ.get("HIVEMIND_LLM_MODEL", "moonshotai/kimi-k2.6")
 LLM_BASE_URL = os.environ.get("HIVEMIND_LLM_BASE_URL", "https://openrouter.ai/api/v1")
 CLAW_BIN = os.environ.get("CLAW_BIN", "/usr/local/bin/claw")
 

@@ -138,7 +138,8 @@ class Caller:
       - owner: ``{}``
       - query: room invite constraints. Every run is forced through the
         signed room manifest; the tenant DB room row remains the source
-        of truth.
+        of truth. Room tokens also carry a debug/audit snapshot including
+        ``allowed_tables`` when minted from a room manifest.
       - share: stable per-room share-link. Constraints carry only
         ``{"room_id": "<id>"}``. The asker's own ``hmk_`` (passed via
         ``X-Hivemind-Api-Key``) provides identity and pays for the run.
@@ -594,10 +595,12 @@ class TenantRegistry(CreditCodeRegistryMixin, BillingRegistryMixin):
             value = constraints.get(key)
             if isinstance(value, str) and value.strip():
                 normalized[key] = value.strip()
-        for key in ("allowed_llm_providers",):
+        for key in ("allowed_llm_providers", "allowed_tables"):
             value = constraints.get(key)
             if isinstance(value, list):
                 normalized[key] = [str(v).strip() for v in value if str(v).strip()]
+            elif key in constraints:
+                raise ValueError(f"{key} must be a list")
         if "allow_artifacts" in constraints:
             normalized["allow_artifacts"] = bool(constraints.get("allow_artifacts"))
         constraints = normalized

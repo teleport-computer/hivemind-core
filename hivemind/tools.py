@@ -237,13 +237,9 @@ def _validate_table_allowlist(
       1. ``information_schema.*``, ``pg_catalog.*``, ``pg_toast.*`` — always rejected.
          These would let the agent enumerate the full schema by listing tables.
       2. ``_hivemind_*`` / ``_credit_*`` / ``_billing_*`` / ``_tenants`` — always rejected.
-      3. If ``allowed_tables`` is non-None, every remaining table reference must
-         be in the allowlist (case-insensitive). Tables not on the allowlist
-         are treated as if they don't exist.
-
-    ``allowed_tables=None`` is the legacy back-compat path (room manifests
-    minted before this feature shipped) — it skips step 3 entirely so old rooms
-    keep their previous behavior.
+      3. Every remaining table reference must be in the allowlist
+         (case-insensitive). Tables not on the allowlist are treated as if
+         they don't exist. ``allowed_tables=None`` is rejected fail-closed.
 
     Errors are deliberately opaque: the agent never learns whether a rejected
     table name actually exists in the tenant DB. The operator-side run log
@@ -252,9 +248,8 @@ def _validate_table_allowlist(
     import sqlglot
 
     if allowed_tables is None:
-        allowed_lower: set[str] | None = None
-    else:
-        allowed_lower = {t.strip().lower() for t in allowed_tables if t}
+        return "query rejected (room missing table allowlist)"
+    allowed_lower = {t.strip().lower() for t in allowed_tables if t}
 
     try:
         statements = sqlglot.parse(
@@ -278,7 +273,7 @@ def _validate_table_allowlist(
             if any(name.startswith(p) for p in _INTERNAL_TABLE_PREFIXES):
                 return "query rejected"
 
-            if allowed_lower is not None and name not in allowed_lower:
+            if name not in allowed_lower:
                 return "query rejected"
 
     return None
@@ -348,10 +343,7 @@ def build_sql_tools(
     def execute_sql(sql: str, params: list | None = None) -> str:
         safe_params = _normalize_sql_params(sql, params)
 
-        # Per-room allowlist + system-table block. allowed_tables is None for
-        # legacy rooms whose manifests don't carry the field (we keep the old
-        # _references_internal_tables behavior in that case via the prefix
-        # check inside _validate_table_allowlist).
+        # Per-room allowlist + system-table block. Missing allowlists fail closed.
         violation = _validate_table_allowlist(sql, allowed_tables)
         if violation:
             logger.warning(
@@ -400,14 +392,12 @@ def build_sql_tools(
     def get_schema() -> str:
         try:
             schema = db.get_schema(exclude_internal=True)
-            # When the room has an allowlist, the agent must not see any
-            # other tables — not even by name. Filter the schema rows
-            # (a list of {table_name, column_name, ...}) to keep only the
-            # allowed tables. Legacy rooms (allowed_tables=None) get the
-            # old "everything except _hivemind_*" view.
-            if allowed_tables is not None:
-                allow = {t.strip().lower() for t in allowed_tables if t}
-                schema = [r for r in schema if str(r.get("table_name", "")).lower() in allow]
+            # The agent must not see disallowed tables — not even by name.
+            allow = {t.strip().lower() for t in (allowed_tables or []) if t}
+            schema = [
+                r for r in schema
+                if str(r.get("table_name", "")).lower() in allow
+            ]
             return json.dumps(schema, default=str)
         except Exception as e:
             return json.dumps({"error": str(e)})

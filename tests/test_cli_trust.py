@@ -559,6 +559,7 @@ def test_room_create_omits_query_fields_to_pin_service_default(
     assert captured["url"] == "https://cvm.example/v1/rooms"
     assert "query_mode" not in captured["json"]
     assert "query_agent_id" not in captured["json"]
+    assert captured["json"]["allowed_tables"] == []
 
 
 def test_room_create_uploadable_query_is_explicit(_sandbox, monkeypatch):
@@ -587,6 +588,47 @@ def test_room_create_uploadable_query_is_explicit(_sandbox, monkeypatch):
     assert result.exit_code == 0, result.output
     assert captured["json"]["query_mode"] == "uploadable"
     assert captured["json"]["query_agent_id"] is None
+    assert captured["json"]["allowed_tables"] == []
+
+
+def test_room_create_sends_explicit_allowed_tables(_sandbox, monkeypatch):
+    captured: dict = {}
+
+    class Resp:
+        status_code = 200
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"room_id": "room_new", "link": _ROOM_LINK}
+
+    def fake_hpost(url, **kwargs):
+        captured["json"] = kwargs.get("json")
+        return Resp()
+
+    monkeypatch.setattr(_rooms_cli, "_hpost", fake_hpost)
+
+    result = CliRunner().invoke(
+        _cli_mod.cli,
+        [
+            "--yes",
+            "room",
+            "create",
+            "scope-a",
+            "--allowed-table",
+            "watch_history",
+            "--allowed-table",
+            "creator_stats",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["json"]["allowed_tables"] == [
+        "watch_history",
+        "creator_stats",
+    ]
 
 
 def test_room_prune_dry_run_and_revoke_keeps_requested_room(_sandbox, monkeypatch):

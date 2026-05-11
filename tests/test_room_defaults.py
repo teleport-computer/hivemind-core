@@ -38,3 +38,9 @@ def test_omitted_room_query_stays_uploadable_without_service_default():
 
 def test_room_egress_defaults_to_primary_openrouter_provider():
     assert RoomEgress().llm_providers == ["openrouter"]
+
+
+def test_room_create_defaults_to_empty_allowed_tables():
+    req = RoomCreateRequest(scope_agent_id="scope-a")
+
+    assert req.allowed_tables == []

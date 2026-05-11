@@ -380,6 +380,7 @@ class TestExecuteSqlScopeIsolation:
             AccessLevel.SCOPED,
             scope_fn=runaway_fn,
             scope_fn_source=runaway_source,
+            allowed_tables=["t"],
         )
         execute_sql = {t.name: t for t in tools}["execute_sql"].handler
 

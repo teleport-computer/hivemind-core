@@ -29,7 +29,7 @@ class QueryRequest(BaseModel):
     # Per-call LLM model override. Empty/None falls back to per-role
     # config (HIVEMIND_SCOPE_MODEL/QUERY_MODEL/MEDIATOR_MODEL) and then
     # to the global HIVEMIND_LLM_MODEL. Use to A/B different models per
-    # query, e.g. "z-ai/glm-5" or "moonshotai/kimi-k2.5".
+    # query, e.g. "moonshotai/kimi-k2.6" or "moonshotai/kimi-k2.5".
     model: str | None = None
     # Optional per-role model overrides. These let scope stay on a reliable
     # tool-loop model while query uses a stronger prose/research model.

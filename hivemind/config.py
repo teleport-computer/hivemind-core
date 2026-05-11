@@ -28,7 +28,7 @@ class Settings(BaseSettings):
     # LLM (for bridge proxy)
     llm_api_key: str = ""
     llm_base_url: str = "https://openrouter.ai/api/v1"
-    llm_model: str = "z-ai/glm-5"
+    llm_model: str = "moonshotai/kimi-k2.6"
     llm_timeout_seconds: int = 45
 
     # Optional secondary provider. When ``tinfoil_api_key`` is set, callers
@@ -40,7 +40,7 @@ class Settings(BaseSettings):
     tinfoil_base_url: str = "https://inference.tinfoil.sh/v1"
     # Operator-side admission controls for temporarily broken upstream routes.
     # Comma-separated providers (e.g. "tinfoil") or provider:model routes
-    # (e.g. "tinfoil:z-ai/glm-5"). These fail at request boundaries before
+    # (e.g. "openrouter:moonshotai/kimi-k2.6"). These fail at request boundaries before
     # billing hold reservation or sandbox startup.
     disabled_llm_providers: str = ""
     disabled_llm_routes: str = ""

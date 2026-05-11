@@ -17,7 +17,7 @@ on:
       models:
         description: "Comma-separated OpenRouter model ids"
         required: true
-        default: "z-ai/glm-5,moonshotai/kimi-k2.6"
+        default: "moonshotai/kimi-k2.6"
       provider:
         description: "LLM provider"
         required: true

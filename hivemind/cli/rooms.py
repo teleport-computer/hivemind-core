@@ -668,6 +668,15 @@ def rooms_cli():
     help="Allow query agents to upload generated artifacts.",
 )
 @click.option(
+    "--allowed-table",
+    "allowed_tables",
+    multiple=True,
+    help=(
+        "Tenant table this room may query. Repeat for multiple tables. "
+        "Omit for a room with no SQL data sources."
+    ),
+)
+@click.option(
     "--trust-mode",
     type=click.Choice(["operator_updates", "pinned", "owner_approved"]),
     default="operator_updates",
@@ -708,6 +717,7 @@ def create_room(
     llm_providers: tuple[str, ...],
     no_llm: bool,
     allow_artifacts: bool,
+    allowed_tables: tuple[str, ...],
     trust_mode: str,
     agent_timeout: int | None,
     as_json: bool,
@@ -773,6 +783,7 @@ def create_room(
             "llm_providers": providers,
             "allow_artifacts": allow_artifacts,
         },
+        "allowed_tables": list(allowed_tables),
         "trust": {"mode": trust_mode},
     }
     if query_agent_id:

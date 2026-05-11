@@ -28,6 +28,7 @@ from .room_helpers import (
     room_prompt_for_run as _room_prompt_for_run,
     room_query_inspection_mode as _room_query_inspection_mode,
     room_wrap_id as _room_wrap_id,
+    signed_allowed_tables as _signed_allowed_tables,
     validate_room_provider as _validate_room_provider,
 )
 from ..config import Settings
@@ -264,6 +265,7 @@ def register_agent_upload_routes(
         """Upload query agent source into a room and kick off execution."""
         hm = caller.hive
         room = await _load_room_for_caller(caller, room_id)
+        allowed_tables = _signed_allowed_tables(room)
         if room.get("query_mode") != "uploadable":
             raise HTTPException(
                 403,
@@ -423,6 +425,7 @@ def register_agent_upload_routes(
                 inspection_mode=validated_mode,
                 room=room,
                 room_vault_items=room_vault_items,
+                allowed_tables=allowed_tables,
                 payer_tenant_id=billing.get("payer_tenant_id"),
                 payer_token_id=billing.get("payer_token_id"),
                 billable_role=billing.get("billable_role") or "query",
@@ -464,6 +467,7 @@ def register_agent_upload_routes(
         inspection_mode: str = "full",
         room: dict | None = None,
         room_vault_items: list[dict] | None = None,
+        allowed_tables: list[str] | None = None,
         payer_tenant_id: str | None = None,
         payer_token_id: str | None = None,
         billable_role: str = "query",
@@ -580,6 +584,7 @@ def register_agent_upload_routes(
                 allowed_llm_providers=(room or {}).get("allowed_llm_providers"),
                 artifacts_enabled=bool((room or {}).get("allow_artifacts", True)),
                 room_vault_items=room_vault_items or [],
+                allowed_tables=allowed_tables,
                 payer_tenant_id=payer_tenant_id,
                 payer_token_id=payer_token_id,
                 billable_role=billable_role,

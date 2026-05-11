@@ -480,7 +480,7 @@ jobs:
     timeout-minutes: 45
     env:
       ROOM: ${{ vars.HERMES_PROD_EVAL_ROOM }}
-      MODELS: ${{ vars.HERMES_PROD_EVAL_MODELS || 'z-ai/glm-5' }}
+      MODELS: ${{ vars.HERMES_PROD_EVAL_MODELS || 'moonshotai/kimi-k2.6' }}
       PROVIDER: ${{ vars.HERMES_PROD_EVAL_PROVIDER || 'openrouter' }}
       HMCTL_PROFILE: ${{ vars.HERMES_PROD_EVAL_HMCTL_PROFILE || 'prod-eval' }}
       HMCTL_SERVICE: ${{ vars.HERMES_PROD_EVAL_SERVICE || 'https://hivemind.teleport.computer' }}

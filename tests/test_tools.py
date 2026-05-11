@@ -175,7 +175,12 @@ class TestScopedRequiresScopeFn:
                 return 0
 
         fn = lambda sql, params, rows: {"allow": True, "rows": rows}
-        tools = build_sql_tools(FakeDB(), AccessLevel.SCOPED, scope_fn=fn)
+        tools = build_sql_tools(
+            FakeDB(),
+            AccessLevel.SCOPED,
+            scope_fn=fn,
+            allowed_tables=[],
+        )
         assert {t.name for t in tools} == {"execute_sql", "get_schema"}
 
     def test_full_read_with_no_scope_fn_constructs(self):
@@ -189,6 +194,22 @@ class TestScopedRequiresScopeFn:
 
         tools = build_sql_tools(FakeDB(), AccessLevel.FULL_READ, scope_fn=None)
         assert len(tools) == 2
+
+    def test_missing_allowed_tables_fails_closed_on_execution(self):
+        class FakeDB:
+            def execute(self, sql, params=None):
+                return [{"leak": True}]
+
+            def get_schema(self, exclude_internal=True):
+                return [{"table_name": "secret_table", "column_name": "leak"}]
+
+        tools = build_sql_tools(FakeDB(), AccessLevel.FULL_READ)
+        t = {t.name: t for t in tools}
+
+        assert json.loads(t["execute_sql"].handler("SELECT * FROM secret_table")) == {
+            "error": "query rejected (room missing table allowlist)"
+        }
+        assert json.loads(t["get_schema"].handler()) == []
 
 
 # ── _references_internal_tables ──
@@ -266,11 +287,19 @@ class TestAccessLevelNone:
 
 class TestAccessLevelFullRead:
     def _get_tools(self, pg_db):
-        tools = build_sql_tools(pg_db, AccessLevel.FULL_READ)
+        tools = build_sql_tools(
+            pg_db,
+            AccessLevel.FULL_READ,
+            allowed_tables=["test_tools_data"],
+        )
         return {t.name: t for t in tools}
 
     def test_returns_two_tools(self, pg_db):
-        tools = build_sql_tools(pg_db, AccessLevel.FULL_READ)
+        tools = build_sql_tools(
+            pg_db,
+            AccessLevel.FULL_READ,
+            allowed_tables=["test_tools_data"],
+        )
         assert len(tools) == 2
         names = {t.name for t in tools}
         assert names == {"execute_sql", "get_schema"}
@@ -296,7 +325,7 @@ class TestAccessLevelFullRead:
                 return []
 
         db = FakeDB()
-        tools = build_sql_tools(db, AccessLevel.FULL_READ)
+        tools = build_sql_tools(db, AccessLevel.FULL_READ, allowed_tables=[])
         t = {t.name: t for t in tools}
 
         result = json.loads(t["execute_sql"].handler("SELECT 1", ["unused"]))
@@ -317,7 +346,7 @@ class TestAccessLevelFullRead:
                 return []
 
         db = FakeDB()
-        tools = build_sql_tools(db, AccessLevel.FULL_READ)
+        tools = build_sql_tools(db, AccessLevel.FULL_READ, allowed_tables=[])
         t = {t.name: t for t in tools}
 
         result = json.loads(t["execute_sql"].handler("SELECT %s", ["kept"]))
@@ -370,27 +399,47 @@ class TestAccessLevelScoped:
         raise RuntimeError("Scope function crashed")
 
     def test_select_with_passthrough_scope(self, pg_db, test_table):
-        tools = build_sql_tools(pg_db, AccessLevel.SCOPED, scope_fn=self._allow_all_scope)
+        tools = build_sql_tools(
+            pg_db,
+            AccessLevel.SCOPED,
+            scope_fn=self._allow_all_scope,
+            allowed_tables=["test_tools_data"],
+        )
         t = {t.name: t for t in tools}
         result = json.loads(t["execute_sql"].handler("SELECT * FROM test_tools_data ORDER BY name"))
         assert len(result) == 2
 
     def test_scope_filters_rows(self, pg_db, test_table):
-        tools = build_sql_tools(pg_db, AccessLevel.SCOPED, scope_fn=self._filter_team_scope)
+        tools = build_sql_tools(
+            pg_db,
+            AccessLevel.SCOPED,
+            scope_fn=self._filter_team_scope,
+            allowed_tables=["test_tools_data"],
+        )
         t = {t.name: t for t in tools}
         result = json.loads(t["execute_sql"].handler("SELECT * FROM test_tools_data"))
         assert len(result) == 1
         assert result[0]["team"] == "alpha"
 
     def test_scope_denies(self, pg_db, test_table):
-        tools = build_sql_tools(pg_db, AccessLevel.SCOPED, scope_fn=self._deny_scope)
+        tools = build_sql_tools(
+            pg_db,
+            AccessLevel.SCOPED,
+            scope_fn=self._deny_scope,
+            allowed_tables=["test_tools_data"],
+        )
         t = {t.name: t for t in tools}
         result = json.loads(t["execute_sql"].handler("SELECT * FROM test_tools_data"))
         assert "error" in result
         assert "denied" in result["error"].lower()
 
     def test_scope_exception_fail_closed(self, pg_db, test_table):
-        tools = build_sql_tools(pg_db, AccessLevel.SCOPED, scope_fn=self._error_scope)
+        tools = build_sql_tools(
+            pg_db,
+            AccessLevel.SCOPED,
+            scope_fn=self._error_scope,
+            allowed_tables=["test_tools_data"],
+        )
         t = {t.name: t for t in tools}
         result = json.loads(t["execute_sql"].handler("SELECT * FROM test_tools_data"))
         # Fail-closed: scope_fn raising must surface an error to the caller
@@ -402,7 +451,12 @@ class TestAccessLevelScoped:
         assert "rows" not in result
 
     def test_insert_blocked(self, pg_db, test_table):
-        tools = build_sql_tools(pg_db, AccessLevel.SCOPED, scope_fn=self._allow_all_scope)
+        tools = build_sql_tools(
+            pg_db,
+            AccessLevel.SCOPED,
+            scope_fn=self._allow_all_scope,
+            allowed_tables=["test_tools_data"],
+        )
         t = {t.name: t for t in tools}
         result = json.loads(
             t["execute_sql"].handler("INSERT INTO test_tools_data (name, team) VALUES ('x', 'y')")
@@ -410,7 +464,12 @@ class TestAccessLevelScoped:
         assert "error" in result
 
     def test_internal_table_blocked(self, pg_db):
-        tools = build_sql_tools(pg_db, AccessLevel.SCOPED, scope_fn=self._allow_all_scope)
+        tools = build_sql_tools(
+            pg_db,
+            AccessLevel.SCOPED,
+            scope_fn=self._allow_all_scope,
+            allowed_tables=["test_tools_data"],
+        )
         t = {t.name: t for t in tools}
         result = json.loads(t["execute_sql"].handler("SELECT * FROM _hivemind_agents"))
         assert "error" in result
@@ -511,7 +570,11 @@ class TestToolDataclass:
         assert defn["function"]["description"] == "A test tool"
 
     def test_sql_error_returns_json_error(self, pg_db, test_table):
-        tools = build_sql_tools(pg_db, AccessLevel.FULL_READ)
+        tools = build_sql_tools(
+            pg_db,
+            AccessLevel.FULL_READ,
+            allowed_tables=["test_tools_data"],
+        )
         t = {t.name: t for t in tools}
         result = json.loads(t["execute_sql"].handler("SELECT * FROM nonexistent_table_xyz"))
         assert "error" in result

@@ -81,6 +81,20 @@ def validate_room_provider(req_provider: str | None, room: dict) -> None:
         )
 
 
+def signed_allowed_tables(room: dict) -> list[str]:
+    """Return the signed SQL allowlist or reject obsolete manifests."""
+    manifest = room.get("manifest") or {}
+    if "allowed_tables" not in manifest or manifest.get("allowed_tables") is None:
+        raise HTTPException(
+            410,
+            "room manifest is missing signed allowed_tables; recreate the room",
+        )
+    raw = manifest.get("allowed_tables")
+    if not isinstance(raw, list):
+        raise HTTPException(409, "room manifest has invalid allowed_tables")
+    return [str(t).strip() for t in raw if str(t).strip()]
+
+
 def room_query_inspection_mode(room: dict) -> str:
     manifest = room.get("manifest") or {}
     query = manifest.get("query") or {}

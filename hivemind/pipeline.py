@@ -701,7 +701,7 @@ class Pipeline:
                 env[_toggle] = _val
 
         # Scope agents get FULL_READ access, restricted to the room's
-        # allowed_tables (None = legacy unrestricted).
+        # signed allowed_tables.
         scope_tools = build_sql_tools(
             self.db, AccessLevel.FULL_READ, allowed_tables=allowed_tables,
         )

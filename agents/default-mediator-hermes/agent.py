@@ -51,7 +51,7 @@ from run_agent import AIAgent  # noqa: E402
 RAW_OUTPUT = os.environ.get("RAW_OUTPUT", "")
 QUERY_PROMPT = os.environ.get("QUERY_PROMPT", "")
 MEDIATION_POLICY = os.environ.get("MEDIATION_POLICY", "")
-HIVEMIND_MODEL = os.environ.get("HIVEMIND_MODEL", "moonshotai/kimi-2.6")
+HIVEMIND_MODEL = os.environ.get("HIVEMIND_MODEL", "moonshotai/kimi-k2.6")
 
 DEFAULT_SYSTEM_PROMPT = """\
 You are the final response mediator.

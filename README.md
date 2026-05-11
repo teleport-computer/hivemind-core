@@ -98,6 +98,7 @@ hmctl room create ./scope-agent \
   --name example-room \
   --query-agent ./query-agent \
   --mediator-agent ./mediator-agent \
+  --allowed-table watch_history \
   --scope-visibility inspectable \
   --query-visibility inspectable \
   --rules-file rules.md \
@@ -108,6 +109,8 @@ The rules file is plain text; Markdown is conventional because humans read
 and sign it. The same text is used as the scope/mediator policy unless
 `--policy-file` is passed. Use YAML only if your own agents are written to
 interpret YAML.
+`--allowed-table` signs the SQL data sources the room may access. Omit it only
+for rooms that should have no SQL table access and rely on room-vault data.
 
 Connect a local profile to a deployed service:
 
@@ -267,6 +270,7 @@ Canonical flow: create a signed room, add private data, and share the invite.
 ```bash
 hmctl room create ./scope-agent \
   --mediator-agent ./mediator-agent \
+  --allowed-table watch_history \
   --rules-file rules.md
 
 hmctl room add-data <room_id> --file dataset.md --meta source=dataset
@@ -283,12 +287,14 @@ Common room variants:
 hmctl room create ./scope-agent \
   --query-agent ./query-agent \
   --mediator-agent ./mediator-agent \
+  --allowed-table watch_history \
   --rules-file rules.md
 
 # Participant can upload their own query agent for this room.
 hmctl room create ./scope-agent \
   --mediator-agent ./mediator-agent \
   --query-visibility sealed \
+  --allowed-table watch_history \
   --rules-file rules.md
 ```
 

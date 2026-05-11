@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+import base64
 import io
 import os
 import secrets
 import tarfile
+import time
 
 import psycopg
 import pytest
@@ -12,10 +14,18 @@ from fastapi.testclient import TestClient
 
 from hivemind.config import Settings
 from hivemind.room_vault import RoomVaultSealed
-from hivemind.rooms import verify_room_envelope
+from cryptography.hazmat.primitives import serialization
+
+from hivemind.rooms import (
+    RoomCreateRequest,
+    build_room_manifest,
+    sign_manifest,
+    verify_room_envelope,
+)
 from hivemind.sandbox.agents import AgentSealedReadError
 from hivemind.sandbox.models import AgentConfig
 from hivemind.server import create_app
+from hivemind.tenant_signing import derive_signing_keypair
 from hivemind.tenants import TenantRegistry
 from hivemind.tools import AccessLevel, build_room_vault_tools
 
@@ -179,6 +189,7 @@ def test_room_create_mints_signed_manifest_and_room_token(room_env):
     assert manifest["query"]["agent_id"] == "query-a"
     assert manifest["mediator"]["agent_id"] == "mediator-a"
     assert manifest["output"]["visibility"] == "querier_only"
+    assert manifest["allowed_tables"] == []
     assert room["manifest_hash"] == room["envelope"]["manifest_hash"]
     assert room["envelope"]["signature_b64"]
 
@@ -191,6 +202,7 @@ def test_room_create_mints_signed_manifest_and_room_token(room_env):
     assert constraints["fixed_mediator_agent_id"] == "mediator-a"
     assert constraints["allowed_llm_providers"] == ["tinfoil"]
     assert constraints["allow_artifacts"] is False
+    assert constraints["allowed_tables"] == []
 
     status = client.get(
         f"/v1/rooms/{out['room_id']}/key",
@@ -199,6 +211,83 @@ def test_room_create_mints_signed_manifest_and_room_token(room_env):
     assert status.status_code == 200
     assert status.json()["wrap_count"] == 2
     assert status.json()["item_count"] == 0
+
+
+def test_room_create_persists_explicit_allowed_tables(room_env):
+    client, tenant, hive = room_env
+    hive.db.execute_commit("CREATE TABLE watch_history (id INTEGER)")
+    hive.db.execute_commit("CREATE TABLE creator_stats (id INTEGER)")
+    out = _create_fixed_room(
+        client,
+        tenant["api_key"],
+        allowed_tables=["watch_history", "watch_history", "creator_stats"],
+    )
+
+    assert out["room"]["manifest"]["allowed_tables"] == [
+        "watch_history",
+        "creator_stats",
+    ]
+    who = client.get("/v1/whoami", headers=_headers(out["token"]))
+    assert who.status_code == 200
+    assert who.json()["constraints"]["allowed_tables"] == [
+        "watch_history",
+        "creator_stats",
+    ]
+
+
+def test_room_create_rejects_null_allowed_tables(room_env):
+    client, tenant, _hive = room_env
+    payload = {
+        "name": "bad",
+        "scope_agent_id": "scope-a",
+        "allowed_tables": None,
+    }
+
+    resp = client.post("/v1/rooms", json=payload, headers=_headers(tenant["api_key"]))
+
+    assert resp.status_code == 422
+
+
+def test_legacy_room_without_signed_allowed_tables_cannot_run(room_env):
+    client, tenant, hive = room_env
+    priv, pub = derive_signing_keypair(tenant["api_key"], tenant["tenant_id"])
+    pub_b64 = base64.b64encode(
+        pub.public_bytes(
+            encoding=serialization.Encoding.Raw,
+            format=serialization.PublicFormat.Raw,
+        )
+    ).decode("ascii")
+    req = RoomCreateRequest(
+        name="legacy unrestricted",
+        rules="old room",
+        scope_agent_id="scope-a",
+        query_mode="fixed",
+        query_agent_id="query-a",
+        mediator_agent_id="mediator-a",
+        egress={"llm_providers": ["tinfoil"], "allow_artifacts": False},
+    )
+    manifest = build_room_manifest(
+        room_id=f"room_{secrets.token_hex(6)}",
+        tenant_id=tenant["tenant_id"],
+        created_at=time.time(),
+        req=req,
+        scope_visibility="inspectable",
+        query_visibility="inspectable",
+        mediator_visibility="inspectable",
+        signer_pubkey_b64=pub_b64,
+    )
+    manifest.pop("allowed_tables")
+    envelope = sign_manifest(manifest, priv)
+    room = hive.room_store.create(envelope)
+
+    resp = client.post(
+        f"/v1/rooms/{room['room_id']}/runs",
+        headers=_headers(tenant["api_key"]),
+        json={"query": "try to run old room"},
+    )
+
+    assert resp.status_code == 410
+    assert "missing signed allowed_tables" in resp.json()["detail"]
 
 
 def test_room_create_omitted_query_pins_service_default(room_env):

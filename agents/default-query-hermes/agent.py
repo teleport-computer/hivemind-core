@@ -39,7 +39,7 @@ import httpx  # noqa: E402
 QUERY_PROMPT = os.environ.get("QUERY_PROMPT", "")
 QUERY_CONTEXT = os.environ.get("QUERY_CONTEXT", "")
 SCOPE_FN_SOURCE = os.environ.get("SCOPE_FN_SOURCE", "")
-HIVEMIND_MODEL = os.environ.get("HIVEMIND_MODEL", "moonshotai/kimi-2.6")
+HIVEMIND_MODEL = os.environ.get("HIVEMIND_MODEL", "moonshotai/kimi-k2.6")
 
 DEFAULT_SYSTEM_PROMPT = """\
 You answer questions with scoped database tools.

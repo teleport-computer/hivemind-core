@@ -35,7 +35,7 @@ def _clear_default_agent_env():
         elif key == "HIVEMIND_LLM_BASE_URL":
             os.environ[key] = "https://openrouter.ai/api/v1"
         elif key == "HIVEMIND_LLM_MODEL":
-            os.environ[key] = "z-ai/glm-5"
+            os.environ[key] = "moonshotai/kimi-k2.6"
         elif key == "HIVEMIND_CORS_ALLOW_ORIGINS":
             os.environ[key] = ""
         elif key == "HIVEMIND_DATABASE_URL":

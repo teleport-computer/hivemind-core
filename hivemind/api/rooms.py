@@ -20,6 +20,7 @@ from .room_helpers import (
     room_link,
     room_wrap_id,
     share_room_link,
+    signed_allowed_tables,
 )
 from ..config import Settings
 from ..models import QueryRequest
@@ -124,7 +125,7 @@ def register_room_routes(
         # The tools layer enforces the allowlist at runtime; this check just
         # catches typos and stale table names early, before the manifest is
         # signed.
-        if req.allowed_tables is not None and req.allowed_tables:
+        if req.allowed_tables:
             requested = {t.lower() for t in req.allowed_tables}
             try:
                 rows = await asyncio.to_thread(
@@ -457,6 +458,7 @@ def register_room_routes(
     ):
         """Re-sign a room manifest with updated compose trust settings."""
         room = await load_room_for_caller(caller, room_id)
+        signed_allowed_tables(room)
         manifest = dict(room["manifest"])
         manifest["trust"] = compose_trust_from_update(
             manifest.get("trust") or {},
@@ -494,6 +496,7 @@ def register_room_routes(
             provider=req.provider,
         )
         qreq = apply_room_to_query_request(qreq, room)
+        signed_allowed_tables(room)
         return await submit_query_run_for_request(
             qreq,
             caller,

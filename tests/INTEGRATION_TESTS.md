@@ -42,8 +42,8 @@ The public integration surface is room-first.
 
 ## CLI
 
-- `hmctl room create ./scope-agent --rules-file rules.md` uploads a local
-  scope agent and prints an invite link.
+- `hmctl room create ./scope-agent --rules-file rules.md --allowed-table data`
+  uploads a local scope agent and prints an invite link.
 - `hmctl room inspect 'hmroom://...'` verifies the room envelope.
 - `hmctl room add-data <room> --file data.md` writes room data.
 - `hmctl room ask 'hmroom://...' "question"` verifies the run attestation.

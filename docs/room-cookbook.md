@@ -29,6 +29,12 @@ machine-readable room recipe with fields like `scope_agent_id`,
 the current minimal path is: keep rules in Markdown/text and pass room options
 as CLI flags.
 
+## SQL Data Sources
+
+Every room signs an explicit SQL table allowlist. Use `--allowed-table` once per
+tenant table the room may query. Omit it only for rooms that should have no SQL
+table access and rely exclusively on room-vault data.
+
 ## Fixed Query Agent
 
 Use this when the owner chooses the query agent and the participant only asks
@@ -40,6 +46,7 @@ pinned when one is configured.
 hmctl room create <scope-agent-id-or-path> \
   --query-agent <query-agent-id-or-path> \
   --mediator-agent <mediator-agent-id-or-path> \
+  --allowed-table <tenant-table> \
   --rules-file rules.md
 ```
 
@@ -59,6 +66,7 @@ hmctl --profile watch-history room create agents/default-scope-hermes \
   --mediator-agent agents/default-mediator-hermes \
   --scope-visibility inspectable \
   --query-visibility inspectable \
+  --allowed-table watch_history \
   --rules-file rules.md \
   --trust-mode owner_approved \
   --llm-provider openrouter
@@ -94,7 +102,7 @@ hmctl -y room ask 'hmroom://...' \
   --max-tokens 1000000 \
   --max-llm-calls 60 \
   --provider openrouter \
-  --model z-ai/glm-5 \
+  --model moonshotai/kimi-k2.6 \
   "Show me my top 30 hashtags by watch count as a markdown table with columns: rank, hashtag, watches. Just the table, no explanation."
 ```
 
@@ -111,7 +119,7 @@ The copied room link can be shared as a shell variable:
 ```bash
 ROOM='hmroom://hivemind.teleport.computer/room_...?service=https%3A%2F%2Fhivemind.teleport.computer&token=hmq_...&owner_pubkey=...'
 hmctl profile use liz
-hmctl -y room ask "$ROOM" --provider openrouter --model z-ai/glm-5 "..."
+hmctl -y room ask "$ROOM" --provider openrouter --model moonshotai/kimi-k2.6 "..."
 ```
 
 `room ask` defaults to `--timeout 900`, `--max-llm-calls 60`,
@@ -127,6 +135,7 @@ Use this when the participant should bring their own query logic.
 ```bash
 hmctl room create <scope-agent-id-or-path> \
   --mediator-agent <mediator-agent-id-or-path> \
+  --allowed-table <tenant-table> \
   --rules-file rules.md \
   --query-visibility sealed
 ```
@@ -204,6 +213,7 @@ Default room creation allows OpenRouter LLM egress. To be explicit:
 hmctl room create <scope-agent-id-or-path> \
   --query-agent <query-agent-id-or-path> \
   --mediator-agent <mediator-agent-id-or-path> \
+  --allowed-table <tenant-table> \
   --rules-file rules.md \
   --llm-provider openrouter
 ```
@@ -214,6 +224,7 @@ To allow both OpenRouter and Tinfoil:
 hmctl room create <scope-agent-id-or-path> \
   --query-agent <query-agent-id-or-path> \
   --mediator-agent <mediator-agent-id-or-path> \
+  --allowed-table <tenant-table> \
   --rules-file rules.md \
   --llm-provider tinfoil \
   --llm-provider openrouter
@@ -224,6 +235,7 @@ For non-LLM rooms only, disable bridge LLM egress:
 ```bash
 hmctl room create <scope-agent-id-or-path> \
   --query-agent <query-agent-id-or-path> \
+  --allowed-table <tenant-table> \
   --rules-file rules.md \
   --no-llm
 ```

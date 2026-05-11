@@ -134,6 +134,44 @@ def test_mint_records_can_upload_query_agent_flag(registry):
     assert caller.constraints["can_upload_query_agent"] is True
 
 
+def test_mint_records_allowed_tables_snapshot(registry):
+    t = registry.provision("allowed_tables_snapshot")
+    registry._test_created_dbs.append(t["db_name"])
+
+    out = registry.mint_capability(
+        t["tenant_id"],
+        "query",
+        "room",
+        {
+            "scope_agent_id": "sc1",
+            "allowed_tables": ["watch_history", "", " creator_stats "],
+        },
+    )
+    assert out["constraints"]["allowed_tables"] == [
+        "watch_history",
+        "creator_stats",
+    ]
+    caller = registry.resolve_any(out["token"])
+    assert caller is not None
+    assert caller.constraints["allowed_tables"] == [
+        "watch_history",
+        "creator_stats",
+    ]
+
+
+def test_mint_rejects_non_list_allowed_tables(registry):
+    t = registry.provision("allowed_tables_bad_type")
+    registry._test_created_dbs.append(t["db_name"])
+
+    with pytest.raises(ValueError, match="allowed_tables must be a list"):
+        registry.mint_capability(
+            t["tenant_id"],
+            "query",
+            "bad",
+            {"scope_agent_id": "sc", "allowed_tables": "watch_history"},
+        )
+
+
 def test_mint_rejects_non_bool_can_upload(registry):
     """Phase 4: only true booleans accepted; truthy strings should fail."""
     t = registry.provision("phase4_bad_type")
