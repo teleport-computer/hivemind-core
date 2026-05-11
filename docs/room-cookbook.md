@@ -119,11 +119,11 @@ hmctl profile use liz
 hmctl -y room ask "$ROOM" --provider openrouter --model z-ai/glm-5 "..."
 ```
 
-`room ask` defaults to `--timeout 600`, `--max-llm-calls 20`,
-`--max-tokens 100000`, and `--memory-mb 256`. For the watch-history dynamic
-room, keep the explicit larger values above. The hosted Phala deployment also
-clamps requests server-side; current caps are 900s runtime, 100 LLM calls, and
-1000000 tokens.
+`room ask` defaults to `--timeout 900`, `--max-llm-calls 60`,
+`--max-tokens 1000000`, and `--memory-mb 256`. Pass smaller explicit budgets
+for deterministic agents when you want a tighter cost/latency envelope. The
+hosted Phala deployment also clamps requests server-side; current caps are
+900s runtime, 100 LLM calls, and 1000000 tokens.
 
 ## Participant Uploads Query Agent
 

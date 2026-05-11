@@ -9,8 +9,9 @@ import sys
 from dataclasses import asdict
 from pathlib import Path
 
-from .graders import grade_text
+from .graders import count_markdown_tables, count_words, grade_text
 from .scenarios import SCENARIOS
+from .types import GradeFinding, Scenario
 
 
 def _int_value(value: object) -> int:
@@ -135,6 +136,49 @@ def _extract_run_metrics(run: dict) -> dict:
     }
 
 
+def _artifact_name(artifact: object) -> str:
+    if isinstance(artifact, dict):
+        for key in ("filename", "path", "url"):
+            value = artifact.get(key)
+            if value:
+                return str(value)
+    return str(artifact or "")
+
+
+def _artifact_extensions(artifacts: list[object]) -> set[str]:
+    extensions: set[str] = set()
+    for artifact in artifacts:
+        name = _artifact_name(artifact).split("?", 1)[0].rstrip("/")
+        suffix = Path(name).suffix.lower()
+        if suffix:
+            extensions.add(suffix)
+    return extensions
+
+
+def _artifact_findings(
+    artifacts: list[object],
+    scenario: Scenario,
+) -> list[GradeFinding]:
+    if not scenario.required_artifact_extensions:
+        return []
+    found = _artifact_extensions(artifacts)
+    findings: list[GradeFinding] = []
+    for ext in scenario.required_artifact_extensions:
+        expected = ext.lower() if ext.startswith(".") else f".{ext.lower()}"
+        if expected not in found:
+            findings.append(
+                GradeFinding(
+                    kind="required_artifact_missing",
+                    pattern=expected,
+                    message=(
+                        f"Run did not expose a required {expected} artifact."
+                    ),
+                    matched_text=",".join(sorted(found)),
+                )
+            )
+    return findings
+
+
 def _cmd_run_room(args: argparse.Namespace) -> int:
     scenario = SCENARIOS[args.scenario]
     out_dir = Path(args.output_dir)
@@ -227,16 +271,22 @@ def _cmd_run_room(args: argparse.Namespace) -> int:
                     exit_code = 1
             if telemetry_proc.returncode != 0:
                 exit_code = 1
-        grade = grade_text(output, scenario)
+        text_grade = grade_text(output, scenario)
+        artifact_findings = _artifact_findings(artifacts, scenario)
+        findings = [*text_grade.findings, *artifact_findings]
+        passed = not findings
         row = {
             "scenario": scenario.id,
             "model": model,
             "returncode": proc.returncode,
             "run_id": run_id,
-            "passed": grade.passed,
-            "findings": [asdict(finding) for finding in grade.findings],
+            "passed": passed,
+            "findings": [asdict(finding) for finding in findings],
             "output_chars": len(output),
+            "output_words": count_words(output),
+            "markdown_table_count": count_markdown_tables(output),
             "artifact_count": len(artifacts),
+            "artifact_filenames": [_artifact_name(a) for a in artifacts],
             "stdout_path": str(run_path),
             "stderr_path": str(stderr_path),
             "telemetry_path": str(telemetry_path) if telemetry_path else "",
@@ -247,7 +297,7 @@ def _cmd_run_room(args: argparse.Namespace) -> int:
         }
         rows.append(row)
         print(json.dumps(row, sort_keys=True))
-        if proc.returncode != 0 or not grade.passed:
+        if proc.returncode != 0 or not passed:
             exit_code = 1
 
     summary_path = out_dir / f"{scenario.id}__summary.json"

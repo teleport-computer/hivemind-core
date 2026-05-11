@@ -80,8 +80,8 @@ acceptance in one place. `room accept` records the verified manifest hash for
 this local profile; if you skip it, the first `room ask` prompts before sending
 your question. `-y` does not accept room manifests.
 `--dangerously-skip-attestations` bypasses both attestation checks and this
-first-use manifest acceptance gate. `room ask` defaults to `--timeout 600`,
-`--max-llm-calls 20`, and `--max-tokens 100000`.
+first-use manifest acceptance gate. `room ask` defaults to `--timeout 900`,
+`--max-llm-calls 60`, and `--max-tokens 1000000`.
 Hosted deployments can clamp requests lower than what you ask for; the current
 Phala deployment caps runtime at 900s, LLM calls at 100, and tokens at 1000000.
 
@@ -326,10 +326,10 @@ confirmation before sending the prompt. Every answer is checked against the
 accepted room manifest hash and the live CVM run signer. The default behavior
 is fail-closed when the run attestation is missing or does not match the room.
 
-Ask defaults are intentionally small: `--timeout 600`,
-`--max-llm-calls 20`, `--max-tokens 100000`, and `--memory-mb 256`.
-For dynamic scope/query/mediator rooms, use larger explicit budgets when the
-scope agent needs to inspect, simulate, and verify the query agent.
+Ask defaults are sized for dynamic room agents: `--timeout 900`,
+`--max-llm-calls 60`, `--max-tokens 1000000`, and `--memory-mb 256`.
+Hosted services may still clamp lower. For small deterministic agents, pass
+smaller explicit budgets when you want a tighter cost/latency envelope.
 
 If the service has billing enabled, invite-token room asks are charged to the
 active `hmk_` tenant profile. Use `hmctl profile use NAME` or pass

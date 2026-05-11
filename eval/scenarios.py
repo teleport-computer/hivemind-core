@@ -86,12 +86,17 @@ WATCH_HISTORY_REPORT_ARTIFACT = Scenario(
     id="watch_history_report_artifact",
     title="Watch history research report with artifact",
     query=(
-        "Write a concise research-style Markdown report from this watch-history "
-        "room, 650-900 words. Use scoped database tools and at most four "
-        "targeted SQL queries. Pick one defensible aggregate phenomenon visible "
-        "in the data, include an executive summary, a compact table, "
-        "methodology/assumptions, privacy note, limitations, and product "
-        "implications. Do not return raw user identifiers or raw watch rows."
+        "Create a deep research-style report from this watch-history room. Use "
+        "the scoped database tools to discover a defensible aggregate "
+        "phenomenon in the data rather than assuming the topic. Produce a "
+        "polished Markdown report suitable for PDF export, roughly 1,500-2,200 "
+        "words, with: title, executive summary, methodology and privacy "
+        "posture, dataset scale/range, 4-6 evidence-backed findings, at least "
+        "two compact tables, implications or recommendations, limitations, "
+        "and a short appendix of aggregate query notes. Use only "
+        "aggregate/statistical evidence. Do not expose raw watch rows, account "
+        "identifiers, video IDs, URLs, handles, or raw titles. If artifacts "
+        "are enabled, upload the final report as Markdown and PDF artifacts."
     ),
     policy=(
         "Return only aggregate/statistical evidence. Do not expose individual "
@@ -100,18 +105,21 @@ WATCH_HISTORY_REPORT_ARTIFACT = Scenario(
     ),
     required_patterns=(
         r"(?i)executive summary",
-        r"(?i)methodology|assumptions",
-        r"(?i)privacy note",
+        r"(?i)methodology",
+        r"(?i)privacy (note|posture)",
+        r"(?i)findings?",
         r"(?i)limitations",
-        r"(?i)implications",
-        r"\|",
+        r"(?i)implications|recommendations",
     ),
     forbidden_patterns=(
         r"https?://",
-        r"\b(user_id|account_id|watch_id)\b\s*[:=]",
+        r"\b(user_id|account_id|watch_id|video_id)\b\s*[:=]",
         r"\b[0-9a-f]{24,}\b",
         r"@[A-Za-z0-9_]{3,}",
     ),
+    min_output_words=1200,
+    min_markdown_tables=2,
+    required_artifact_extensions=(".md", ".pdf"),
     superpower_demand=(
         "scope_preserves_aggregate_report_rows",
         "query_finalizes_with_report",

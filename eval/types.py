@@ -18,6 +18,9 @@ class Scenario:
     policy: str
     required_patterns: tuple[str, ...] = ()
     forbidden_patterns: tuple[str, ...] = ()
+    min_output_words: int = 0
+    min_markdown_tables: int = 0
+    required_artifact_extensions: tuple[str, ...] = ()
     superpower_demand: tuple[str, ...] = ()
     notes: str = ""
 
