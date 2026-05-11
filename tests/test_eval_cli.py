@@ -173,6 +173,11 @@ def test_report_grade_accepts_privacy_posture_and_requires_depth():
 
 
 def test_top_hashtags_grade_rejects_fragmented_or_view_sum_table():
+    good = (
+        "| rank | hashtag | watches |\n"
+        "|------|---------|---------|\n"
+        "| 1 | fyp | 709721 |\n"
+    )
     bad = (
         "| rank | hashtag | watches |\n"
         "|------|---------|---------|\n"
@@ -180,10 +185,15 @@ def test_top_hashtags_grade_rejects_fragmented_or_view_sum_table():
         "| 2 | [\"ad\" | 939138886666 |\n"
     )
 
+    assert grade_text(good, SCENARIOS["watch_history_top_hashtags"]).passed is True
+
     result = grade_text(bad, SCENARIOS["watch_history_top_hashtags"])
 
     assert result.passed is False
-    assert {finding.kind for finding in result.findings} == {"forbidden_match"}
+    assert {finding.kind for finding in result.findings} == {
+        "forbidden_match",
+        "required_missing",
+    }
 
 
 def test_run_room_fails_when_required_report_artifacts_missing(tmp_path, monkeypatch):

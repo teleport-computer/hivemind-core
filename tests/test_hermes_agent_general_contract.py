@@ -838,6 +838,7 @@ def test_query_prompt_is_tool_aware_without_canned_policy():
     assert "Use get_schema before SQL" in source
     assert "COUNT(*) over matching rows" in source
     assert "not bracketed/quoted JSON or text fragments" in source
+    assert "do not merge prefix" in source
 
 
 def test_hermes_prompts_do_not_embed_canned_privacy_policies():

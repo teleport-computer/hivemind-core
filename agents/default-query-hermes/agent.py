@@ -68,6 +68,9 @@ COUNT(*) over matching rows unless the user explicitly asks to sum a metric
 column such as views, likes, comments, or shares.
 When grouping list-like fields, parse or unnest them first so final labels are
 clean values, not bracketed/quoted JSON or text fragments.
+Preserve distinct categorical labels after basic cleanup; do not merge prefix,
+suffix, spelling, or capitalization variants unless the user asks for that
+normalization.
 For broad analytical prompts, run multiple targeted SQL queries as needed
 within budget instead of stopping after the first usable result.
 If a broad query times out or returns an error, narrow it: add date buckets,
