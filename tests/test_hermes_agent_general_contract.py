@@ -449,7 +449,7 @@ def test_query_agent_retries_meta_summary_instead_of_report(monkeypatch, capsys)
     captured = capsys.readouterr()
     assert captured.out.startswith("# Research Report")
     assert len(calls["llm_payloads"]) == 2
-    assert "final answer must be the report itself" in calls["llm_payloads"][1]["messages"][1]["content"]
+    assert "requested format and depth" in calls["llm_payloads"][1]["messages"][1]["content"]
 
 
 def test_query_agent_does_not_emit_hermes_runtime_diagnostics(monkeypatch, capsys):
@@ -574,6 +574,85 @@ def test_query_agent_retries_fragmented_ranking_table(
     retry_body = calls["llm_payloads"][1]["messages"][1]["content"]
     assert "ranking-table quality failure" in retry_body
     assert "combine duplicate labels" in retry_body
+
+
+def test_query_agent_retries_timed_out_progress_log_for_requested_table(
+    monkeypatch,
+    capsys,
+):
+    monkeypatch.setenv(
+        "QUERY_PROMPT",
+        "Show the top labels by event count as a markdown table with columns: "
+        "rank, label, count. Just the table, no explanation.",
+    )
+    progress_log = (
+        "The SQL queries timed out. Let me try a narrower approach with a smaller "
+        "sample first to test the structure, then work within the data constraints."
+    )
+    fixed = (
+        "| rank | label | count |\n"
+        "|---|---|---|\n"
+        "| 1 | alpha | 712345 |\n"
+        "| 2 | beta | 12345 |\n"
+    )
+    mod, calls = _load_query_agent(
+        monkeypatch,
+        "default_query_hermes_retry_progress_log_contract_test",
+        chat_responses=[_chat_response(progress_log), _chat_response(fixed)],
+    )
+
+    mod.main()
+
+    captured = capsys.readouterr()
+    assert captured.out.strip() == fixed.strip()
+    assert len(calls["llm_payloads"]) == 2
+    retry_body = calls["llm_payloads"][1]["messages"][1]["content"]
+    assert "unresolved query harness response" in retry_body
+    assert "The SQL queries timed out" in retry_body
+
+
+def test_query_agent_allows_more_sql_by_default_without_prompt_classification(
+    monkeypatch,
+    capsys,
+):
+    monkeypatch.setenv("QUERY_PROMPT", "Please answer this from the private data.")
+    tool_responses = [
+        _chat_response(
+            "",
+            tool_calls=[
+                _tool_call(
+                    "execute_sql",
+                    {
+                        "sql": (
+                            "SELECT category, COUNT(*) FROM events GROUP BY 1 "
+                            f"-- {idx}"
+                        )
+                    },
+                    call_id=f"call_{idx}",
+                )
+            ],
+        )
+        for idx in range(6)
+    ]
+    final = (
+        "| rank | label | value |\n"
+        "|---|---|---|\n"
+        "| 1 | alpha | 42 |\n"
+    )
+    mod, calls = _load_query_agent(
+        monkeypatch,
+        "default_query_hermes_general_budget_contract_test",
+        chat_responses=[*tool_responses, _chat_response(final)],
+        tool_results={"execute_sql": '[{"category": "alpha", "count": 42}]'},
+    )
+
+    mod.main()
+
+    captured = capsys.readouterr()
+    assert captured.out.strip() == final.strip()
+    assert len(calls["tool_payloads"]) == 6
+    assert len(calls["llm_payloads"]) == 7
+    assert "Run enough targeted SQL" in calls["llm_payloads"][0]["messages"][0]["content"]
 
 
 def test_query_agent_retries_retriable_runtime_failure(

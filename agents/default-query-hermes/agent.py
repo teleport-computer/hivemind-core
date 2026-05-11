@@ -63,9 +63,9 @@ Do not use SQLite/MySQL-only functions such as strftime.
 
 Compute requested statistics in SQL. If execute_sql returns an error, revise
 the SQL and retry instead of asking the user to provide schema or formatting.
-Interpret requests for counts of records, events, watches, or occurrences as
+Interpret requests for counts of records, events, items, or occurrences as
 COUNT(*) over matching rows unless the user explicitly asks to sum a metric
-column such as views, likes, comments, or shares.
+column.
 When grouping list-like fields, parse or unnest them first so final labels are
 clean values, not bracketed/quoted JSON or text fragments.
 For top-N or categorical rankings, the displayed cleaned label must also be
@@ -195,6 +195,10 @@ _UNRESOLVED_RESPONSE_MARKERS = (
     "would you like me to",
     "should i try",
     "i can try",
+    "i will try",
+    "i'll try",
+    "let me try",
+    "let me attempt",
     "cannot fulfill this request",
     "can't fulfill this request",
     "cannot fulfill this request directly",
@@ -218,6 +222,12 @@ _UNRESOLVED_RESPONSE_MARKERS = (
     "perhaps you meant",
     "did you mean",
     "error executing query",
+    "sql queries timed out",
+    "the sql queries timed out",
+    "work within the data constraints",
+    "given the data size",
+    "test the structure",
+    "i need columns named exactly",
     "undefinedcolumn",
     "summary of work completed",
     "here's a summary of what i found",
@@ -229,16 +239,15 @@ _UNRESOLVED_RESPONSE_MARKERS = (
 _RANK_HEADER_NAMES = {"rank", "#", "position"}
 _METRIC_HEADER_MARKERS = (
     "count",
-    "watch",
-    "watches",
     "total",
-    "views",
-    "likes",
-    "comments",
-    "shares",
     "occurrences",
     "records",
     "rows",
+    "value",
+    "metric",
+    "amount",
+    "number",
+    "score",
 )
 
 
@@ -267,12 +276,11 @@ def _max_tool_turns() -> int:
             return max(0, int(raw))
         except ValueError:
             pass
-    # Reserve calls for final drafting and one recovery pass. Research prompts
-    # need enough evidence gathering, but the harness must not let tool use
-    # consume every LLM iteration before a final answer is written.
+    # Reserve calls for final drafting and one recovery pass. The model may stop
+    # earlier; this is an upper bound, not a forced query count.
     reserve = 2
     budget_limited = max(0, _budget_max_calls() - reserve)
-    default = 10 if _is_research_prompt() else 4
+    default = 10
     return max(0, min(default, budget_limited))
 
 
@@ -282,23 +290,7 @@ def _max_sql_calls() -> int:
             return max(1, int(raw))
         except ValueError:
             pass
-    return 12 if _is_research_prompt() else 4
-
-
-def _is_research_prompt() -> bool:
-    text = f"{QUERY_PROMPT}\n{QUERY_CONTEXT}".lower()
-    markers = (
-        "research",
-        "report",
-        "study",
-        "analysis",
-        "lifecycle",
-        "deep dive",
-        "memo",
-        "whitepaper",
-        "findings",
-    )
-    return any(marker in text for marker in markers)
+    return 12
 
 
 def _looks_like_runtime_failure(text: str) -> bool:
@@ -364,39 +356,59 @@ def _looks_like_fragmented_ranking_table(text: str) -> bool:
             (i for i, h in enumerate(headers) if h in _RANK_HEADER_NAMES),
             None,
         )
-        metric_idx = next(
-            (
-                i
-                for i, h in enumerate(headers)
-                if any(marker in h for marker in _METRIC_HEADER_MARKERS)
-            ),
-            None,
-        )
-        if rank_idx is None or metric_idx is None:
+        if rank_idx is None:
             idx += 2
             continue
 
-        label_idx = next(
-            (
-                i
-                for i, h in enumerate(headers)
-                if i not in {rank_idx, metric_idx} and h
-            ),
-            None,
-        )
-        if label_idx is None:
-            idx += 2
-            continue
-
-        seen_labels: set[str] = set()
-        previous_metric: float | None = None
-        row_count = 0
+        rows: list[list[str]] = []
         cursor = idx + 2
         while cursor < len(lines):
             cells = _markdown_cells(lines[cursor])
             if not cells or len(cells) < len(headers):
                 break
-            row_count += 1
+            rows.append(cells)
+            cursor += 1
+        if len(rows) <= 1:
+            idx = max(cursor, idx + 2)
+            continue
+
+        metric_idx = next(
+            (
+                i
+                for i, h in enumerate(headers)
+                if i != rank_idx and any(marker in h for marker in _METRIC_HEADER_MARKERS)
+            ),
+            None,
+        )
+        if metric_idx is None:
+            numeric_counts: list[tuple[int, int]] = []
+            for col_idx in range(len(headers)):
+                if col_idx == rank_idx:
+                    continue
+                count = sum(
+                    1
+                    for cells in rows
+                    if col_idx < len(cells) and _parse_number(cells[col_idx]) is not None
+                )
+                numeric_counts.append((count, col_idx))
+            numeric_counts.sort(reverse=True)
+            if numeric_counts and numeric_counts[0][0] == len(rows):
+                metric_idx = numeric_counts[0][1]
+        if metric_idx is None:
+            idx = max(cursor, idx + 2)
+            continue
+
+        label_idx = next(
+            (i for i, h in enumerate(headers) if i not in {rank_idx, metric_idx} and h),
+            None,
+        )
+        if label_idx is None:
+            idx = max(cursor, idx + 2)
+            continue
+
+        seen_labels: set[str] = set()
+        previous_metric: float | None = None
+        for cells in rows:
             label = _normal_label(cells[label_idx])
             metric = _parse_number(cells[metric_idx])
             if label and label in seen_labels:
@@ -407,11 +419,8 @@ def _looks_like_fragmented_ranking_table(text: str) -> bool:
                 if previous_metric is not None and metric > previous_metric:
                     return True
                 previous_metric = metric
-            cursor += 1
 
-        if row_count > 1:
-            return False
-        idx = max(cursor, idx + 2)
+        return False
     return False
 
 
@@ -509,18 +518,15 @@ def _assistant_message_for_history(message: dict[str, Any]) -> dict[str, Any]:
 
 
 def _finalization_instruction(reason: str) -> str:
-    if _is_research_prompt():
-        return (
-            f"FINALIZATION INSTRUCTION ({reason}): stop using tools. Produce "
-            "the full polished Markdown report now from the scoped evidence "
-            "already gathered. Do not ask for more data, do not provide a "
-            "progress log, and do not say the report is available elsewhere. "
-            "If evidence is imperfect, write the strongest defensible report "
-            "and state limitations precisely."
-        )
     return (
-        f"FINALIZATION INSTRUCTION ({reason}): stop using tools and answer "
-        "the user's question directly from the scoped evidence already gathered."
+        f"FINALIZATION INSTRUCTION ({reason}): stop using tools. Answer the "
+        "user's request directly from the scoped evidence already gathered, in "
+        "the format and depth requested. If the user requested a substantial "
+        "report, study, memo, artifact, or PDF, produce the full polished "
+        "Markdown report text now. If the evidence is imperfect, give the "
+        "strongest defensible answer and state limitations precisely. Do not "
+        "provide a progress log, describe future tool attempts, expose tool "
+        "traces, or say the answer is available elsewhere."
     )
 
 
@@ -559,8 +565,6 @@ def _maybe_upload_report_artifact(markdown: str) -> None:
         "off",
     }:
         return
-    if not (_is_research_prompt() or "pdf" in QUERY_PROMPT.lower() or "file" in QUERY_PROMPT.lower()):
-        return
     if not _looks_like_report(markdown):
         return
     try:
@@ -598,10 +602,13 @@ def _run_query_agent(body: str) -> str:
         f"{SYSTEM_PROMPT}\n\n"
         "Harness behavior: you may use get_schema and execute_sql for evidence. "
         "The harness reserves a final no-tool drafting call, so do not spend "
-        "turns indefinitely gathering more SQL. For research/report prompts, "
-        f"aim for 5-8 targeted SQL calls and at most {max_sql_calls}; then "
-        "draft the report. The harness will upload Markdown/PDF artifacts "
-        "from a substantial final report when the room permits artifacts."
+        "turns indefinitely gathering more SQL. Run enough targeted SQL to "
+        f"answer accurately, up to {max_sql_calls} SQL calls, then answer "
+        "directly from the scoped evidence already gathered. If one query is too "
+        "broad or times out, revise it into a simpler scoped query; never return "
+        "a progress log instead of the requested answer. The harness uploads "
+        "Markdown/PDF artifacts from substantial final reports when the room "
+        "permits artifacts."
     )
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": system_prompt},
@@ -609,11 +616,11 @@ def _run_query_agent(body: str) -> str:
     ]
     tool_turns = _max_tool_turns()
     per_turn_tokens = _completion_token_cap(
-        default=4096 if _is_research_prompt() else 2048,
+        default=4096,
         hard_cap=8192,
     )
     final_tokens = _completion_token_cap(
-        default=12288 if _is_research_prompt() else 8192,
+        default=12288,
         hard_cap=16384,
     )
     sql_calls = 0
@@ -696,15 +703,16 @@ def _retry_body(body: str, reason: str, previous_response: str) -> str:
         f"The previous attempt did not produce a usable final answer: {reason}.\n"
         "Continue the task using the available tools. Inspect schema if needed, "
         "write PostgreSQL SELECT statements, and if execute_sql returns an "
-        "error, correct the SQL and retry. For report or research prompts, "
-        "try narrower top-N, date-bucketed, sampled, or simpler grouped "
-        "queries before concluding the data cannot support a report. Your "
-        "final answer must be the report itself, not a work summary, progress "
-        "log, or reference to a previous response. Do not ask the user for "
-        "schema, columns, or date formats that can be discovered with tools. "
-        "For ranking-table quality failures, rerun the aggregate SQL and "
-        "group by the exact cleaned label you will display, combine duplicate "
-        "labels before ranking, and sort by the metric descending.\n\n"
+        "error, correct the SQL and retry. If a query is too broad or times "
+        "out, try a narrower, bucketed, or simpler scoped query before "
+        "concluding the data cannot support the request. Your final answer "
+        "must directly satisfy the user's requested format and depth, not be a "
+        "work summary, progress log, or reference to a previous response. Do "
+        "not ask the user for schema, columns, or date formats that can be "
+        "discovered with tools. For table quality failures, rerun the aggregate "
+        "SQL, group by the exact cleaned label you will display, combine "
+        "duplicate labels before answering, and sort by the requested metric "
+        "when an order is requested.\n\n"
         f"PREVIOUS RESPONSE:\n{previous}"
     )
 
@@ -732,6 +740,13 @@ def _retry_query_agent(
     if _looks_like_unresolved_response(retry_response):
         print(
             f"query harness retry unresolved after {reason}: {retry_response[:500]}",
+            file=sys.stderr,
+        )
+        return None
+    if _looks_like_fragmented_ranking_table(retry_response):
+        print(
+            f"query harness retry ranking-table quality failure after {reason}: "
+            f"{retry_response[:500]}",
             file=sys.stderr,
         )
         return None

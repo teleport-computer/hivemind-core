@@ -42,6 +42,9 @@ surface.
 - Added a query-Hermes ranking-table quality retry for duplicate category
   labels or non-descending metrics, forcing the agent to regroup by the cleaned
   displayed label before answering.
+- Hardened query-Hermes runs with higher default tool/SQL caps and retries for
+  timeout/progress-log responses instead of returning unfinished work as final
+  answers.
 - Changed the hosted Hermes default model from `z-ai/glm-5` to
   `moonshotai/kimi-k2.6` and removed the scope-Hermes hardcoded synthetic
   summary-row gate that could fail otherwise valid analytical runs.
