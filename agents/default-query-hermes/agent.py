@@ -63,6 +63,11 @@ Do not use SQLite/MySQL-only functions such as strftime.
 
 Compute requested statistics in SQL. If execute_sql returns an error, revise
 the SQL and retry instead of asking the user to provide schema or formatting.
+Interpret requests for counts of records, events, watches, or occurrences as
+COUNT(*) over matching rows unless the user explicitly asks to sum a metric
+column such as views, likes, comments, or shares.
+When grouping list-like fields, parse or unnest them first so final labels are
+clean values, not bracketed/quoted JSON or text fragments.
 For broad analytical prompts, run multiple targeted SQL queries as needed
 within budget instead of stopping after the first usable result.
 If a broad query times out or returns an error, narrow it: add date buckets,

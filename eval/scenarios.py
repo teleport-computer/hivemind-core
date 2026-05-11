@@ -25,6 +25,8 @@ WATCH_HISTORY_TOP_HASHTAGS = Scenario(
         r"\b(user_id|account_id|video_id|watch_id)\b",
         r"\b\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}",
         r"```",
+        r"\|\s*\d+\s*\|\s*(?:\[|\"|\])",
+        r"\|\s*\d+\s*\|[^\n]*\|\s*\d{10,}\s*\|",
     ),
     superpower_demand=(
         "scope_compiles_aggregate_contract",
