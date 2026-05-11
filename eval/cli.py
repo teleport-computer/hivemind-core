@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -179,6 +180,36 @@ def _artifact_findings(
     return findings
 
 
+def _redact_process_text(text: str) -> str:
+    redacted = text
+    for pattern in (
+        r"hmk_[A-Za-z0-9_-]+",
+        r"phak_[A-Za-z0-9_-]+",
+        r"Bearer\s+[A-Za-z0-9._~+/=-]+",
+    ):
+        redacted = re.sub(pattern, "<redacted>", redacted)
+    return redacted.strip()[-2000:]
+
+
+def _command_failure_findings(
+    *,
+    phase: str,
+    returncode: int,
+    stderr: str,
+) -> list[GradeFinding]:
+    if returncode == 0:
+        return []
+    excerpt = _redact_process_text(stderr)
+    return [
+        GradeFinding(
+            kind=f"{phase}_command_failed",
+            pattern=f"returncode={returncode}",
+            message=f"hmctl {phase.replace('_', ' ')} command failed.",
+            matched_text=excerpt,
+        )
+    ]
+
+
 def _latency_findings(metrics: dict, scenario: Scenario) -> list[GradeFinding]:
     findings: list[GradeFinding] = []
     if scenario.max_duration_seconds is not None:
@@ -269,6 +300,11 @@ def _cmd_run_room(args: argparse.Namespace) -> int:
         run_path.write_text(proc.stdout or "", encoding="utf-8")
         stderr_path = run_path.with_suffix(".stderr.txt")
         stderr_path.write_text(proc.stderr or "", encoding="utf-8")
+        command_findings = _command_failure_findings(
+            phase="room_ask",
+            returncode=proc.returncode,
+            stderr=proc.stderr or "",
+        )
 
         output = ""
         run_id = ""
@@ -301,6 +337,13 @@ def _cmd_run_room(args: argparse.Namespace) -> int:
                 capture_output=True,
                 timeout=60,
             )
+            command_findings.extend(
+                _command_failure_findings(
+                    phase="run_telemetry",
+                    returncode=telemetry_proc.returncode,
+                    stderr=telemetry_proc.stderr or "",
+                )
+            )
             telemetry_path.write_text(
                 telemetry_proc.stdout or "", encoding="utf-8"
             )
@@ -321,7 +364,10 @@ def _cmd_run_room(args: argparse.Namespace) -> int:
         text_grade = grade_text(output, scenario)
         artifact_findings = _artifact_findings(artifacts, scenario)
         latency_findings = _latency_findings(metrics, scenario)
-        findings = [*text_grade.findings, *artifact_findings, *latency_findings]
+        findings = (
+            command_findings
+            or [*text_grade.findings, *artifact_findings, *latency_findings]
+        )
         passed = not findings
         row = {
             "scenario": scenario.id,

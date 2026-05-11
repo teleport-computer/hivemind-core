@@ -88,7 +88,12 @@ watch-history room id to enable it. Optional repository variables:
 
 - `HERMES_PROD_EVAL_MODELS` — comma-separated model ids, default `z-ai/glm-5`.
 - `HERMES_PROD_EVAL_PROVIDER` — default `openrouter`.
-- `HERMES_PROD_EVAL_HMCTL_PROFILE` — default `bootstrap`.
+- `HERMES_PROD_EVAL_HMCTL_PROFILE` — default `prod-eval`.
+- `HERMES_PROD_EVAL_SERVICE` — default `https://hivemind.teleport.computer`.
+
+The relay job needs tenant access to the eval room. Store that key as GitHub
+secret `HERMES_PROD_EVAL_API_KEY`; the workflow writes a temporary hmctl
+profile on the relay before running the scenarios.
 
 The gate runs `watch_history_top_hashtags` and
 `watch_history_report_artifact` with `--max-tokens 1000000`,

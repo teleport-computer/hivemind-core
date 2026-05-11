@@ -482,7 +482,8 @@ jobs:
       ROOM: ${{ vars.HERMES_PROD_EVAL_ROOM }}
       MODELS: ${{ vars.HERMES_PROD_EVAL_MODELS || 'z-ai/glm-5' }}
       PROVIDER: ${{ vars.HERMES_PROD_EVAL_PROVIDER || 'openrouter' }}
-      HMCTL_PROFILE: ${{ vars.HERMES_PROD_EVAL_HMCTL_PROFILE || 'bootstrap' }}
+      HMCTL_PROFILE: ${{ vars.HERMES_PROD_EVAL_HMCTL_PROFILE || 'prod-eval' }}
+      HMCTL_SERVICE: ${{ vars.HERMES_PROD_EVAL_SERVICE || 'https://hivemind.teleport.computer' }}
 
     steps:
       - name: Configure SSH
@@ -500,6 +501,7 @@ jobs:
         env:
           EC2_HOST: ${{ secrets.EC2_HOST }}
           EC2_USER: ${{ secrets.EC2_USER }}
+          HMCTL_API_KEY: ${{ secrets.HERMES_PROD_EVAL_API_KEY }}
         run: |
           set -euo pipefail
           q() {
@@ -509,7 +511,7 @@ jobs:
             -o ServerAliveInterval=30 -o ServerAliveCountMax=20 \
             -o TCPKeepAlive=yes \
             "${EC2_USER}@${EC2_HOST}" \
-            "ROOM=$(q "$ROOM") MODELS=$(q "$MODELS") PROVIDER=$(q "$PROVIDER") HMCTL_PROFILE=$(q "$HMCTL_PROFILE") bash -s" <<'REMOTE'
+            "ROOM=$(q "$ROOM") MODELS=$(q "$MODELS") PROVIDER=$(q "$PROVIDER") HMCTL_PROFILE=$(q "$HMCTL_PROFILE") HMCTL_SERVICE=$(q "$HMCTL_SERVICE") HMCTL_API_KEY=$(q "$HMCTL_API_KEY") bash -s" <<'REMOTE'
           set -euo pipefail
           cd ~/hivemind-core
 
@@ -525,6 +527,22 @@ jobs:
             export PATH="$HOME/.local/bin:$PATH"
           fi
 
+          if [ -n "${HMCTL_API_KEY:-}" ] && [ -n "${HMCTL_PROFILE:-}" ]; then
+            mkdir -p "$HOME/.hivemind/profiles"
+            chmod 700 "$HOME/.hivemind" "$HOME/.hivemind/profiles"
+            python3 - "$HOME/.hivemind/profiles/${HMCTL_PROFILE}.yaml" "$HMCTL_SERVICE" "$HMCTL_API_KEY" <<'PY'
+          import json
+          import sys
+
+          path, service, api_key = sys.argv[1], sys.argv[2], sys.argv[3]
+          with open(path, "w", encoding="utf-8") as fh:
+              fh.write(f"api_key: {json.dumps(api_key)}\n")
+              fh.write("role: tenant\n")
+              fh.write(f"service: {json.dumps(service)}\n")
+          PY
+            chmod 600 "$HOME/.hivemind/profiles/${HMCTL_PROFILE}.yaml"
+          fi
+
           IFS=',' read -ra models <<< "$MODELS"
           model_args=()
           for model in "${models[@]}"; do
@@ -535,6 +553,10 @@ jobs:
             echo "::error::HERMES_PROD_EVAL_MODELS resolved to no model ids"
             exit 1
           fi
+          profile_args=()
+          if [ -n "${HMCTL_PROFILE:-}" ]; then
+            profile_args=(--hmctl-profile "$HMCTL_PROFILE")
+          fi
 
           for scenario in watch_history_top_hashtags watch_history_report_artifact; do
             out_dir="eval/results/prod/$(date -u +%Y%m%dT%H%M%SZ)-post-deploy-${scenario}"
@@ -542,7 +564,7 @@ jobs:
             echo "Running ${scenario} against ${ROOM}"
             uv run --python 3.12 python -m eval run-room "$scenario" "$ROOM" \
               --provider "$PROVIDER" \
-              --hmctl-profile "$HMCTL_PROFILE" \
+              "${profile_args[@]}" \
               --max-tokens 1000000 \
               --max-llm-calls 60 \
               --timeout 900 \

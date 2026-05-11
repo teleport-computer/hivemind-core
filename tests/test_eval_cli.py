@@ -312,3 +312,46 @@ def test_run_room_fails_when_latency_budget_is_exceeded(tmp_path, monkeypatch):
         "stage_seconds.scope<=90",
         "stage_seconds.query<=120",
     }
+
+
+def test_run_room_surfaces_hmctl_stderr_when_ask_fails(tmp_path, monkeypatch):
+    def fake_run(cmd, *, text, capture_output, timeout):
+        return subprocess.CompletedProcess(
+            cmd,
+            1,
+            stdout="",
+            stderr="Error: profile 'bootstrap' not found at /tmp/profiles/bootstrap.yaml",
+        )
+
+    monkeypatch.setenv("HMCTL_BIN", "hmctl")
+    monkeypatch.setattr(eval_cli.subprocess, "run", fake_run)
+
+    parser = eval_cli.build_parser()
+    args = parser.parse_args(
+        [
+            "run-room",
+            "watch_history_top_hashtags",
+            "room-abc",
+            "--model",
+            "openai/gpt-5",
+            "--output-dir",
+            str(tmp_path),
+        ]
+    )
+
+    assert eval_cli._cmd_run_room(args) == 1
+    summary = json.loads(
+        (tmp_path / "watch_history_top_hashtags__summary.json").read_text()
+    )
+    findings = summary[0]["findings"]
+    assert findings == [
+        {
+            "kind": "room_ask_command_failed",
+            "matched_text": (
+                "Error: profile 'bootstrap' not found at "
+                "/tmp/profiles/bootstrap.yaml"
+            ),
+            "message": "hmctl room ask command failed.",
+            "pattern": "returncode=1",
+        }
+    ]
