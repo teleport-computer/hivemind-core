@@ -227,7 +227,9 @@ def register_room_routes(
     ):
         if caller.role == "query":
             room = await load_room_for_caller(
-                caller, caller.constraints.get("room_id")
+                caller,
+                caller.constraints.get("room_id"),
+                require_signed_tables=False,
             )
             return {"rooms": [room]}
         rooms = await asyncio.to_thread(caller.hive.room_store.list, limit)
@@ -242,7 +244,10 @@ def register_room_routes(
         # flag set so UIs can render "this room was revoked" instead of
         # showing a 403 dead end.
         room = await load_room_for_caller(
-            caller, room_id, allow_revoked=True,
+            caller,
+            room_id,
+            allow_revoked=True,
+            require_signed_tables=False,
         )
         return room
 
@@ -380,7 +385,11 @@ def register_room_routes(
         caller: Caller = Depends(requires_role("owner")),
     ):
         """Read the room's stable share link (or absence). Owner-only."""
-        room = await load_room_for_caller(caller, room_id)
+        room = await load_room_for_caller(
+            caller,
+            room_id,
+            require_signed_tables=False,
+        )
         registry = request.app.state.registry
         share = await asyncio.to_thread(
             registry.get_room_share_link, caller.tenant_id, room["room_id"],
@@ -440,7 +449,11 @@ def register_room_routes(
         caller: Caller = Depends(requires_role("owner")),
     ):
         """Hard-delete the share link. Existing share URLs stop working."""
-        room = await load_room_for_caller(caller, room_id)
+        room = await load_room_for_caller(
+            caller,
+            room_id,
+            require_signed_tables=False,
+        )
         registry = request.app.state.registry
         await asyncio.to_thread(
             registry.disable_room_share_link,

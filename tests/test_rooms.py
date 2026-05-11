@@ -176,6 +176,38 @@ def _create_fixed_room(client: TestClient, owner_key: str, **overrides) -> dict:
     return resp.json()
 
 
+def _create_legacy_room_without_allowed_tables(tenant: dict, hive) -> dict:
+    priv, pub = derive_signing_keypair(tenant["api_key"], tenant["tenant_id"])
+    pub_b64 = base64.b64encode(
+        pub.public_bytes(
+            encoding=serialization.Encoding.Raw,
+            format=serialization.PublicFormat.Raw,
+        )
+    ).decode("ascii")
+    req = RoomCreateRequest(
+        name="legacy unrestricted",
+        rules="old room",
+        scope_agent_id="scope-a",
+        query_mode="fixed",
+        query_agent_id="query-a",
+        mediator_agent_id="mediator-a",
+        egress={"llm_providers": ["tinfoil"], "allow_artifacts": False},
+    )
+    manifest = build_room_manifest(
+        room_id=f"room_{secrets.token_hex(6)}",
+        tenant_id=tenant["tenant_id"],
+        created_at=time.time(),
+        req=req,
+        scope_visibility="inspectable",
+        query_visibility="inspectable",
+        mediator_visibility="inspectable",
+        signer_pubkey_b64=pub_b64,
+    )
+    manifest.pop("allowed_tables")
+    envelope = sign_manifest(manifest, priv)
+    return hive.room_store.create(envelope)
+
+
 def test_room_create_mints_signed_manifest_and_room_token(room_env):
     client, tenant, _hive = room_env
     out = _create_fixed_room(client, tenant["api_key"])
@@ -250,35 +282,7 @@ def test_room_create_rejects_null_allowed_tables(room_env):
 
 def test_legacy_room_without_signed_allowed_tables_cannot_run(room_env):
     client, tenant, hive = room_env
-    priv, pub = derive_signing_keypair(tenant["api_key"], tenant["tenant_id"])
-    pub_b64 = base64.b64encode(
-        pub.public_bytes(
-            encoding=serialization.Encoding.Raw,
-            format=serialization.PublicFormat.Raw,
-        )
-    ).decode("ascii")
-    req = RoomCreateRequest(
-        name="legacy unrestricted",
-        rules="old room",
-        scope_agent_id="scope-a",
-        query_mode="fixed",
-        query_agent_id="query-a",
-        mediator_agent_id="mediator-a",
-        egress={"llm_providers": ["tinfoil"], "allow_artifacts": False},
-    )
-    manifest = build_room_manifest(
-        room_id=f"room_{secrets.token_hex(6)}",
-        tenant_id=tenant["tenant_id"],
-        created_at=time.time(),
-        req=req,
-        scope_visibility="inspectable",
-        query_visibility="inspectable",
-        mediator_visibility="inspectable",
-        signer_pubkey_b64=pub_b64,
-    )
-    manifest.pop("allowed_tables")
-    envelope = sign_manifest(manifest, priv)
-    room = hive.room_store.create(envelope)
+    room = _create_legacy_room_without_allowed_tables(tenant, hive)
 
     resp = client.post(
         f"/v1/rooms/{room['room_id']}/runs",
@@ -288,6 +292,34 @@ def test_legacy_room_without_signed_allowed_tables_cannot_run(room_env):
 
     assert resp.status_code == 410
     assert "missing signed allowed_tables" in resp.json()["detail"]
+
+
+def test_legacy_room_without_signed_allowed_tables_cannot_operate(room_env):
+    client, tenant, hive = room_env
+    room = _create_legacy_room_without_allowed_tables(tenant, hive)
+
+    read_only = client.get(
+        f"/v1/rooms/{room['room_id']}",
+        headers=_headers(tenant["api_key"]),
+    )
+    assert read_only.status_code == 200
+    assert "allowed_tables" not in read_only.json()["manifest"]
+
+    for method, path in (
+        ("get", f"/v1/rooms/{room['room_id']}/attest"),
+        ("get", f"/v1/rooms/{room['room_id']}/key"),
+        ("post", f"/v1/rooms/{room['room_id']}/open"),
+        ("post", f"/v1/rooms/{room['room_id']}/share-link"),
+    ):
+        resp = getattr(client, method)(path, headers=_headers(tenant["api_key"]))
+        assert resp.status_code == 410
+        assert "missing signed allowed_tables" in resp.json()["detail"]
+
+    cleanup = client.delete(
+        f"/v1/rooms/{room['room_id']}",
+        headers=_headers(tenant["api_key"]),
+    )
+    assert cleanup.status_code == 200
 
 
 def test_room_create_omitted_query_pins_service_default(room_env):

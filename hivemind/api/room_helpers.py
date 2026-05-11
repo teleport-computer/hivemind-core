@@ -21,6 +21,7 @@ async def load_room_for_caller(
     room_id: str | None,
     *,
     allow_revoked: bool = False,
+    require_signed_tables: bool = True,
 ) -> dict:
     """Resolve a room for the caller.
 
@@ -60,6 +61,8 @@ async def load_room_for_caller(
         )
     if not allow_revoked and room.get("revoked_at") is not None:
         raise HTTPException(403, f"room '{rid}' is revoked")
+    if require_signed_tables:
+        signed_allowed_tables(room)
     return room
 
 

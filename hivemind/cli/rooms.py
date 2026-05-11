@@ -962,6 +962,11 @@ def revoke_room(room: str, as_json: bool):
     help="Only consider active rooms whose names start with this prefix.",
 )
 @click.option(
+    "--legacy-only",
+    is_flag=True,
+    help="Only consider active rooms whose manifest is missing allowed_tables.",
+)
+@click.option(
     "--all-active",
     is_flag=True,
     help="Allow considering all active rooms not listed in --keep.",
@@ -977,13 +982,14 @@ def prune_rooms(
     limit: int,
     keeps: tuple[str, ...],
     name_prefix: str | None,
+    legacy_only: bool,
     all_active: bool,
     dry_run: bool,
     as_json: bool,
 ):
     """Bulk-revoke old active room invites, dry-run first by default."""
-    if not name_prefix and not all_active:
-        raise click.ClickException("pass --name-prefix or --all-active")
+    if not name_prefix and not legacy_only and not all_active:
+        raise click.ClickException("pass --name-prefix, --legacy-only, or --all-active")
 
     config = _load_config()
     service = config["service"]
@@ -1018,6 +1024,13 @@ def prune_rooms(
         if room_id in keep_ids:
             continue
         if name_prefix and not name.startswith(name_prefix):
+            continue
+        manifest = room.get("manifest") or {}
+        is_legacy = (
+            "allowed_tables" not in manifest
+            or manifest.get("allowed_tables") is None
+        )
+        if legacy_only and not is_legacy:
             continue
         candidates.append(room)
 

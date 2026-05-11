@@ -35,6 +35,15 @@ Every room signs an explicit SQL table allowlist. Use `--allowed-table` once per
 tenant table the room may query. Omit it only for rooms that should have no SQL
 table access and rely exclusively on room-vault data.
 
+Older room manifests that do not contain `allowed_tables` are obsolete and fail
+closed. To revoke any still-active obsolete invites without touching tenant
+tables such as `watch_history`, dry-run first and then apply:
+
+```bash
+hmctl room prune --legacy-only
+hmctl room prune --legacy-only --no-dry-run
+```
+
 ## Fixed Query Agent
 
 Use this when the owner chooses the query agent and the participant only asks

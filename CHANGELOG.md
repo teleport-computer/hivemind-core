@@ -27,7 +27,9 @@ surface.
 - **Breaking — unrestricted room mode removed.** New rooms always sign an
   explicit `allowed_tables` list, `hmctl room create` sends that list (empty by
   default), and room runs reject old manifests that omit it instead of falling
-  back to unrestricted SQL access.
+  back to unrestricted SQL access. Operational room endpoints also reject
+  obsolete manifests, and `hmctl room prune --legacy-only` bulk-revokes any
+  active legacy invites without deleting tenant data.
 - Fixed room table allowlist enforcement so valid aggregate SQL using CTEs,
   subqueries, or lateral function aliases is checked against the underlying
   base tables instead of rejecting the derived alias name.

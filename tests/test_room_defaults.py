@@ -1,6 +1,8 @@
+import pytest
+
 from hivemind.api.rooms import _apply_room_query_default
 from hivemind.config import Settings
-from hivemind.rooms import RoomCreateRequest, RoomEgress
+from hivemind.rooms import RoomCreateRequest, RoomEgress, room_constraints
 
 
 def test_omitted_room_query_pins_service_default():
@@ -44,3 +46,19 @@ def test_room_create_defaults_to_empty_allowed_tables():
     req = RoomCreateRequest(scope_agent_id="scope-a")
 
     assert req.allowed_tables == []
+
+
+def test_room_constraints_rejects_missing_allowed_tables():
+    envelope = {
+        "manifest_hash": "hash",
+        "manifest": {
+            "room_id": "room_legacy",
+            "scope": {"agent_id": "scope-a"},
+            "query": {"mode": "fixed", "agent_id": "query-a"},
+            "output": {"visibility": "querier_only"},
+            "egress": {"llm_providers": ["openrouter"], "allow_artifacts": True},
+        },
+    }
+
+    with pytest.raises(ValueError, match="missing signed allowed_tables"):
+        room_constraints(envelope)

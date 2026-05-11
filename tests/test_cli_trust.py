@@ -651,24 +651,28 @@ def test_room_prune_dry_run_and_revoke_keeps_requested_room(_sandbox, monkeypatc
                             "room_id": "room_keep",
                             "name": "watch-history-keep",
                             "query_mode": "fixed",
+                            "manifest": {"allowed_tables": ["watch_history"]},
                             "revoked_at": None,
                         },
                         {
                             "room_id": "room_old",
                             "name": "watch-history-old",
                             "query_mode": "fixed",
+                            "manifest": {"allowed_tables": ["watch_history"]},
                             "revoked_at": None,
                         },
                         {
                             "room_id": "room_other",
                             "name": "unrelated",
                             "query_mode": "fixed",
+                            "manifest": {"allowed_tables": ["watch_history"]},
                             "revoked_at": None,
                         },
                         {
                             "room_id": "room_revoked",
                             "name": "watch-history-revoked",
                             "query_mode": "fixed",
+                            "manifest": {},
                             "revoked_at": 1.0,
                         },
                     ]
@@ -723,6 +727,84 @@ def test_room_prune_dry_run_and_revoke_keeps_requested_room(_sandbox, monkeypatc
     assert revoked.exit_code == 0, revoked.output
     assert "Revoked: 1" in revoked.output
     assert deleted == ["room_old"]
+
+
+def test_room_prune_legacy_only_targets_missing_allowed_tables(_sandbox, monkeypatch):
+    _stub_attestation(
+        monkeypatch,
+        {"ready": True, "attestation": {"compose_hash": "0xabc"}},
+    )
+    deleted: list[str] = []
+
+    def fake_get(url, **kwargs):
+        assert url == "https://cvm.example/v1/rooms"
+        return type(
+            "Resp",
+            (),
+            {
+                "status_code": 200,
+                "json": lambda self: {
+                    "rooms": [
+                        {
+                            "room_id": "room_current",
+                            "name": "current",
+                            "manifest": {"allowed_tables": ["watch_history"]},
+                            "revoked_at": None,
+                        },
+                        {
+                            "room_id": "room_empty",
+                            "name": "empty-allowlist",
+                            "manifest": {"allowed_tables": []},
+                            "revoked_at": None,
+                        },
+                        {
+                            "room_id": "room_legacy",
+                            "name": "legacy",
+                            "manifest": {},
+                            "revoked_at": None,
+                        },
+                        {
+                            "room_id": "room_null",
+                            "name": "null-allowlist",
+                            "manifest": {"allowed_tables": None},
+                            "revoked_at": None,
+                        },
+                    ]
+                },
+            },
+        )()
+
+    def fake_delete(url, **kwargs):
+        deleted.append(url.rsplit("/", 1)[-1])
+        return type(
+            "Resp",
+            (),
+            {
+                "status_code": 200,
+                "json": lambda self: {"status": "ok", "room_id": deleted[-1]},
+            },
+        )()
+
+    monkeypatch.setattr(_cli_mod, "_hget", fake_get)
+    monkeypatch.setattr(_cli_mod, "_hdelete", fake_delete)
+
+    dry_run = CliRunner().invoke(
+        _cli_mod.cli,
+        ["--yes", "room", "prune", "--legacy-only", "--json"],
+    )
+    assert dry_run.exit_code == 0, dry_run.output
+    assert [r["room_id"] for r in json.loads(dry_run.output)["candidates"]] == [
+        "room_legacy",
+        "room_null",
+    ]
+    assert deleted == []
+
+    revoked = CliRunner().invoke(
+        _cli_mod.cli,
+        ["--yes", "room", "prune", "--legacy-only", "--no-dry-run"],
+    )
+    assert revoked.exit_code == 0, revoked.output
+    assert deleted == ["room_legacy", "room_null"]
 
 
 def test_room_inspect_thaws_active_profile_when_room_tenant_is_sealed(

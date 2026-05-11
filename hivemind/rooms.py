@@ -321,6 +321,11 @@ def verify_room_envelope(
 def room_constraints(envelope: dict) -> dict:
     """Capability-token constraint snapshot for a room invite."""
     manifest = envelope["manifest"]
+    raw_allowed_tables = manifest.get("allowed_tables")
+    if raw_allowed_tables is None:
+        raise ValueError("room manifest is missing signed allowed_tables")
+    if not isinstance(raw_allowed_tables, list):
+        raise ValueError("room manifest has invalid allowed_tables")
     query = manifest["query"]
     egress = manifest["egress"]
     return {
@@ -339,7 +344,9 @@ def room_constraints(envelope: dict) -> dict:
         "output_visibility": manifest["output"]["visibility"],
         "allowed_llm_providers": list(egress.get("llm_providers") or []),
         "allow_artifacts": bool(egress.get("allow_artifacts")),
-        "allowed_tables": list(manifest.get("allowed_tables") or []),
+        "allowed_tables": [
+            str(t).strip() for t in raw_allowed_tables if str(t).strip()
+        ],
         "policy": manifest.get("policy") or "",
     }
 
