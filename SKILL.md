@@ -138,9 +138,10 @@ your `agent.py` reads `os.environ['QUERY_PROMPT']` and produces output
 on stdout. You do not see the room rules; the scope agent already
 filtered the data before you got it.
 
-Defaults: `--timeout 600`, `--max-llm-calls 20`, `--max-tokens 100000`,
-`--memory-mb 256`. Hosted deployments clamp these lower. Use larger
-explicit budgets for dynamic-scope rooms.
+Defaults: `--timeout 900`, `--max-llm-calls 60`, `--max-tokens 1000000`,
+`--memory-mb 256`. Hosted deployments may clamp requests server-side. Use
+smaller explicit budgets for deterministic agents when you want tighter
+cost/latency.
 
 ### Flow B — User has private data; you create a room for them
 
@@ -172,18 +173,17 @@ EOF
 #      OMIT --query-agent. This is what the dinner-negotiation
 #      example uses.
 #
-# Use --llm-provider openrouter (known-working). tinfoil's default
-# model is currently unpriced on production billing and will reject
-# at run time; that's deployment config, not a CLI bug.
+# OpenRouter is the default room LLM egress and the currently verified
+# provider for the hosted default-agent rooms.
 #
 # --agent-timeout 600 bumps the per-agent build/run timeout from the
 # 120s default; the LLM-driven default-mediator can need a few
 # hundred seconds on cold paths.
 
 # Example (a): fixed query agent, single-asker pattern
-hmctl room create agents/default-scope \
-  --query-agent agents/default-query \
-  --mediator-agent agents/default-mediator \
+hmctl room create agents/default-scope-hermes \
+  --query-agent agents/default-query-hermes \
+  --mediator-agent agents/default-mediator-hermes \
   --rules-file rules.md \
   --query-visibility inspectable \
   --trust-mode owner_approved \
@@ -192,8 +192,8 @@ hmctl room create agents/default-scope \
 
 # Example (b): uploadable query agent, bilateral pattern
 # (note: NO --query-agent flag)
-hmctl room create agents/default-scope \
-  --mediator-agent agents/default-mediator \
+hmctl room create agents/default-scope-hermes \
+  --mediator-agent agents/default-mediator-hermes \
   --rules-file rules.md \
   --query-visibility sealed \
   --output-visibility owner_and_querier \
@@ -311,7 +311,7 @@ when the user wants their reasoning approach not to be reverse-engineered.
 
 ```bash
 hmctl room create ./scope-agent \
-  --mediator-agent agents/default-mediator \
+  --mediator-agent agents/default-mediator-hermes \
   --query-visibility sealed \
   --rules-file rules.md \
   --agent-timeout 600 \

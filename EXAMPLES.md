@@ -33,9 +33,9 @@ hmctl room inspect 'hmroom://...' --json | jq '.room.manifest'
 hmctl room ask 'hmroom://...' "What changed this month?"
 ```
 
-`room ask` defaults to `--timeout 600`, `--max-llm-calls 20`,
-`--max-tokens 100000`, and `--memory-mb 256`. Use explicit larger budgets for
-dynamic scope/query/mediator rooms.
+`room ask` defaults to `--timeout 900`, `--max-llm-calls 60`,
+`--max-tokens 1000000`, and `--memory-mb 256`. Use explicit smaller budgets
+for deterministic agents when you want a tighter cost/latency envelope.
 
 With a participant-owned query agent:
 
@@ -67,15 +67,14 @@ hmctl room create scope_agent_id \
 For the current live watch-history tenant:
 
 ```bash
-hmctl --profile watch-history room create agents/default-scope \
+hmctl --profile watch-history room create agents/default-scope-hermes \
   --name watch-history-hashtags \
-  --query-agent agents/default-query \
-  --mediator-agent agents/default-mediator \
+  --query-agent agents/default-query-hermes \
+  --mediator-agent agents/default-mediator-hermes \
   --scope-visibility inspectable \
   --query-visibility inspectable \
   --rules-file rules.md \
   --trust-mode owner_approved \
-  --llm-provider tinfoil \
   --llm-provider openrouter
 ```
 
@@ -114,7 +113,7 @@ curl -X POST "$BASE/v1/rooms" \
     "query_mode": "uploadable",
     "query_visibility": "sealed",
     "output_visibility": "querier_only",
-    "egress": {"llm_providers": ["tinfoil"], "allow_artifacts": false},
+    "egress": {"llm_providers": ["openrouter"], "allow_artifacts": true},
     "trust": {"mode": "operator_updates"}
   }'
 ```

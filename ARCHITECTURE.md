@@ -485,7 +485,7 @@ Visibility is enforced when reading run rows:
 - query-token callers see only runs they initiated;
 - owners see tenant run metadata;
 - for participant-initiated runs with `output.visibility=querier_only`, owners
-  get output, error, index output, and artifacts redacted.
+  get output, error, and artifacts redacted.
 
 ## Billing Flow
 
@@ -497,7 +497,7 @@ room ask with hmq_ invite + active-profile X-Hivemind-Payer-Key
   -> room authorization uses hmq_
   -> payer authorization uses hmk_
   -> create _billing_ledger usage_hold for requested token budget
-  -> run scope, query, mediator, and optional index stages
+  -> run scope, query, and mediator stages
   -> collect per-stage calls, prompt tokens, completion tokens, provider, model
   -> write usage_json and payer fields to _hivemind_query_runs
   -> release hold and write exact usage_charge ledger entry

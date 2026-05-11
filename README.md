@@ -251,6 +251,10 @@ agent-dir/
 A scope agent defines the room's data boundary. A query agent performs the
 participant's task through scoped tools. Examples live in:
 
+- `agents/default-scope-hermes/`
+- `agents/default-query-hermes/`
+- `agents/default-mediator-hermes/`
+- `agents/default-index-hermes/`
 - `agents/default-scope/`
 - `agents/default-query/`
 - `agents/default-mediator/`
@@ -297,9 +301,10 @@ Visibility modes:
   encrypted and are not served through the files API. Run prompts are not
   stored as plaintext; signed run attestations still include the prompt hash.
 
-Dynamic scope/query/mediator rooms need an allowed LLM provider, usually the
-default Tinfoil egress or an explicit `--llm-provider openrouter`. `--no-llm`
-is only an egress-deny policy for pinned agents that do not call LLM endpoints.
+Dynamic scope/query/mediator rooms need an allowed LLM provider. Room creation
+defaults to OpenRouter egress; repeat `--llm-provider` if you intentionally
+want to allow additional providers. `--no-llm` is only an egress-deny policy
+for pinned agents that do not call LLM endpoints.
 
 ## Participant Flow
 

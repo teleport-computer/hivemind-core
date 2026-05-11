@@ -53,15 +53,14 @@ the uploaded source is stored.
 For the current live watch-history tenant:
 
 ```bash
-hmctl --profile watch-history room create agents/default-scope \
+hmctl --profile watch-history room create agents/default-scope-hermes \
   --name watch-history-hashtags \
-  --query-agent agents/default-query \
-  --mediator-agent agents/default-mediator \
+  --query-agent agents/default-query-hermes \
+  --mediator-agent agents/default-mediator-hermes \
   --scope-visibility inspectable \
   --query-visibility inspectable \
   --rules-file rules.md \
   --trust-mode owner_approved \
-  --llm-provider tinfoil \
   --llm-provider openrouter
 ```
 
@@ -99,17 +98,13 @@ hmctl -y room ask 'hmroom://...' \
   "Show me my top 30 hashtags by watch count as a markdown table with columns: rank, hashtag, watches. Just the table, no explanation."
 ```
 
-The room allows both Tinfoil and OpenRouter egress, but this watch-history
-example is currently verified with OpenRouter GLM-5. Use another provider or
-model only after checking that it can complete the scope/query/mediator loop
-within the room timeout.
+The room allows OpenRouter egress and is currently verified with OpenRouter
+GLM-5. Use another provider or model only after checking that it can complete
+the Hermes scope/query/mediator loop within the room timeout.
 
-The default agents use `claude_agent_sdk`, so models that are weak at
-Claude/Anthropic-style tool loops can submit successfully and then fail or
-produce unhelpful scoped queries. For this watch-history room, GLM-5 is the
-cheap verified default. DeepSeek V4 Flash and V4 Pro submitted successfully but
-timed out on this agent loop in testing; generic OpenAI/Gemini models are not
-currently the reliable path for these agents.
+The default hosted agent path uses the Hermes harness. For this watch-history
+room, GLM-5 is the cheap verified default for both the exact-label aggregate
+canary and the deep-report artifact canary.
 
 The copied room link can be shared as a shell variable:
 
@@ -203,7 +198,7 @@ the service can report it.
 
 ## Egress Choices
 
-Default room creation allows Tinfoil LLM egress. To allow OpenRouter instead:
+Default room creation allows OpenRouter LLM egress. To be explicit:
 
 ```bash
 hmctl room create <scope-agent-id-or-path> \
@@ -213,7 +208,7 @@ hmctl room create <scope-agent-id-or-path> \
   --llm-provider openrouter
 ```
 
-To allow both:
+To allow both OpenRouter and Tinfoil:
 
 ```bash
 hmctl room create <scope-agent-id-or-path> \

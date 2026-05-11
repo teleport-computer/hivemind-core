@@ -20,14 +20,11 @@ surface.
     issue a capability token, and it returns the plaintext token once. The
     `scripts/smoke_capability_tokens.py` lifecycle script was removed with
     it.
-- **Breaking — index agent feature removed.** The "index" agent role is gone:
-  the `IndexRequest`/`IndexResponse` models, `Pipeline.run_index` and
-  `run_index_tracked`, the `index_agent_id` / `index_started_at` /
-  `index_ended_at` / `index_output` columns on `_hivemind_query_runs`, the
-  `default_index_agent` / `default_index_image` / `index_model` settings, and
-  the `default-index` autoload spec are all removed. `agent_type` now accepts
-  `scope | query | mediator` only. The bundled three-archive submit endpoint
-  was the only entry point and is gone with the rest.
+- **Breaking — dedicated index run stage removed.** The old standalone index
+  request/response path and query-run index columns are gone from the supported
+  room execution pipeline. Reusable index agent contexts still exist for agent
+  registry/build coverage, and uploaded agent metadata still accepts
+  `agent_type=index`.
 - Added repository hygiene docs: contributing guide, security policy, changelog,
   and GitHub issue templates.
 - Added README badges and a shorter top-level capability summary.

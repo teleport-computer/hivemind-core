@@ -169,8 +169,8 @@ Create a signed room manifest and invite token.
   "query_visibility": "sealed",
   "output_visibility": "querier_only",
   "egress": {
-    "llm_providers": ["tinfoil"],
-    "allow_artifacts": false
+    "llm_providers": ["openrouter"],
+    "allow_artifacts": true
   },
   "trust": {
     "mode": "operator_updates",
@@ -247,7 +247,7 @@ the signed run attestation's prompt hash is retained.
   "query": "What changed this month?",
   "query_agent_id": "optional-for-uploadable-rooms",
   "model": "optional",
-  "provider": "tinfoil"
+  "provider": "openrouter"
 }
 ```
 
@@ -349,7 +349,9 @@ List recent runs visible to the caller.
 
 ### `GET /v1/runs/{run_id}/artifacts/{filename}`
 
-Fetch a visible artifact for a run. Rooms disable artifact egress by default.
+Fetch a visible artifact for a run. Rooms allow artifact egress by default;
+owners can disable it at room creation with `allow_artifacts=false` /
+`--no-artifacts`.
 
 ## Attestation
 

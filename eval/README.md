@@ -21,7 +21,7 @@ room manifest
   output shape, row-level leakage probes, tool-call counts, stage latency,
   token usage, and cost.
 - Report by scenario class. Do not average PII, aggregation, temporal,
-  topic, trajectory, and index-agent cases into one score.
+  topic, trajectory, artifact, and agent-loop cases into one score.
 - Keep LLM judges out of pass/fail. They may produce diagnostics, never the
   reward signal.
 - Stress the scope agent's actual job: adapting to the query and query agent
@@ -35,7 +35,7 @@ room manifest
   simulation, and trajectory audit tools, the eval should show that and justify
   routing that lane through a more structured orchestrator.
 
-## Current Scaffold
+## Current Harness
 
 List deterministic scenario seeds:
 
@@ -55,8 +55,21 @@ or stdin:
 hmctl room ask "$ROOM" "..." | uv run python -m eval grade watch_history_top_hashtags -
 ```
 
-This is intentionally small. The next useful layer is a room runner that
-submits each scenario to a chosen room/agent stack and stores:
+Run a scenario against a live room and store raw output, telemetry, artifacts,
+and a JSON summary:
+
+```bash
+uv run python -m eval run-room watch_history_report_artifact "$ROOM" \
+  --provider openrouter \
+  --model z-ai/glm-5 \
+  --max-tokens 1000000 \
+  --max-llm-calls 60 \
+  --timeout 900 \
+  --fetch \
+  --output-dir eval/results/live
+```
+
+The runner records:
 
 - room id and manifest hash;
 - scope/query/mediator agent ids;
@@ -64,4 +77,5 @@ submits each scenario to a chosen room/agent stack and stores:
 - per-stage latency and status;
 - tool-call counts, especially scope superpower usage;
 - tokens and settled cost;
-- deterministic grade findings.
+- deterministic grade findings;
+- report artifact filenames and fetched paths when artifacts are enabled.
