@@ -246,6 +246,8 @@ def _validate_table_allowlist(
     contains the full SQL for audit.
     """
     import sqlglot
+    from sqlglot import exp
+    from sqlglot.optimizer.scope import traverse_scope
 
     if allowed_tables is None:
         return "query rejected (room missing table allowlist)"
@@ -263,18 +265,28 @@ def _validate_table_allowlist(
     for stmt in statements:
         if stmt is None:
             continue
-        for table in stmt.find_all(sqlglot.exp.Table):
-            schema = (table.db or "").lower().strip()
-            name = (table.name or "").lower().strip()
+        for scope in traverse_scope(stmt):
+            # Scope sources distinguish real base tables from CTEs, subqueries,
+            # and lateral function aliases. Valid analytical queries often
+            # SELECT from a CTE name; that derived name must not be treated as
+            # a tenant table outside the room allowlist.
+            base_tables = (
+                source
+                for source in scope.sources.values()
+                if isinstance(source, exp.Table)
+            )
+            for table in base_tables:
+                schema = (table.db or "").lower().strip()
+                name = (table.name or "").lower().strip()
 
-            if schema in _HIDDEN_SCHEMAS:
-                return "query rejected"
+                if schema in _HIDDEN_SCHEMAS:
+                    return "query rejected"
 
-            if any(name.startswith(p) for p in _INTERNAL_TABLE_PREFIXES):
-                return "query rejected"
+                if any(name.startswith(p) for p in _INTERNAL_TABLE_PREFIXES):
+                    return "query rejected"
 
-            if name not in allowed_lower:
-                return "query rejected"
+                if name not in allowed_lower:
+                    return "query rejected"
 
     return None
 

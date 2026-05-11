@@ -13,6 +13,7 @@ from hivemind.tools import (
     Tool,
     _is_select_only,
     _references_internal_tables,
+    _validate_table_allowlist,
     build_agent_file_tools,
     build_sql_tools,
 )
@@ -210,6 +211,55 @@ class TestScopedRequiresScopeFn:
             "error": "query rejected (room missing table allowlist)"
         }
         assert json.loads(t["get_schema"].handler()) == []
+
+
+class TestValidateTableAllowlist:
+    def test_allows_cte_wrapping_allowed_table(self):
+        sql = """
+        WITH tags AS (
+            SELECT lower(tag) AS hashtag
+            FROM watch_history
+            CROSS JOIN LATERAL jsonb_array_elements_text(
+                CASE
+                    WHEN jsonb_typeof(hashtags::jsonb) = 'array'
+                    THEN hashtags::jsonb
+                    ELSE '[]'::jsonb
+                END
+            ) AS tag
+        )
+        SELECT hashtag, COUNT(*) AS watches
+        FROM tags
+        GROUP BY hashtag
+        ORDER BY watches DESC
+        LIMIT 30
+        """
+
+        assert _validate_table_allowlist(sql, ["watch_history"]) is None
+
+    def test_rejects_disallowed_table_inside_cte(self):
+        sql = """
+        WITH safe AS (
+            SELECT *
+            FROM private_watch_history
+        )
+        SELECT *
+        FROM safe
+        """
+
+        assert _validate_table_allowlist(sql, ["watch_history"]) == "query rejected"
+
+    def test_nested_cte_alias_does_not_hide_outer_base_table(self):
+        sql = """
+        SELECT *
+        FROM private_watch_history
+        WHERE EXISTS (
+            WITH private_watch_history AS (SELECT 1 AS ok)
+            SELECT 1
+            FROM private_watch_history
+        )
+        """
+
+        assert _validate_table_allowlist(sql, ["watch_history"]) == "query rejected"
 
 
 # ── _references_internal_tables ──

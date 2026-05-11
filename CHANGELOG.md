@@ -28,6 +28,9 @@ surface.
   explicit `allowed_tables` list, `hmctl room create` sends that list (empty by
   default), and room runs reject old manifests that omit it instead of falling
   back to unrestricted SQL access.
+- Fixed room table allowlist enforcement so valid aggregate SQL using CTEs,
+  subqueries, or lateral function aliases is checked against the underlying
+  base tables instead of rejecting the derived alias name.
 - Changed the hosted Hermes default model from `z-ai/glm-5` to
   `moonshotai/kimi-k2.6` and removed the scope-Hermes hardcoded synthetic
   summary-row gate that could fail otherwise valid analytical runs.
