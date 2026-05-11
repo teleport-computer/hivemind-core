@@ -29,6 +29,8 @@ WATCH_HISTORY_TOP_HASHTAGS = Scenario(
         r"\|\s*\d+\s*\|\s*(?:\[|\"|\])",
         r"\|\s*\d+\s*\|[^\n]*\|\s*\d{10,}\s*\|",
     ),
+    max_duration_seconds=240,
+    max_stage_seconds={"scope": 90, "query": 120, "mediator": 75},
     superpower_demand=(
         "scope_compiles_aggregate_contract",
         "query_uses_scoped_sql_once",
@@ -123,6 +125,8 @@ WATCH_HISTORY_REPORT_ARTIFACT = Scenario(
     min_output_words=1200,
     min_markdown_tables=2,
     required_artifact_extensions=(".md", ".pdf"),
+    max_duration_seconds=480,
+    max_stage_seconds={"scope": 220, "query": 260, "mediator": 180},
     superpower_demand=(
         "scope_preserves_aggregate_report_rows",
         "query_finalizes_with_report",

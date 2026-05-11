@@ -20,11 +20,10 @@ surface.
     issue a capability token, and it returns the plaintext token once. The
     `scripts/smoke_capability_tokens.py` lifecycle script was removed with
     it.
-- **Breaking — dedicated index run stage removed.** The old standalone index
-  request/response path and query-run index columns are gone from the supported
-  room execution pipeline. Reusable index agent contexts still exist for agent
-  registry/build coverage, and uploaded agent metadata still accepts
-  `agent_type=index`.
+- **Breaking — index agent surface removed.** The old standalone index
+  request/response path, query-run index columns, default index agents, index
+  image builds, and `agent_type=index` upload path are gone. Room execution is
+  scope → query → mediator.
 - Added repository hygiene docs: contributing guide, security policy, changelog,
   and GitHub issue templates.
 - Added README badges and a shorter top-level capability summary.

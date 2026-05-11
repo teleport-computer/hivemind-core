@@ -3,7 +3,7 @@ import re
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
-VALID_AGENT_TYPES = {"scope", "query", "index", "mediator"}
+VALID_AGENT_TYPES = {"scope", "query", "mediator"}
 VALID_AGENT_HARNESSES = {"claude_code", "hermes"}
 MAX_ARTIFACT_FILENAME_LENGTH = 128
 MAX_ARTIFACT_BYTES = 25 * 1024 * 1024
@@ -71,7 +71,7 @@ class AgentConfig(BaseModel):
     agent_id: str
     name: str
     description: str = ""
-    agent_type: str = "query"  # scope | query | index | mediator
+    agent_type: str = "query"  # scope | query | mediator
     image: str  # Docker image reference (e.g. "myorg/my-agent:v1")
     entrypoint: str | None = None  # Override container CMD
     memory_mb: int = Field(default=256, ge=16)  # Container memory limit

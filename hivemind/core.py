@@ -21,13 +21,6 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_AGENT_SPECS = (
     (
-        "index",
-        "claude_code",
-        "default_index_agent",
-        "default_index_image",
-        "default-index",
-    ),
-    (
         "scope",
         "claude_code",
         "default_scope_agent",
@@ -47,13 +40,6 @@ DEFAULT_AGENT_SPECS = (
         "default_mediator_agent",
         "default_mediator_image",
         "default-mediator",
-    ),
-    (
-        "index",
-        "hermes",
-        "default_index_hermes_agent",
-        "default_index_hermes_image",
-        "default-index-hermes",
     ),
     (
         "scope",

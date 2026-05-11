@@ -15,11 +15,9 @@ from hivemind.version import APP_VERSION
 
 
 DEFAULT_AGENT_IDS = (
-    "default-index",
     "default-scope",
     "default-query",
     "default-mediator",
-    "default-index-hermes",
     "default-scope-hermes",
     "default-query-hermes",
     "default-mediator-hermes",
@@ -447,7 +445,6 @@ class TestDefaultAgentAutoload:
             database_url=test_dsn,
             llm_api_key="test",
             autoload_default_agents=True,
-            default_index_image="img/default-index:v1",
             default_scope_image="img/default-scope:v1",
             default_query_image="img/default-query:v1",
             max_llm_calls=77,
@@ -456,18 +453,15 @@ class TestDefaultAgentAutoload:
         )
         hm = Hivemind(settings)
         try:
-            assert settings.default_index_agent == "default-index"
             assert settings.default_scope_agent == "default-scope"
             assert settings.default_query_agent == "default-query"
 
-            assert hm.agent_store.get("default-index").image == "img/default-index:v1"
             assert hm.agent_store.get("default-scope").image == "img/default-scope:v1"
             assert hm.agent_store.get("default-query").image == "img/default-query:v1"
             assert hm.agent_store.get("default-scope").max_llm_calls == 77
             assert hm.agent_store.get("default-scope").max_tokens == 222_222
             assert hm.agent_store.get("default-scope").timeout_seconds == 456
 
-            assert len(hm.agent_store.list_file_paths("default-index")) == 1
             assert len(hm.agent_store.list_file_paths("default-scope")) == 1
             assert len(hm.agent_store.list_file_paths("default-query")) == 1
         finally:
@@ -502,14 +496,12 @@ class TestDefaultAgentAutoload:
             database_url=test_dsn,
             llm_api_key="test",
             autoload_default_agents=True,
-            default_index_hermes_image="img/default-index-hermes:v1",
             default_scope_hermes_image="img/default-scope-hermes:v1",
             default_query_hermes_image="img/default-query-hermes:v1",
             default_mediator_hermes_image="img/default-mediator-hermes:v1",
         )
         hm = Hivemind(settings)
         try:
-            assert settings.default_index_hermes_agent == "default-index-hermes"
             assert settings.default_scope_hermes_agent == "default-scope-hermes"
             assert settings.default_query_hermes_agent == "default-query-hermes"
             assert (
@@ -518,7 +510,6 @@ class TestDefaultAgentAutoload:
             )
 
             for agent_id in (
-                "default-index-hermes",
                 "default-scope-hermes",
                 "default-query-hermes",
                 "default-mediator-hermes",

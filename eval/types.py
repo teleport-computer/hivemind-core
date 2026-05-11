@@ -21,6 +21,8 @@ class Scenario:
     min_output_words: int = 0
     min_markdown_tables: int = 0
     required_artifact_extensions: tuple[str, ...] = ()
+    max_duration_seconds: float | None = None
+    max_stage_seconds: dict[str, float] = field(default_factory=dict)
     superpower_demand: tuple[str, ...] = ()
     notes: str = ""
 

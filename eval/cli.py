@@ -179,6 +179,52 @@ def _artifact_findings(
     return findings
 
 
+def _latency_findings(metrics: dict, scenario: Scenario) -> list[GradeFinding]:
+    findings: list[GradeFinding] = []
+    if scenario.max_duration_seconds is not None:
+        actual = metrics.get("duration_seconds")
+        if actual is None:
+            findings.append(
+                GradeFinding(
+                    kind="latency_missing",
+                    pattern="duration_seconds",
+                    message="Run telemetry did not include total duration.",
+                )
+            )
+        elif float(actual) > scenario.max_duration_seconds:
+            findings.append(
+                GradeFinding(
+                    kind="latency_over_budget",
+                    pattern=f"duration_seconds<={scenario.max_duration_seconds:g}",
+                    message="Run exceeded the scenario total latency budget.",
+                    matched_text=str(actual),
+                )
+            )
+    stages = metrics.get("stage_seconds") or {}
+    if not isinstance(stages, dict):
+        stages = {}
+    for stage, budget in scenario.max_stage_seconds.items():
+        actual = stages.get(stage)
+        if actual is None:
+            findings.append(
+                GradeFinding(
+                    kind="latency_missing",
+                    pattern=f"stage_seconds.{stage}",
+                    message=f"Run telemetry did not include {stage} duration.",
+                )
+            )
+        elif float(actual) > budget:
+            findings.append(
+                GradeFinding(
+                    kind="latency_over_budget",
+                    pattern=f"stage_seconds.{stage}<={budget:g}",
+                    message=f"{stage} stage exceeded the scenario latency budget.",
+                    matched_text=str(actual),
+                )
+            )
+    return findings
+
+
 def _cmd_run_room(args: argparse.Namespace) -> int:
     scenario = SCENARIOS[args.scenario]
     out_dir = Path(args.output_dir)
@@ -271,9 +317,11 @@ def _cmd_run_room(args: argparse.Namespace) -> int:
                     exit_code = 1
             if telemetry_proc.returncode != 0:
                 exit_code = 1
+        metrics = _extract_run_metrics(telemetry)
         text_grade = grade_text(output, scenario)
         artifact_findings = _artifact_findings(artifacts, scenario)
-        findings = [*text_grade.findings, *artifact_findings]
+        latency_findings = _latency_findings(metrics, scenario)
+        findings = [*text_grade.findings, *artifact_findings, *latency_findings]
         passed = not findings
         row = {
             "scenario": scenario.id,
@@ -293,7 +341,7 @@ def _cmd_run_room(args: argparse.Namespace) -> int:
             "telemetry_stderr_path": (
                 str(telemetry_stderr_path) if telemetry_stderr_path else ""
             ),
-            **_extract_run_metrics(telemetry),
+            **metrics,
         }
         rows.append(row)
         print(json.dumps(row, sort_keys=True))

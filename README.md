@@ -254,7 +254,6 @@ participant's task through scoped tools. Examples live in:
 - `agents/default-scope-hermes/`
 - `agents/default-query-hermes/`
 - `agents/default-mediator-hermes/`
-- `agents/default-index-hermes/`
 - `agents/default-scope/`
 - `agents/default-query/`
 - `agents/default-mediator/`

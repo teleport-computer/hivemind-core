@@ -146,19 +146,15 @@ class Settings(BaseSettings):
     # hermes-harness defaults extend hivemind-agent-base-hermes and use the
     # NousResearch/hermes-agent loop with native plugin tools.
     autoload_default_agents: bool = True
-    default_index_agent: str = ""
     default_query_agent: str = ""
     default_scope_agent: str = ""
     default_mediator_agent: str = ""
-    default_index_image: str = ""
     default_query_image: str = ""
     default_scope_image: str = ""
     default_mediator_image: str = ""
-    default_index_hermes_agent: str = ""
     default_query_hermes_agent: str = ""
     default_scope_hermes_agent: str = ""
     default_mediator_hermes_agent: str = ""
-    default_index_hermes_image: str = ""
     default_query_hermes_image: str = ""
     default_scope_hermes_image: str = ""
     default_mediator_hermes_image: str = ""

@@ -127,12 +127,11 @@ hmctl --profile alice sql -f agents/examples/dinner-negotiation/alice-seed.sql
 # --output-visibility owner_and_querier: Alice wants the answer too.
 # --query-visibility sealed: Bob's uploaded agent will be sealed at rest.
 # --agent-timeout 600: bumps per-agent build/run timeout from 120s default;
-#   the LLM-driven default-mediator can need a couple hundred seconds.
-# --llm-provider openrouter --model z-ai/glm-5: a known-working pair on
-#   the current production billing config; tinfoil's default model is
-#   currently unpriced and rejects.
+#   the LLM-driven default mediator can need a couple hundred seconds.
+# --llm-provider openrouter --model z-ai/glm-5: the currently verified
+#   hosted default provider/model pair.
 hmctl --profile alice room create agents/examples/dinner-negotiation/scope-agent \
-  --mediator-agent agents/default-mediator \
+  --mediator-agent agents/default-mediator-hermes \
   --rules-file agents/examples/dinner-negotiation/rules.md \
   --output-visibility owner_and_querier \
   --query-visibility sealed \

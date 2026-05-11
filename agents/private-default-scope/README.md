@@ -59,7 +59,7 @@ rm agents/private-default-scope/prompt.md      # don't leave it on disk
 ## Why this folder exists
 
 To serve as the concrete reference for Pattern A (build-time private input).
-Any agent — scope, index, query, mediator — can use the same technique: put
+Any agent — scope, query, mediator — can use the same technique: put
 the secret file in the build context, `COPY` it into the image, and let the
 TEE + image digest do the rest. No new primitives, no secrets table, no
 manifest schema.

@@ -465,3 +465,93 @@ jobs:
       - name: Cleanup SSH key
         if: always()
         run: rm -f ~/.ssh/id_ed25519
+
+  post-deploy-hermes-eval:
+    needs: deploy
+    if: |
+      needs.deploy.result == 'success' &&
+      vars.HERMES_PROD_EVAL_ROOM != '' &&
+      (github.event_name == 'workflow_run' ||
+       github.event.inputs.target == 'core' ||
+       github.event.inputs.target == 'all' ||
+       github.event.inputs.target == '')
+    name: "Post-deploy Hermes prod eval"
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      ROOM: ${{ vars.HERMES_PROD_EVAL_ROOM }}
+      MODELS: ${{ vars.HERMES_PROD_EVAL_MODELS || 'z-ai/glm-5' }}
+      PROVIDER: ${{ vars.HERMES_PROD_EVAL_PROVIDER || 'openrouter' }}
+      HMCTL_PROFILE: ${{ vars.HERMES_PROD_EVAL_HMCTL_PROFILE || 'bootstrap' }}
+
+    steps:
+      - name: Configure SSH
+        env:
+          SSH_KEY: ${{ secrets.EC2_SSH_PRIVATE_KEY }}
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -H "$EC2_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Run strict Hermes canaries on relay
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_USER: ${{ secrets.EC2_USER }}
+        run: |
+          set -euo pipefail
+          q() {
+            printf "'%s'" "$(printf "%s" "$1" | sed "s/'/'\\\\''/g")"
+          }
+          ssh -i ~/.ssh/id_ed25519 -o BatchMode=yes \
+            -o ServerAliveInterval=30 -o ServerAliveCountMax=20 \
+            -o TCPKeepAlive=yes \
+            "${EC2_USER}@${EC2_HOST}" \
+            "ROOM=$(q "$ROOM") MODELS=$(q "$MODELS") PROVIDER=$(q "$PROVIDER") HMCTL_PROFILE=$(q "$HMCTL_PROFILE") bash -s" <<'REMOTE'
+          set -euo pipefail
+          cd ~/hivemind-core
+
+          git fetch --prune origin
+          git checkout --detach origin/main
+          echo "HEAD: $(git rev-parse --short HEAD)"
+
+          if ! command -v uv >/dev/null 2>&1; then
+            export PATH="$HOME/.local/bin:$PATH"
+          fi
+          if ! command -v uv >/dev/null 2>&1; then
+            curl -LsSf https://astral.sh/uv/install.sh | sh
+            export PATH="$HOME/.local/bin:$PATH"
+          fi
+
+          IFS=',' read -ra models <<< "$MODELS"
+          model_args=()
+          for model in "${models[@]}"; do
+            model="$(printf '%s' "$model" | xargs)"
+            [ -n "$model" ] && model_args+=(--model "$model")
+          done
+          if [ "${#model_args[@]}" -eq 0 ]; then
+            echo "::error::HERMES_PROD_EVAL_MODELS resolved to no model ids"
+            exit 1
+          fi
+
+          for scenario in watch_history_top_hashtags watch_history_report_artifact; do
+            out_dir="eval/results/prod/$(date -u +%Y%m%dT%H%M%SZ)-post-deploy-${scenario}"
+            mkdir -p "$out_dir"
+            echo "Running ${scenario} against ${ROOM}"
+            uv run --python 3.12 python -m eval run-room "$scenario" "$ROOM" \
+              --provider "$PROVIDER" \
+              --hmctl-profile "$HMCTL_PROFILE" \
+              --max-tokens 1000000 \
+              --max-llm-calls 60 \
+              --timeout 900 \
+              --output-dir "$out_dir" \
+              "${model_args[@]}"
+            echo "Eval results remain on relay at: $(pwd)/${out_dir}"
+          done
+          REMOTE
+
+      - name: Cleanup SSH key
+        if: always()
+        run: rm -f ~/.ssh/id_ed25519

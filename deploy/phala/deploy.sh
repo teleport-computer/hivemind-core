@@ -420,6 +420,24 @@ sync_env_value() {
     sed -i -E "s|^${key}=.*|${key}=${desired}|" "${env_file}"
 }
 
+delete_env_key() {
+    local env_file="$1"
+    local key="$2"
+
+    if grep -qE "^[[:space:]]*(export[[:space:]]+)?${key}[[:space:]]*=" "${env_file}" 2>/dev/null; then
+        warn "delete_env_key: removing retired ${key}"
+        sed -i -E "/^[[:space:]]*(export[[:space:]]+)?${key}[[:space:]]*=/d" "${env_file}"
+    fi
+}
+
+drop_retired_default_agent_envs() {
+    local env_file="$1"
+
+    delete_env_key "${env_file}" HIVEMIND_DEFAULT_INDEX_AGENT
+    delete_env_key "${env_file}" HIVEMIND_DEFAULT_INDEX_IMAGE
+    delete_env_key "${env_file}" HIVEMIND_DEFAULT_INDEX_HERMES_IMAGE
+}
+
 sync_self_serve_billing_policy() {
     local env_file="$1"
     sync_env_value "${env_file}" HIVEMIND_SELF_SERVE_SIGNUP_ENABLED true
@@ -439,8 +457,6 @@ sync_hermes_default_agents() {
 
     sync_env_value "${env_file}" HIVEMIND_AUTOLOAD_DEFAULT_AGENTS true
     sync_env_value "${env_file}" HIVEMIND_BUNDLED_AGENTS_DIR /app/agents
-    sync_env_value "${env_file}" HIVEMIND_DEFAULT_INDEX_AGENT \
-        default-index-hermes
     sync_env_value "${env_file}" HIVEMIND_DEFAULT_SCOPE_AGENT \
         default-scope-hermes
     sync_env_value "${env_file}" HIVEMIND_DEFAULT_QUERY_AGENT \
@@ -448,8 +464,6 @@ sync_hermes_default_agents() {
     sync_env_value "${env_file}" HIVEMIND_DEFAULT_MEDIATOR_AGENT \
         default-mediator-hermes
     sync_env_value "${env_file}" HIVEMIND_MEDIATOR_ALWAYS_LLM true
-    sync_env_value "${env_file}" HIVEMIND_DEFAULT_INDEX_HERMES_IMAGE \
-        "${image_prefix}/hivemind-default-index-hermes:${image_tag}"
     sync_env_value "${env_file}" HIVEMIND_DEFAULT_SCOPE_HERMES_IMAGE \
         "${image_prefix}/hivemind-default-scope-hermes:${image_tag}"
     sync_env_value "${env_file}" HIVEMIND_DEFAULT_QUERY_HERMES_IMAGE \
@@ -603,6 +617,7 @@ deploy_core() {
     sync_default_llm_model "${ENV_FILE}"
     sync_self_serve_billing_policy "${ENV_FILE}"
     sync_budget_policy "${ENV_FILE}"
+    drop_retired_default_agent_envs "${ENV_FILE}"
     sync_hermes_default_agents "${ENV_FILE}"
     precheck_env  "${CORE_COMPOSE}" "${ENV_FILE}"
     deploy_and_seal "${CORE_NAME}"  "${CORE_COMPOSE}" "${ENV_FILE}"

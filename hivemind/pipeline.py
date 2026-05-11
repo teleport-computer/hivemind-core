@@ -424,7 +424,6 @@ class Pipeline:
         """Execute raw SQL via the store pipeline.
 
         If the SQL is a SELECT, return rows. Otherwise commit and return rowcount.
-        Optionally runs an index agent for pre-processing.
         """
         from .tools import _is_select_only, _references_internal_tables
 

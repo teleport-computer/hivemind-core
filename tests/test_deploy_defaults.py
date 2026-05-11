@@ -10,10 +10,6 @@ def test_phala_compose_defaults_rooms_to_hermes_agents():
     compose = Path("deploy/phala/docker-compose.core.yaml").read_text()
 
     assert (
-        "HIVEMIND_DEFAULT_INDEX_AGENT: "
-        "${HIVEMIND_DEFAULT_INDEX_AGENT:-default-index-hermes}"
-    ) in compose
-    assert (
         "HIVEMIND_DEFAULT_SCOPE_AGENT: "
         "${HIVEMIND_DEFAULT_SCOPE_AGENT:-default-scope-hermes}"
     ) in compose
@@ -25,6 +21,8 @@ def test_phala_compose_defaults_rooms_to_hermes_agents():
         "HIVEMIND_DEFAULT_MEDIATOR_AGENT: "
         "${HIVEMIND_DEFAULT_MEDIATOR_AGENT:-default-mediator-hermes}"
     ) in compose
+    assert "HIVEMIND_DEFAULT_INDEX_AGENT" not in compose
+    assert "HIVEMIND_DEFAULT_INDEX_HERMES_IMAGE" not in compose
     assert "HIVEMIND_ENCLAVE_TLS: ${HIVEMIND_ENCLAVE_TLS:-0}" in compose
     assert 'TARGET_ENDPOINT: "http://hivemind:8100"' in compose
     assert (
@@ -37,7 +35,6 @@ def test_phala_deploy_syncs_default_room_agents_to_hermes():
     deploy_sh = Path("deploy/phala/deploy.sh").read_text()
 
     assert 'local image_tag="${IMAGE_SHA:-latest}"' in deploy_sh
-    assert "HIVEMIND_DEFAULT_INDEX_AGENT \\\n        default-index-hermes" in deploy_sh
     assert "HIVEMIND_DEFAULT_SCOPE_AGENT \\\n        default-scope-hermes" in deploy_sh
     assert "HIVEMIND_DEFAULT_QUERY_AGENT \\\n        default-query-hermes" in deploy_sh
     assert (
@@ -45,10 +42,33 @@ def test_phala_deploy_syncs_default_room_agents_to_hermes():
         in deploy_sh
     )
     assert "ghcr.io/teleport-computer" in deploy_sh
+    assert "hivemind-default-index-hermes" not in deploy_sh
+    assert "drop_retired_default_agent_envs" in deploy_sh
+    assert "delete_env_key \"${env_file}\" HIVEMIND_DEFAULT_INDEX_AGENT" in deploy_sh
+    assert "delete_env_key \"${env_file}\" HIVEMIND_DEFAULT_INDEX_IMAGE" in deploy_sh
+    assert (
+        "delete_env_key \"${env_file}\" HIVEMIND_DEFAULT_INDEX_HERMES_IMAGE"
+        in deploy_sh
+    )
     assert 'hivemind-default-query-hermes:${image_tag}' in deploy_sh
     assert "env_file_has_key HIVEMIND_ENCLAVE_TLS" in deploy_sh
     assert "compose_tls_default" in deploy_sh
     assert "is_truthy" in deploy_sh
+
+
+def test_phala_env_example_excludes_retired_index_defaults():
+    env_example = Path("deploy/phala/.env.example").read_text()
+
+    assert "HIVEMIND_DEFAULT_INDEX_AGENT" not in env_example
+    assert "HIVEMIND_DEFAULT_INDEX_IMAGE" not in env_example
+    assert "hivemind-default-index-hermes" not in env_example
+
+
+def test_default_hermes_build_matrix_excludes_retired_index_agent():
+    workflow = Path(".github/workflows/build-images.yml").read_text()
+
+    assert "role: [query, scope, mediator]" in workflow
+    assert "default-index-hermes" not in workflow
 
 
 def test_phala_deploy_guards_update_vs_create_mode():

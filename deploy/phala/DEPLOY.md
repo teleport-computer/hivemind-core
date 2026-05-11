@@ -16,7 +16,7 @@ App CVM (can redeploy freely)
 +-- host docker socket mount for agent containers
 ```
 
-All agents (scope, query, index, mediator) run as Docker containers inside the App CVM.
+All room agents (scope, query, mediator) run as Docker containers inside the App CVM.
 
 ## Prerequisites
 

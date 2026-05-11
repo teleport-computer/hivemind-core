@@ -79,3 +79,18 @@ The runner records:
 - tokens and settled cost;
 - deterministic grade findings;
 - report artifact filenames and fetched paths when artifacts are enabled.
+
+## Post-Deploy Gate
+
+`.github/workflows/deploy.yml` can run strict Hermes prod canaries after a
+successful core deploy. Set repository variable `HERMES_PROD_EVAL_ROOM` to the
+watch-history room id to enable it. Optional repository variables:
+
+- `HERMES_PROD_EVAL_MODELS` — comma-separated model ids, default `z-ai/glm-5`.
+- `HERMES_PROD_EVAL_PROVIDER` — default `openrouter`.
+- `HERMES_PROD_EVAL_HMCTL_PROFILE` — default `bootstrap`.
+
+The gate runs `watch_history_top_hashtags` and
+`watch_history_report_artifact` with `--max-tokens 1000000`,
+`--max-llm-calls 60`, and `--timeout 900`. It fails deploy follow-up checks on
+utility/privacy regressions, missing report artifacts, or latency over budget.

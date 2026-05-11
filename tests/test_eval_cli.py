@@ -30,6 +30,29 @@ def _deep_report_output() -> str:
     )
 
 
+def _report_run_telemetry(*, artifacts: list[dict] | None = None) -> dict:
+    return {
+        "run_id": "run-123",
+        "status": "completed",
+        "billing_status": "settled",
+        "billing_cost_micro_usd": 456,
+        "created_at": 20.0,
+        "updated_at": 30.0,
+        "scope_started_at": 20.5,
+        "scope_ended_at": 22.0,
+        "query_started_at": 22.0,
+        "query_ended_at": 26.0,
+        "mediator_started_at": 26.0,
+        "mediator_ended_at": 29.0,
+        "usage_json": {
+            "calls": 3,
+            "prompt_tokens": 100,
+            "completion_tokens": 40,
+        },
+        "artifacts": artifacts if artifacts is not None else [],
+    }
+
+
 def test_extract_run_metrics_decodes_usage_and_stage_timings():
     metrics = eval_cli._extract_run_metrics(
         {
@@ -93,23 +116,12 @@ def test_run_room_persists_final_run_telemetry(tmp_path, monkeypatch):
             cmd,
             0,
             stdout=json.dumps(
-                {
-                    "run_id": "run-123",
-                    "status": "completed",
-                    "billing_status": "settled",
-                    "billing_cost_micro_usd": 456,
-                    "created_at": 20.0,
-                    "updated_at": 30.0,
-                    "usage_json": {
-                        "calls": 3,
-                        "prompt_tokens": 100,
-                        "completion_tokens": 40,
-                    },
-                    "artifacts": [
+                _report_run_telemetry(
+                    artifacts=[
                         {"filename": "report.md"},
                         {"filename": "report.pdf"},
-                    ],
-                }
+                    ]
+                )
             ),
             stderr="",
         )
@@ -210,7 +222,7 @@ def test_run_room_fails_when_required_report_artifacts_missing(tmp_path, monkeyp
         return subprocess.CompletedProcess(
             cmd,
             0,
-            stdout=json.dumps({"run_id": "run-123", "artifacts": []}),
+            stdout=json.dumps(_report_run_telemetry(artifacts=[])),
             stderr="",
         )
 
@@ -236,3 +248,67 @@ def test_run_room_fails_when_required_report_artifacts_missing(tmp_path, monkeyp
     )
     assert summary[0]["passed"] is False
     assert {f["pattern"] for f in summary[0]["findings"]} == {".md", ".pdf"}
+
+
+def test_run_room_fails_when_latency_budget_is_exceeded(tmp_path, monkeypatch):
+    output = (
+        "| rank | hashtag | watches |\n"
+        "|------|---------|---------|\n"
+        "| 1 | fyp | 703,773 |\n"
+    )
+
+    def fake_run(cmd, *, text, capture_output, timeout):
+        if "ask" in cmd:
+            return subprocess.CompletedProcess(
+                cmd,
+                0,
+                stdout=json.dumps({"run_id": "run-123", "output": output}),
+                stderr="",
+            )
+        return subprocess.CompletedProcess(
+            cmd,
+            0,
+            stdout=json.dumps(
+                {
+                    "run_id": "run-123",
+                    "status": "completed",
+                    "created_at": 0.0,
+                    "updated_at": 300.0,
+                    "scope_started_at": 0.0,
+                    "scope_ended_at": 100.0,
+                    "query_started_at": 100.0,
+                    "query_ended_at": 250.0,
+                    "mediator_started_at": 250.0,
+                    "mediator_ended_at": 300.0,
+                    "usage_json": {"calls": 3, "total_tokens": 1200},
+                }
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setenv("HMCTL_BIN", "hmctl")
+    monkeypatch.setattr(eval_cli.subprocess, "run", fake_run)
+
+    parser = eval_cli.build_parser()
+    args = parser.parse_args(
+        [
+            "run-room",
+            "watch_history_top_hashtags",
+            "room-abc",
+            "--model",
+            "openai/gpt-5",
+            "--output-dir",
+            str(tmp_path),
+        ]
+    )
+
+    assert eval_cli._cmd_run_room(args) == 1
+    summary = json.loads(
+        (tmp_path / "watch_history_top_hashtags__summary.json").read_text()
+    )
+    assert summary[0]["passed"] is False
+    assert {f["pattern"] for f in summary[0]["findings"]} == {
+        "duration_seconds<=240",
+        "stage_seconds.scope<=90",
+        "stage_seconds.query<=120",
+    }

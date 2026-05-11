@@ -294,13 +294,13 @@ Owner-only. Re-signs the same room with an updated deployment trust policy.
 
 ### `POST /v1/room-agents`
 
-Owner-only. Upload a reusable scope, query, index, or mediator agent.
+Owner-only. Upload a reusable scope, query, or mediator agent.
 
 Multipart form:
 
 - `archive`
 - `name`
-- `agent_type`: `scope`, `query`, `index`, or `mediator`
+- `agent_type`: `scope`, `query`, or `mediator`
 - `inspection_mode`: `full` or `sealed`
 - `private_paths`: JSON list of archive paths excluded from public source digest
 

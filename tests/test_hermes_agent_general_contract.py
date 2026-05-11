@@ -186,7 +186,6 @@ def test_hermes_default_agents_do_not_include_deterministic_fallbacks():
 
 def test_hermes_default_images_do_not_shadow_hermes_agent_package():
     dockerfiles = (
-        ROOT / "agents/default-index-hermes/Dockerfile",
         ROOT / "agents/default-query-hermes/Dockerfile",
         ROOT / "agents/default-scope-hermes/Dockerfile",
         ROOT / "agents/default-mediator-hermes/Dockerfile",

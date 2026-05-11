@@ -178,6 +178,21 @@ class TestAuth:
         assert resp.status_code == 401
 
 
+class TestRoomAgentUpload:
+    @pytest.mark.asyncio
+    async def test_upload_rejects_retired_index_agent_type(self, server_env):
+        client, api_key = server_env
+        resp = await client.post(
+            "/v1/room-agents",
+            headers=_owner_headers(api_key),
+            data={"name": "old-index", "agent_type": "index"},
+            files={"archive": ("agent.tar.gz", b"not-read", "application/gzip")},
+        )
+
+        assert resp.status_code == 400
+        assert resp.json()["detail"] == "agent_type must be one of: mediator, query, scope"
+
+
 class TestAdminSchema:
     @pytest.mark.asyncio
     async def test_get_schema(self, server_env):

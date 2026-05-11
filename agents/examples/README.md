@@ -4,14 +4,17 @@ Ready-to-upload example agents for hivemind-core. Each directory is self-contain
 
 ## Default Agents
 
-The built-in default agents (`agents/default-query/`, `default-scope/`, `default-mediator/`, `default-index/`) all use the **Claude Agent SDK** with MCP tools. They share a common bridge helper (`agents/default-common/_bridge.py`) and use `hivemind-agent-base` as their Docker base image.
+The hosted default room agents use the Hermes harness:
+`agents/default-query-hermes/`, `agents/default-scope-hermes/`, and
+`agents/default-mediator-hermes/`. The older Claude Agent SDK defaults remain
+in-tree for compatibility/reference work, but they are not the hosted default.
 
 ```bash
-# Build base image first
-docker build -t hivemind-agent-base -f agents/base/Dockerfile agents/base/
+# Build base Hermes image first
+docker build -t hivemind-agent-base-hermes -f agents/base-hermes/Dockerfile agents/base-hermes/
 
-# Build any default agent
-docker build -t hivemind-default-query agents/default-query/
+# Build any hosted default Hermes agent
+docker build -t hivemind-default-query-hermes agents/default-query-hermes/
 ```
 
 ## Upload an Example
@@ -116,7 +119,7 @@ Shows the mediator audit pattern.
 **Enforced** (all agents receive, cannot bypass):
 - `BRIDGE_URL` — HTTP endpoint for the bridge server (only allowed network exit)
 - `SESSION_TOKEN` — Bearer token for bridge authentication
-- `AGENT_ROLE` — Role identifier (query, scope, mediator, index)
+- `AGENT_ROLE` — Role identifier (query, scope, mediator)
 - `BUDGET_MAX_TOKENS` — Total token budget allocated for this run
 - `BUDGET_MAX_CALLS` — Total LLM call budget allocated for this run
 - `OPENAI_BASE_URL` — Points to bridge's `/v1` path. Standard OpenAI SDKs auto-route through the bridge
@@ -131,7 +134,6 @@ Shows the mediator audit pattern.
 | **query** | `QUERY_PROMPT` |
 | **scope** | `QUERY_PROMPT`, `QUERY_AGENT_ID` |
 | **mediator** | `RAW_OUTPUT`, `QUERY_PROMPT` |
-| **index** | `DOCUMENT_DATA`, `DOCUMENT_METADATA` |
 
 ### Bridge API
 
@@ -157,4 +159,3 @@ Agents write their output to **stdout** and exit with code 0.
 | **query** | Plain text answer |
 | **scope** | `{"scope_fn": "def scope(sql, params, rows): ..."}` |
 | **mediator** | Filtered/audited text |
-| **index** | `{"index_text": "...", "metadata": {...}}` |

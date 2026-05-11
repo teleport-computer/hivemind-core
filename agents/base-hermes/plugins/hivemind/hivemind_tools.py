@@ -10,7 +10,7 @@ tools exist; the mediator gets nothing at all.
 Env vars (set by the sandbox runner before launching `hermes -z ...`):
   BRIDGE_URL          — base URL of this session's bridge
   SESSION_TOKEN       — bearer token for bridge auth
-  HIVEMIND_AGENT_ROLE — query | index | scope | mediator (unset → no tools)
+  HIVEMIND_AGENT_ROLE — query | scope | mediator (unset → no tools)
   QUERY_AGENT_ID      — scope-only: target query agent for simulate*
   QUERY_PROMPT        — scope-only: default prompt for simulate* when caller omits
 """
@@ -488,7 +488,6 @@ async def simulate_multi_handler(args: dict[str, Any], **_kw) -> str:
 # Roles match the access levels in hivemind/sandbox/tools.py:
 #   query        → execute_sql, get_schema, upload_artifact,
 #                  upload_report_artifact
-#   index        → execute_sql, get_schema
 #   scope        → execute_sql, get_schema, verify_scope_fn,
 #                  simulate_query, simulate_multi
 #   mediator     → nothing (tools=[] in current default-mediator)
@@ -508,7 +507,6 @@ _ROLE_TOOLS: dict[str, set[str]] = {
         "upload_artifact",
         "upload_report_artifact",
     },
-    "index": {"execute_sql", "get_schema"},
     "scope": {
         "execute_sql",
         "get_schema",

@@ -60,7 +60,7 @@ def register_agent_upload_routes(
     _billing_provider_for_room = billing_provider_for_room
     _billing_models_for_query = billing_models_for_query
 
-    from ..sandbox.models import AgentConfig
+    from ..sandbox.models import AgentConfig, VALID_AGENT_TYPES
 
     # ── Room agent upload ──
 
@@ -84,6 +84,13 @@ def register_agent_upload_routes(
         inspection_mode: str = Form("full"),
         hm: Hivemind = Depends(get_tenant_hive),
     ):
+        normalized_agent_type = str(agent_type or "query").strip().lower()
+        if normalized_agent_type not in VALID_AGENT_TYPES:
+            allowed = ", ".join(sorted(VALID_AGENT_TYPES))
+            raise HTTPException(
+                status_code=400,
+                detail=f"agent_type must be one of: {allowed}",
+            )
         try:
             parsed_private = json.loads(private_paths) if private_paths else []
             if not isinstance(parsed_private, list) or not all(
@@ -140,7 +147,7 @@ def register_agent_upload_routes(
                     runner,
                     tmpdir,
                     agent_id,
-                    agent_type,
+                    normalized_agent_type,
                     name,
                     description,
                     entrypoint,
