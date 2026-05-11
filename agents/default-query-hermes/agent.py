@@ -226,6 +226,20 @@ _UNRESOLVED_RESPONSE_MARKERS = (
     "full report content is available in my previous response",
     "i have completed a deep research-level report",
 )
+_RANK_HEADER_NAMES = {"rank", "#", "position"}
+_METRIC_HEADER_MARKERS = (
+    "count",
+    "watch",
+    "watches",
+    "total",
+    "views",
+    "likes",
+    "comments",
+    "shares",
+    "occurrences",
+    "records",
+    "rows",
+)
 
 
 def _completion_token_cap(default: int = 8192, hard_cap: int = 16384) -> int:
@@ -302,6 +316,103 @@ def _looks_like_retriable_runtime_failure(text: str) -> bool:
 def _looks_like_unresolved_response(text: str) -> bool:
     lower = (text or "").lower()
     return any(marker in lower for marker in _UNRESOLVED_RESPONSE_MARKERS)
+
+
+def _markdown_cells(line: str) -> list[str]:
+    stripped = line.strip()
+    if not stripped.startswith("|") or "|" not in stripped[1:]:
+        return []
+    return [cell.strip() for cell in stripped.strip("|").split("|")]
+
+
+def _is_markdown_separator(cells: list[str]) -> bool:
+    return bool(cells) and all(re.fullmatch(r":?-{3,}:?", cell.strip()) for cell in cells)
+
+
+def _parse_number(value: str) -> float | None:
+    cleaned = re.sub(r"[^0-9.\-]+", "", value or "")
+    if not cleaned or cleaned in {"-", ".", "-."}:
+        return None
+    try:
+        return float(cleaned)
+    except ValueError:
+        return None
+
+
+def _normal_label(value: str) -> str:
+    return re.sub(r"\s+", " ", (value or "").strip().strip("`\"'[]")).lower()
+
+
+def _looks_like_fragmented_ranking_table(text: str) -> bool:
+    lines = (text or "").splitlines()
+    idx = 0
+    while idx < len(lines):
+        header = _markdown_cells(lines[idx])
+        if not header:
+            idx += 1
+            continue
+        if idx + 1 >= len(lines):
+            idx += 1
+            continue
+        sep = _markdown_cells(lines[idx + 1])
+        if not _is_markdown_separator(sep):
+            idx += 1
+            continue
+
+        headers = [h.lower().strip() for h in header]
+        rank_idx = next(
+            (i for i, h in enumerate(headers) if h in _RANK_HEADER_NAMES),
+            None,
+        )
+        metric_idx = next(
+            (
+                i
+                for i, h in enumerate(headers)
+                if any(marker in h for marker in _METRIC_HEADER_MARKERS)
+            ),
+            None,
+        )
+        if rank_idx is None or metric_idx is None:
+            idx += 2
+            continue
+
+        label_idx = next(
+            (
+                i
+                for i, h in enumerate(headers)
+                if i not in {rank_idx, metric_idx} and h
+            ),
+            None,
+        )
+        if label_idx is None:
+            idx += 2
+            continue
+
+        seen_labels: set[str] = set()
+        previous_metric: float | None = None
+        row_count = 0
+        cursor = idx + 2
+        while cursor < len(lines):
+            cells = _markdown_cells(lines[cursor])
+            if not cells or len(cells) < len(headers):
+                break
+            row_count += 1
+            label = _normal_label(cells[label_idx])
+            metric = _parse_number(cells[metric_idx])
+            if label and label in seen_labels:
+                return True
+            if label:
+                seen_labels.add(label)
+            if metric is not None:
+                if previous_metric is not None and metric > previous_metric:
+                    return True
+                previous_metric = metric
+            cursor += 1
+
+        if row_count > 1:
+            return False
+        idx = max(cursor, idx + 2)
+    return False
 
 
 def _bridge_url() -> str:
@@ -590,7 +701,10 @@ def _retry_body(body: str, reason: str, previous_response: str) -> str:
         "queries before concluding the data cannot support a report. Your "
         "final answer must be the report itself, not a work summary, progress "
         "log, or reference to a previous response. Do not ask the user for "
-        "schema, columns, or date formats that can be discovered with tools.\n\n"
+        "schema, columns, or date formats that can be discovered with tools. "
+        "For ranking-table quality failures, rerun the aggregate SQL and "
+        "group by the exact cleaned label you will display, combine duplicate "
+        "labels before ranking, and sort by the metric descending.\n\n"
         f"PREVIOUS RESPONSE:\n{previous}"
     )
 
@@ -677,6 +791,20 @@ def main() -> None:
         if answer := _retry_query_agent(
             body,
             reason="unresolved query harness response",
+            previous_response=response,
+        ):
+            print(answer)
+            return
+        print(_user_facing_fallback())
+        return
+    if _looks_like_fragmented_ranking_table(response):
+        print(f"Fragmented ranking table from query harness: {response[:500]}", file=sys.stderr)
+        if answer := _retry_query_agent(
+            body,
+            reason=(
+                "ranking-table quality failure: duplicate labels or "
+                "non-descending metrics"
+            ),
             previous_response=response,
         ):
             print(answer)

@@ -542,6 +542,40 @@ def test_query_agent_retries_empty_response(
     assert "FINALIZATION INSTRUCTION" in calls["llm_payloads"][1]["messages"][-1]["content"]
 
 
+def test_query_agent_retries_fragmented_ranking_table(
+    monkeypatch,
+    capsys,
+):
+    monkeypatch.setenv("QUERY_PROMPT", "Show the top categories by count.")
+    fragmented = (
+        "| rank | category | count |\n"
+        "|---|---|---|\n"
+        "| 1 | alpha | 10 |\n"
+        "| 2 | alpha | 7 |\n"
+        "| 3 | beta | 8 |\n"
+    )
+    fixed = (
+        "| rank | category | count |\n"
+        "|---|---|---|\n"
+        "| 1 | alpha | 17 |\n"
+        "| 2 | beta | 8 |\n"
+    )
+    mod, calls = _load_query_agent(
+        monkeypatch,
+        "default_query_hermes_retry_fragmented_ranking_contract_test",
+        chat_responses=[_chat_response(fragmented), _chat_response(fixed)],
+    )
+
+    mod.main()
+
+    captured = capsys.readouterr()
+    assert captured.out.strip() == fixed.strip()
+    assert len(calls["llm_payloads"]) == 2
+    retry_body = calls["llm_payloads"][1]["messages"][1]["content"]
+    assert "ranking-table quality failure" in retry_body
+    assert "combine duplicate labels" in retry_body
+
+
 def test_query_agent_retries_retriable_runtime_failure(
     monkeypatch,
     capsys,
