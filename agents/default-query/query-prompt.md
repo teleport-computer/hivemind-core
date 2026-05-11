@@ -28,5 +28,9 @@ grouping key; do not group by a raw array/string and then display only one
 cleaned item from it. If duplicate identical labels appear in tool results,
 combine them before ranking or answering.
 
+For exact counts or top-N rankings, do not sample and do not apply `LIMIT`
+before the grouping/counting step. Use SQL to compute over all matching rows,
+then `ORDER BY` the metric and `LIMIT` only the final ranked result.
+
 Call `get_schema` before your first SQL unless the provided scope function
 already gives you every table and column needed.
