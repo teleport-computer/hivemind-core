@@ -558,19 +558,70 @@ jobs:
             profile_args=(--hmctl-profile "$HMCTL_PROFILE")
           fi
 
+          is_transient_submit_failure() {
+            local summary="$1"
+            python3 - "$summary" <<'PY'
+          import json
+          import sys
+
+          path = sys.argv[1]
+          try:
+              rows = json.load(open(path, encoding="utf-8"))
+          except Exception:
+              raise SystemExit(1)
+
+          failed_findings = [
+              finding
+              for row in rows
+              if not row.get("passed")
+              for finding in (row.get("findings") or [])
+          ]
+          if not failed_findings:
+              raise SystemExit(1)
+
+          transient_needles = ("502", "503", "504", "Gateway Time-out", "Gateway Timeout")
+          for finding in failed_findings:
+              if finding.get("kind") != "room_ask_command_failed":
+                  raise SystemExit(1)
+              text = " ".join(
+                  str(finding.get(key) or "")
+                  for key in ("pattern", "message", "matched_text")
+              )
+              if not any(needle in text for needle in transient_needles):
+                  raise SystemExit(1)
+          raise SystemExit(0)
+          PY
+          }
+
+          echo "Waiting for post-deploy gateway/app warmup before canaries"
+          sleep 60
+
           for scenario in watch_history_top_hashtags watch_history_report_artifact; do
-            out_dir="eval/results/prod/$(date -u +%Y%m%dT%H%M%SZ)-post-deploy-${scenario}"
-            mkdir -p "$out_dir"
-            echo "Running ${scenario} against ${ROOM}"
-            uv run --python 3.12 python -m eval run-room "$scenario" "$ROOM" \
-              --provider "$PROVIDER" \
-              "${profile_args[@]}" \
-              --max-tokens 1000000 \
-              --max-llm-calls 60 \
-              --timeout 900 \
-              --output-dir "$out_dir" \
-              "${model_args[@]}"
-            echo "Eval results remain on relay at: $(pwd)/${out_dir}"
+            for attempt in 1 2 3; do
+              out_dir="eval/results/prod/$(date -u +%Y%m%dT%H%M%SZ)-post-deploy-${scenario}-attempt-${attempt}"
+              mkdir -p "$out_dir"
+              echo "Running ${scenario} against ${ROOM} (attempt ${attempt}/3)"
+              if uv run --python 3.12 python -m eval run-room "$scenario" "$ROOM" \
+                --provider "$PROVIDER" \
+                "${profile_args[@]}" \
+                --max-tokens 1000000 \
+                --max-llm-calls 60 \
+                --timeout 900 \
+                --output-dir "$out_dir" \
+                "${model_args[@]}"; then
+                echo "Eval results remain on relay at: $(pwd)/${out_dir}"
+                break
+              fi
+
+              summary="${out_dir}/${scenario}__summary.json"
+              if [ "$attempt" -lt 3 ] && is_transient_submit_failure "$summary"; then
+                echo "Transient room-submit gateway failure; retrying after warmup"
+                sleep $((attempt * 60))
+                continue
+              fi
+              echo "Eval failed; results remain on relay at: $(pwd)/${out_dir}"
+              exit 1
+            done
           done
           REMOTE
 

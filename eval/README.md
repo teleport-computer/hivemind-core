@@ -99,3 +99,5 @@ The gate runs `watch_history_top_hashtags` and
 `watch_history_report_artifact` with `--max-tokens 1000000`,
 `--max-llm-calls 60`, and `--timeout 900`. It fails deploy follow-up checks on
 utility/privacy regressions, missing report artifacts, or latency over budget.
+Immediately after a CVM redeploy it retries transient room-submit 502/503/504
+gateway failures, but it does not retry deterministic grading failures.
