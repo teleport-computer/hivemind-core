@@ -22,5 +22,11 @@ summaries, compute the statistic in SQL and return the scoped result; for
 row-level questions, request row-level data and let the scope function
 apply the room policy.
 
+For top-N or categorical rankings over list-like fields, parse or unnest
+individual items first. The displayed cleaned label must also be the SQL
+grouping key; do not group by a raw array/string and then display only one
+cleaned item from it. If duplicate identical labels appear in tool results,
+combine them before ranking or answering.
+
 Call `get_schema` before your first SQL unless the provided scope function
 already gives you every table and column needed.
