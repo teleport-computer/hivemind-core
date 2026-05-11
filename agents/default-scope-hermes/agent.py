@@ -115,6 +115,9 @@ summary rows, redacts obvious raw identifiers/URLs/secrets if they appear, and
 then verify it. Target one get_schema call, zero or one execute_sql shape check,
 and one verify_scope_fn call. Avoid simulate_query/simulate_multi unless the
 policy boundary is genuinely ambiguous.
+Use list_query_agent_files/read_query_agent_file only when the question asks
+about the query agent or the policy boundary depends on its implementation.
+Do not inspect query source just to answer ordinary analytical/report prompts.
 
 Function contract:
 - Signature exactly `def scope(sql, params, rows):`.

@@ -84,6 +84,9 @@ For research/report prompts, meet a higher bar:
 - Gather several independent evidence slices when budget allows: dataset
   size/range, top entities, temporal pattern, concentration/distribution,
   trend/lifecycle movement, and data-quality checks.
+- Batch related metrics into compact SQL queries instead of issuing one query
+  per paragraph. Prefer enough evidence to support the report over exhaustive
+  exploration.
 - Use at least one compact table and one interpretation-heavy finding section.
 - State what the scoped data can and cannot support, but still produce the
   strongest supported report when any useful scoped evidence exists.
@@ -242,6 +245,15 @@ def _max_tool_turns() -> int:
     budget_limited = max(0, _budget_max_calls() - reserve)
     default = 10 if _is_research_prompt() else 4
     return max(0, min(default, budget_limited))
+
+
+def _max_sql_calls() -> int:
+    if raw := os.environ.get("HIVEMIND_QUERY_MAX_SQL_CALLS"):
+        try:
+            return max(1, int(raw))
+        except ValueError:
+            pass
+    return 12 if _is_research_prompt() else 4
 
 
 def _is_research_prompt() -> bool:
@@ -455,14 +467,15 @@ def _user_facing_fallback() -> str:
 
 
 def _run_query_agent(body: str) -> str:
+    max_sql_calls = _max_sql_calls()
     system_prompt = (
         f"{SYSTEM_PROMPT}\n\n"
         "Harness behavior: you may use get_schema and execute_sql for evidence. "
         "The harness reserves a final no-tool drafting call, so do not spend "
         "turns indefinitely gathering more SQL. For research/report prompts, "
-        "aim for 6-12 targeted SQL calls, then draft the report. The harness "
-        "will upload Markdown/PDF artifacts from a substantial final report "
-        "when the room permits artifacts."
+        f"aim for 5-8 targeted SQL calls and at most {max_sql_calls}; then "
+        "draft the report. The harness will upload Markdown/PDF artifacts "
+        "from a substantial final report when the room permits artifacts."
     )
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": system_prompt},
@@ -476,6 +489,10 @@ def _run_query_agent(body: str) -> str:
     final_tokens = _completion_token_cap(
         default=12288 if _is_research_prompt() else 8192,
         hard_cap=16384,
+    )
+    sql_calls = 0
+    finalization_reason = (
+        "tool evidence budget reached" if tool_turns else "no tool turns available"
     )
 
     for turn_idx in range(tool_turns):
@@ -499,10 +516,21 @@ def _run_query_agent(body: str) -> str:
             name = str(fn.get("name") or "")
             args = _parse_tool_args(fn.get("arguments"))
             call_id = str(call.get("id") or f"call_{turn_idx}_{name}")
-            try:
-                result = _call_query_tool(name, args)
-            except Exception as e:
-                result = f"Error: {type(e).__name__}: {e}"
+            if name == "execute_sql" and sql_calls >= max_sql_calls:
+                result = (
+                    "Error: SQL evidence budget reached; stop using tools "
+                    "and draft the final answer from the evidence already gathered."
+                )
+                finalization_reason = "SQL evidence budget reached"
+            else:
+                try:
+                    result = _call_query_tool(name, args)
+                    if name == "execute_sql":
+                        sql_calls += 1
+                        if sql_calls >= max_sql_calls:
+                            finalization_reason = "SQL evidence budget reached"
+                except Exception as e:
+                    result = f"Error: {type(e).__name__}: {e}"
             messages.append(
                 {
                     "role": "tool",
@@ -511,13 +539,13 @@ def _run_query_agent(body: str) -> str:
                     "content": result,
                 }
             )
+        if sql_calls >= max_sql_calls:
+            break
 
     messages.append(
         {
             "role": "user",
-            "content": _finalization_instruction(
-                "tool evidence budget reached" if tool_turns else "no tool turns available"
-            ),
+            "content": _finalization_instruction(finalization_reason),
         }
     )
     message, _finish_reason = _chat_completion(

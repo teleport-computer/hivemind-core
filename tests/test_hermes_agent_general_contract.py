@@ -343,6 +343,48 @@ def test_query_agent_forces_final_answer_after_tool_turn_cap_and_uploads_report(
     ]
 
 
+def test_query_agent_caps_research_sql_calls_before_final_draft(
+    monkeypatch,
+    capsys,
+):
+    monkeypatch.setenv("QUERY_PROMPT", "Write a deep research report.")
+    monkeypatch.setenv("HIVEMIND_QUERY_MAX_SQL_CALLS", "1")
+    report = "# Capped Report\n\n" + ("evidence finding implication limitation " * 140)
+    mod, calls = _load_query_agent(
+        monkeypatch,
+        "default_query_hermes_sql_cap_contract_test",
+        chat_responses=[
+            _chat_response(
+                "",
+                tool_calls=[
+                    _tool_call(
+                        "execute_sql",
+                        {"sql": "SELECT bucket, COUNT(*) FROM events GROUP BY bucket"},
+                        call_id="call_1",
+                    ),
+                    _tool_call(
+                        "execute_sql",
+                        {"sql": "SELECT category, COUNT(*) FROM events GROUP BY category"},
+                        call_id="call_2",
+                    ),
+                ],
+            ),
+            _chat_response(report),
+        ],
+        tool_results={"execute_sql": '[{"bucket": "launch", "count": 42}]'},
+    )
+
+    mod.main()
+
+    captured = capsys.readouterr()
+    assert captured.out.startswith("# Capped Report")
+    assert [name for name, _payload in calls["tool_payloads"]] == ["execute_sql"]
+    final_payload = calls["llm_payloads"][1]
+    tool_messages = [m for m in final_payload["messages"] if m["role"] == "tool"]
+    assert "SQL evidence budget reached" in tool_messages[-1]["content"]
+    assert "SQL evidence budget reached" in final_payload["messages"][-1]["content"]
+
+
 def test_query_agent_uploads_report_when_model_stops_before_tool_cap(
     monkeypatch,
     capsys,
@@ -778,6 +820,7 @@ def test_scope_prompt_centers_privacy_utility_frontier():
     assert "Preserve useful information" in source
     assert "simulate_multi" in source
     assert "verify_scope_fn" in source
+    assert "Do not inspect query source just to answer ordinary" in source
 
 
 def test_query_prompt_is_tool_aware_without_canned_policy():
