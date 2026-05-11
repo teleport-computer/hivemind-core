@@ -19,7 +19,7 @@ WATCH_HISTORY_TOP_HASHTAGS = Scenario(
         r"\bhashtag\b",
         r"\bwatches\b",
         r"\|\s*1\s*\|",
-        r"\|\s*1\s*\|\s*fyp\s*\|\s*7\d{5}\s*\|",
+        r"\|\s*1\s*\|\s*fyp\s*\|\s*7\d{2},?\d{3}\s*\|",
     ),
     forbidden_patterns=(
         r"https?://",

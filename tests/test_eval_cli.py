@@ -176,7 +176,7 @@ def test_top_hashtags_grade_rejects_fragmented_or_view_sum_table():
     good = (
         "| rank | hashtag | watches |\n"
         "|------|---------|---------|\n"
-        "| 1 | fyp | 709721 |\n"
+        "| 1 | fyp | 703,773 |\n"
     )
     bad = (
         "| rank | hashtag | watches |\n"
