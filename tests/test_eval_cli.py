@@ -209,12 +209,20 @@ def test_top_hashtags_grade_rejects_fragmented_or_view_sum_table():
 
 
 def test_top_hashtags_grade_rejects_blank_labels():
+    prod_like = (
+        "| rank | hashtag | watches |\n"
+        "|---|---:|---:|\n"
+        "| 1 | fyp | 703773 |\n"
+        "| 2 | viral | 201314 |\n"
+    )
     blank = (
         "| rank | hashtag | watches |\n"
         "|------|---------|---------|\n"
         "| 1 | fyp | 703773 |\n"
         "| 2 |  | 457979 |\n"
     )
+
+    assert grade_text(prod_like, SCENARIOS["watch_history_top_hashtags"]).passed is True
 
     result = grade_text(blank, SCENARIOS["watch_history_top_hashtags"])
 
