@@ -46,6 +46,9 @@ surface.
 - Tuned query-Hermes SQL budgets by requested output depth: short answers and
   tables default to two SQL calls, while substantial reports/studies/PDF-style
   outputs keep the larger evidence budget.
+- Added a final generic table-integrity instruction for query-Hermes answers so
+  categorical rankings merge duplicate displayed labels and omit blank labels
+  unless the user explicitly asks for missing values.
 - Moved expensive scope-Hermes simulation/source-inspection tools behind
   explicit opt-in environment flags so ordinary scoped analytical runs stay on
   the fast schema/SQL path.

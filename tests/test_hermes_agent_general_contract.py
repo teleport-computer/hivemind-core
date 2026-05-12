@@ -371,7 +371,9 @@ def test_query_agent_forces_final_answer_after_tool_turn_cap_and_uploads_report(
     assert len(calls["llm_payloads"]) == 2
     assert "tools" in calls["llm_payloads"][0]
     assert "tools" not in calls["llm_payloads"][1]
-    assert "FINALIZATION INSTRUCTION" in calls["llm_payloads"][1]["messages"][-1]["content"]
+    final_instruction = calls["llm_payloads"][1]["messages"][-1]["content"]
+    assert "FINALIZATION INSTRUCTION" in final_instruction
+    assert "do not list the same displayed label twice" in final_instruction
     assert calls["artifact_payloads"] == [
         {
             "filename": "write_a_deep_research_report_and_upload_a_pdf_when_possible",

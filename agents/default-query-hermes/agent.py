@@ -426,7 +426,12 @@ def _finalization_instruction(reason: str) -> str:
         "Markdown report text now. If the evidence is imperfect, give the "
         "strongest defensible answer and state limitations precisely. Do not "
         "provide a progress log, describe future tool attempts, expose tool "
-        "traces, or say the answer is available elsewhere."
+        "traces, or say the answer is available elsewhere. If the final answer "
+        "is a categorical ranking or table, perform a final integrity pass "
+        "before writing it: do not include blank labels unless the user asked "
+        "for missing values, do not list the same displayed label twice, sum "
+        "duplicate displayed labels when the metric is additive, then sort and "
+        "rank the merged rows by the requested metric."
     )
 
 
