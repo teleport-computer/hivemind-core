@@ -24,6 +24,7 @@ import os
 import sys
 import json
 import re
+import unicodedata
 from pathlib import Path
 from typing import Any
 
@@ -280,7 +281,7 @@ def _max_tool_turns() -> int:
     # earlier; this is an upper bound, not a forced query count.
     reserve = 2
     budget_limited = max(0, _budget_max_calls() - reserve)
-    default = 10
+    default = 6
     return max(0, min(default, budget_limited))
 
 
@@ -290,7 +291,12 @@ def _max_sql_calls() -> int:
             return max(1, int(raw))
         except ValueError:
             pass
-    return 12
+    return 5
+
+
+def _sanitize_output_text(text: str) -> str:
+    """Strip invisible format controls that can corrupt visible tables."""
+    return "".join(ch for ch in text if unicodedata.category(ch) != "Cf")
 
 
 def _looks_like_runtime_failure(text: str) -> bool:
@@ -638,6 +644,7 @@ def _run_query_agent(body: str) -> str:
         content = (message.get("content") or "").strip()
         if not tool_calls:
             if content:
+                content = _sanitize_output_text(content)
                 _maybe_upload_report_artifact(content)
                 return content
             break
@@ -689,6 +696,7 @@ def _run_query_agent(body: str) -> str:
     response = (message.get("content") or "").strip()
     if not response:
         return ""
+    response = _sanitize_output_text(response)
     _maybe_upload_report_artifact(response)
     return response
 

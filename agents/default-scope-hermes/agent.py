@@ -5,17 +5,14 @@ transforms the query agent's rows before they reach the user, given a
 question + an optional room policy. Emits a single JSON object
 `{"scope_fn": "..."}` on the final line of stdout.
 
-Uses Hermes' Python AIAgent API. The system prompt below is a focused
-distillation of the Claude-Code scope prompt — it omits workspace-mount
-and Write-tool workflows that Hermes doesn't expose. If empirical eval
-shows the agent needs deeper playbook material mid-loop, promote those
-sections to a Hermes skill (markdown under HERMES_BUNDLED_PLUGINS or
-HERMES_HOME/skills) and preload via toolsets/skills config.
+Uses the sandbox bridge's OpenAI-compatible endpoint directly so the harness
+can keep scope design bounded. The scope agent may inspect schema or a small
+sample when useful, but the query agent does the research.
 
 Env (set automatically by the sandbox runner):
   BRIDGE_URL, SESSION_TOKEN  — bridge connection
   HIVEMIND_AGENT_ROLE=scope  — plugin registers verify/simulate tools
-  HIVEMIND_MODEL             — model id passed to AIAgent
+  HIVEMIND_MODEL             — model id passed to the bridge LLM endpoint
   QUERY_PROMPT               — the user's question
   QUERY_AGENT_ID             — the query agent simulate_* will run
   POLICY_CONTEXT             — optional room policy to enforce
@@ -27,8 +24,8 @@ import json
 import os
 import re
 import sys
-from contextlib import redirect_stdout
 from pathlib import Path
+from typing import Any
 
 import httpx
 
@@ -56,8 +53,6 @@ def _isolate_hivemind_toolset() -> None:
 _isolate_hivemind_toolset()
 import hivemind  # noqa: E402, F401
 
-from run_agent import AIAgent  # noqa: E402
-
 QUERY_PROMPT = os.environ.get("QUERY_PROMPT", "")
 QUERY_AGENT_ID = os.environ.get("QUERY_AGENT_ID", "")
 POLICY_CONTEXT = os.environ.get("POLICY_CONTEXT", "").strip()
@@ -79,19 +74,13 @@ can be transformed into it. Do not suppress allowed summary metrics,
 allowed row-level records, allowed identifiers, or allowed derived fields just
 because another policy might forbid them.
 
-For analytical/report prompts, useful disclosure is often aggregate or
-statistical SQL output. If policy allows that shape, preserve grouping/bucket
-fields plus metric fields, even when aliases are domain-specific instead of
-generic names like count, total, sum, min, max, or avg. Return an empty list
-only after you have no policy-compliant useful disclosure to preserve.
-
 Default tools:
 - get_schema(): inspect tables, columns, and types.
 - execute_sql(sql, params): sample or compute facts needed for the policy.
-- verify_scope_fn(source, tests): fast compile/test of your candidate.
-Expensive downstream simulation and query-agent source inspection are advanced
-tools that may be enabled by deployment policy, but they are not part of the
-default fast path.
+The harness compiles and verifies the exact scope_fn you emit. Expensive
+downstream simulation and query-agent source inspection are advanced tools
+that may be enabled by deployment policy, but they are not part of the default
+fast path.
 
 Process:
 1. Read the policy and question.
@@ -99,23 +88,17 @@ Process:
    the data shape or policy boundary.
 3. Draft the least destructive compliant transform: pass through, filter rows,
    drop or replace fields, derive safer fields, summarize, or return no rows.
-4. Use verify_scope_fn on the exact function you will emit.
-5. Once that exact function compiles and passes your tests, stop using tools and
-   emit it as the final JSON. Do not keep comparing alternatives unless the
-   verified function clearly violates the policy.
+4. Emit that transform as final JSON. Do not keep comparing alternatives unless
+   the candidate clearly violates the policy.
 Stay in your lane: scope designs the privacy transform. The query agent will
 do the research. Do not spend turns researching trends, lifecycles, categories,
-or final report evidence. For broad analytical/report prompts with no explicit
-restrictive policy, prefer a compact transform that preserves aggregate and
-summary rows, redacts obvious raw identifiers/URLs/secrets if they appear, and
-then verify it. Target one get_schema call, zero or one execute_sql shape check,
-and one verify_scope_fn call. The default path is a short decision loop, not a
-research phase.
-Your emitted scope_fn is host-verified before use. For aggregate/statistical
-questions, the verifier requires preserving generic grouped rows that contain
-string labels and numeric metrics. Do not drop aggregate rows or erase grouping
-labels such as label/group/bucket unless the policy explicitly forbids
-that aggregate shape.
+or final report evidence. If no explicit restrictive policy is present, preserve
+useful scoped result rows by default and redact only obvious raw identifiers,
+URLs, secrets, or fields whose disclosure would be needlessly invasive for the
+question. If policy allows row-level records, do not collapse them into counts.
+If policy allows summaries, preserve grouping fields and metric fields. Return
+an empty list only when no policy-compliant useful disclosure remains. The
+default path is a short decision loop, not a research phase.
 
 Function contract:
 - Signature exactly `def scope(sql, params, rows):`.
@@ -135,59 +118,55 @@ else:
     SYSTEM_PROMPT = DEFAULT_SYSTEM_PROMPT
 
 
-_NO_REASONING_CONFIG = {"enabled": False, "effort": "none"}
 _NO_REASONING_OVERRIDES = {"extra_body": {"reasoning": {"effort": "none", "exclude": True}}}
-
-
+_HTTP_TIMEOUT = httpx.Timeout(120.0)
+_MAX_TOOL_RESULT_CHARS = 12_000
 _MAX_RETRY_CONTEXT_CHARS = 3000
-_AGGREGATE_VERIFY_TESTS: list[dict] = [
+_SCOPE_TOOLS = [
     {
-        "label": "aggregate group labels and metrics are preserved",
-        "sql": (
-            "SELECT label, COUNT(*)::int AS value "
-            "FROM allowed_events GROUP BY label ORDER BY value DESC LIMIT 2"
-        ),
-        "params": [],
-        "rows": [
-            {"label": "alpha", "value": 42},
-            {"label": "beta", "value": 17},
-        ],
-        "expect_allow": True,
-        "expect_min_rows": 2,
+        "type": "function",
+        "function": {
+            "name": "get_schema",
+            "description": (
+                "Get the database schema: table names, column names, types, "
+                "and defaults. Use only when schema helps design the scope."
+            ),
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
     },
     {
-        "label": "aggregate bucket metrics are preserved",
-        "sql": (
-            "SELECT bucket, COUNT(*)::int AS total "
-            "FROM allowed_events GROUP BY bucket ORDER BY total DESC"
-        ),
-        "params": [],
-        "rows": [{"bucket": "night", "total": 100}],
-        "expect_allow": True,
-        "expect_min_rows": 1,
+        "type": "function",
+        "function": {
+            "name": "execute_sql",
+            "description": (
+                "Execute a small read-only PostgreSQL shape check or sample "
+                "needed to design the privacy transform. Avoid research queries."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "sql": {"type": "string"},
+                    "params": {
+                        "type": "array",
+                        "items": {},
+                        "default": [],
+                    },
+                },
+                "required": ["sql"],
+            },
+        },
     },
 ]
+_ALLOWED_TOOL_NAMES = {"get_schema", "execute_sql"}
 
 
 def _verification_tests() -> list[dict]:
-    text = f"{QUERY_PROMPT}\n{POLICY_CONTEXT}".lower()
-    aggregate_markers = (
-        "aggregate",
-        "statistic",
-        "summary",
-        "summarize",
-        "count",
-        "top ",
-        "rank",
-        "group",
-        "bucket",
-        "table",
-        "report",
-        "research",
-        "analysis",
-    )
-    if any(marker in text for marker in aggregate_markers):
-        return _AGGREGATE_VERIFY_TESTS
+    """Host verification is policy-agnostic by default.
+
+    Unconditional utility fixtures are tempting, but they become a canned policy:
+    a room whose policy truly permits no disclosure would correctly emit an empty
+    transform and should not be rejected by a benchmark-shaped verifier.
+    """
     return []
 
 
@@ -203,34 +182,184 @@ def _completion_token_cap(default: int = 4096, hard_cap: int = 8192) -> int:
     return min(default, hard_cap)
 
 
-def _run_ai_agent(body: str) -> str:
-    base_url = os.environ["BRIDGE_URL"].rstrip("/") + "/v1"
-    api_key = os.environ["SESSION_TOKEN"]
-
+def _budget_max_calls(default: int = 12) -> int:
     try:
-        max_iterations = int(os.environ.get("HIVEMIND_SCOPE_MAX_ITERATIONS", "4"))
+        return max(1, int(os.environ.get("BUDGET_MAX_CALLS", str(default))))
     except ValueError:
-        max_iterations = 4
-    max_iterations = max(3, min(20, max_iterations))
+        return default
 
-    agent = AIAgent(
-        base_url=base_url,
-        api_key=api_key,
-        provider="custom",
-        model=HIVEMIND_MODEL,
-        max_iterations=max_iterations,
-        enabled_toolsets=["hivemind"],
-        ephemeral_system_prompt=SYSTEM_PROMPT,
-        skip_context_files=True,
-        skip_memory=True,
-        quiet_mode=True,
-        save_trajectories=False,
-        max_tokens=_completion_token_cap(),
-        reasoning_config=_NO_REASONING_CONFIG,
-        request_overrides=_NO_REASONING_OVERRIDES,
+
+def _max_tool_turns() -> int:
+    if raw := os.environ.get("HIVEMIND_SCOPE_MAX_TOOL_TURNS"):
+        try:
+            return max(0, int(raw))
+        except ValueError:
+            pass
+    return max(0, min(2, _budget_max_calls() - 1))
+
+
+def _bridge_url() -> str:
+    return os.environ["BRIDGE_URL"].rstrip("/")
+
+
+def _auth_headers() -> dict[str, str]:
+    return {"Authorization": f"Bearer {os.environ['SESSION_TOKEN']}"}
+
+
+def _post_bridge(path: str, payload: dict[str, Any]) -> dict[str, Any]:
+    resp = httpx.post(
+        f"{_bridge_url()}{path}",
+        json=payload,
+        headers=_auth_headers(),
+        timeout=_HTTP_TIMEOUT,
     )
-    with redirect_stdout(sys.stderr):
-        return agent.chat(body) or ""
+    if resp.status_code >= 300:
+        raise RuntimeError(f"bridge {path} returned {resp.status_code}: {resp.text[:500]}")
+    return resp.json()
+
+
+def _chat_completion(
+    messages: list[dict[str, Any]],
+    *,
+    tools: list[dict[str, Any]] | None,
+    max_tokens: int,
+) -> tuple[dict[str, Any], str]:
+    payload: dict[str, Any] = {
+        "model": HIVEMIND_MODEL,
+        "messages": messages,
+        "max_tokens": max_tokens,
+        "extra_body": _NO_REASONING_OVERRIDES["extra_body"],
+    }
+    if tools is not None:
+        payload["tools"] = tools
+        payload["tool_choice"] = "auto"
+    data = _post_bridge("/v1/chat/completions", payload)
+    choices = data.get("choices") or []
+    if not choices:
+        return {"role": "assistant", "content": ""}, "unknown"
+    choice = choices[0]
+    return choice.get("message") or {}, str(choice.get("finish_reason") or "unknown")
+
+
+def _parse_tool_args(raw: Any) -> dict[str, Any]:
+    if isinstance(raw, dict):
+        return raw
+    if not isinstance(raw, str) or not raw.strip():
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _compact_tool_result(result: str) -> str:
+    text = result if isinstance(result, str) else str(result)
+    if len(text) <= _MAX_TOOL_RESULT_CHARS:
+        return text
+    return (
+        text[:_MAX_TOOL_RESULT_CHARS]
+        + f"\n[tool result truncated to {_MAX_TOOL_RESULT_CHARS} chars by scope harness]"
+    )
+
+
+def _call_scope_tool(name: str, args: dict[str, Any]) -> str:
+    if name not in _ALLOWED_TOOL_NAMES:
+        return (
+            f"Error: unknown scope tool {name!r}. "
+            f"Available: {', '.join(sorted(_ALLOWED_TOOL_NAMES))}"
+        )
+    payload_args: dict[str, Any] = {}
+    if name == "execute_sql":
+        payload_args["sql"] = str(args.get("sql") or "")
+        params = args.get("params", [])
+        payload_args["params"] = params if isinstance(params, list) else []
+    data = _post_bridge(f"/tools/{name}", {"arguments": payload_args})
+    if data.get("error"):
+        return f"Error: {data['error']}"
+    return _compact_tool_result(data.get("result") or "")
+
+
+def _assistant_message_for_history(message: dict[str, Any]) -> dict[str, Any]:
+    keep: dict[str, Any] = {
+        "role": "assistant",
+        "content": message.get("content") or "",
+    }
+    if message.get("tool_calls"):
+        keep["tool_calls"] = message["tool_calls"]
+    return keep
+
+
+def _finalization_instruction(reason: str) -> str:
+    return (
+        f"FINALIZATION INSTRUCTION ({reason}): stop using tools. Emit exactly "
+        'one single-line JSON object: {"scope_fn": "def scope(sql, params, rows):\\n'
+        "    ...\"}. The function must enforce the policy, preserve every useful "
+        "field the policy allows, and avoid canned assumptions about this dataset."
+    )
+
+
+def _run_scope_agent(body: str) -> str:
+    system_prompt = (
+        f"{SYSTEM_PROMPT}\n\n"
+        "Harness behavior: you may use get_schema and execute_sql for scope "
+        "design only. The harness verifies the emitted source after you answer. "
+        "Keep the function compact and general; do not research the answer."
+    )
+    messages: list[dict[str, Any]] = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": body},
+    ]
+    tool_turns = _max_tool_turns()
+    per_turn_tokens = _completion_token_cap(default=2048, hard_cap=4096)
+    final_tokens = _completion_token_cap(default=2048, hard_cap=4096)
+    finalization_reason = (
+        "scope tool budget reached" if tool_turns else "no scope tools available"
+    )
+
+    for turn_idx in range(tool_turns):
+        message, _finish_reason = _chat_completion(
+            messages,
+            tools=_SCOPE_TOOLS,
+            max_tokens=per_turn_tokens,
+        )
+        tool_calls = message.get("tool_calls") or []
+        content = (message.get("content") or "").strip()
+        if not tool_calls:
+            return content
+        messages.append(_assistant_message_for_history(message))
+        for call in tool_calls:
+            if not isinstance(call, dict):
+                continue
+            fn = call.get("function") or {}
+            name = str(fn.get("name") or "")
+            args = _parse_tool_args(fn.get("arguments"))
+            call_id = str(call.get("id") or f"call_{turn_idx}_{name}")
+            try:
+                result = _call_scope_tool(name, args)
+            except Exception as e:
+                result = f"Error: {type(e).__name__}: {e}"
+            messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": call_id,
+                    "name": name,
+                    "content": result,
+                }
+            )
+
+    messages.append(
+        {
+            "role": "user",
+            "content": _finalization_instruction(finalization_reason),
+        }
+    )
+    message, _finish_reason = _chat_completion(
+        messages,
+        tools=None,
+        max_tokens=final_tokens,
+    )
+    return (message.get("content") or "").strip()
 
 
 def _retry_body(body: str, reason: str, previous_response: str) -> str:
@@ -250,15 +379,15 @@ def _retry_body(body: str, reason: str, previous_response: str) -> str:
 
 def _retry_scope_emit(body: str, *, reason: str, previous_response: str) -> dict | None:
     try:
-        retry_response = _run_ai_agent(_retry_body(body, reason, previous_response))
+        retry_response = _run_scope_agent(_retry_body(body, reason, previous_response))
     except Exception as e:
-        print(f"scope agent retry error after {reason}: {e}", file=sys.stderr)
+        print(f"scope harness retry error after {reason}: {e}", file=sys.stderr)
         return None
     parsed = _extract_json_emit(retry_response)
     if parsed and isinstance(parsed.get("scope_fn"), str) and parsed["scope_fn"].strip():
         return parsed
     print(
-        f"scope agent retry produced no parseable JSON after {reason}. "
+        f"scope harness retry produced no parseable JSON after {reason}. "
         f"raw={retry_response[:500]!r}",
         file=sys.stderr,
     )
@@ -414,9 +543,9 @@ def main() -> None:
 
     response = ""
     try:
-        response = _run_ai_agent(body)
+        response = _run_scope_agent(body)
     except Exception as e:
-        print(f"AIAgent error: {e}", file=sys.stderr)
+        print(f"scope harness error: {e}", file=sys.stderr)
 
     parsed = _extract_json_emit(response)
     if parsed and isinstance(parsed.get("scope_fn"), str) and parsed["scope_fn"].strip():

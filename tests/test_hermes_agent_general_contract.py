@@ -137,6 +137,47 @@ def _load_query_agent(
     return mod, calls
 
 
+def _load_scope_agent(
+    monkeypatch,
+    module_name: str,
+    *,
+    response: str | list[str],
+):
+    mod, calls = _load_agent(
+        monkeypatch,
+        "agents/default-scope-hermes/agent.py",
+        module_name,
+        response="unused",
+    )
+    calls["verify_payloads"] = []
+    responses = list(response) if isinstance(response, list) else [response]
+
+    def fake_run_scope_agent(body):
+        calls["chats"].append(body)
+        idx = min(len(calls["chats"]) - 1, len(responses) - 1)
+        return responses[idx]
+
+    class FakeVerifyResponse:
+        status_code = 200
+        text = "{}"
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"compiles": True, "all_tests_passed": True, "results": []}
+
+    def fake_post(url, *, json=None, headers=None, timeout=None):
+        if url.endswith("/sandbox/verify_scope_fn"):
+            calls["verify_payloads"].append(json)
+            return FakeVerifyResponse()
+        raise AssertionError(f"unexpected URL: {url}")
+
+    monkeypatch.setattr(mod, "_run_scope_agent", fake_run_scope_agent)
+    monkeypatch.setattr(mod.httpx, "post", fake_post)
+    return mod, calls
+
+
 def test_hermes_default_agents_do_not_hardcode_benchmark_dataset():
     forbidden_terms = (
         "watch_history",
@@ -404,6 +445,26 @@ def test_query_agent_uploads_report_when_model_stops_before_tool_cap(
     assert calls["artifact_payloads"][0]["include_pdf"] is True
 
 
+def test_query_agent_strips_invisible_format_controls(monkeypatch, capsys):
+    monkeypatch.setenv("QUERY_PROMPT", "Return a numeric table.")
+    table = (
+        "| rank | label | count |\n"
+        "|---|---|---|\n"
+        "| 1 | alpha | 70\u200d97\u200d21 |\n"
+    )
+    mod, _calls = _load_query_agent(
+        monkeypatch,
+        "default_query_hermes_zero_width_sanitize_test",
+        chat_responses=[_chat_response(table)],
+    )
+
+    mod.main()
+
+    captured = capsys.readouterr()
+    assert "\u200d" not in captured.out
+    assert "| 1 | alpha | 709721 |" in captured.out
+
+
 def test_query_agent_skips_report_upload_when_server_disables_artifacts(
     monkeypatch,
     capsys,
@@ -632,7 +693,7 @@ def test_query_agent_allows_more_sql_by_default_without_prompt_classification(
                 )
             ],
         )
-        for idx in range(6)
+        for idx in range(5)
     ]
     final = (
         "| rank | label | value |\n"
@@ -650,8 +711,8 @@ def test_query_agent_allows_more_sql_by_default_without_prompt_classification(
 
     captured = capsys.readouterr()
     assert captured.out.strip() == final.strip()
-    assert len(calls["tool_payloads"]) == 6
-    assert len(calls["llm_payloads"]) == 7
+    assert len(calls["tool_payloads"]) == 5
+    assert len(calls["llm_payloads"]) == 6
     assert "Run enough targeted SQL" in calls["llm_payloads"][0]["messages"][0]["content"]
 
 
@@ -677,7 +738,60 @@ def test_query_agent_retries_retriable_runtime_failure(
     assert "Hermes runtime failure" in calls["llm_payloads"][1]["messages"][1]["content"]
 
 
-def test_scope_agent_uses_ai_agent_for_aggregate_policy(monkeypatch, capsys):
+def test_scope_agent_uses_bounded_bridge_loop(monkeypatch, capsys):
+    scope_fn = 'def scope(sql, params, rows):\n    return {"allow": True, "rows": rows}\n'
+    monkeypatch.setenv("QUERY_PROMPT", "Use the private data safely.")
+    monkeypatch.setenv("POLICY_CONTEXT", "Preserve allowed fields; redact secrets.")
+    monkeypatch.setenv("HIVEMIND_SCOPE_MAX_TOOL_TURNS", "1")
+    mod, calls = _load_agent(
+        monkeypatch,
+        "agents/default-scope-hermes/agent.py",
+        "default_scope_hermes_bridge_loop_contract_test",
+        response="unused",
+    )
+    calls["llm_payloads"] = []
+    calls["tool_payloads"] = []
+    calls["verify_payloads"] = []
+    responses = [
+        _chat_response(
+            "",
+            tool_calls=[_tool_call("get_schema", {}, call_id="scope_schema")],
+        ),
+        _chat_response(json.dumps({"scope_fn": scope_fn})),
+    ]
+
+    def fake_post(url, *, json=None, headers=None, timeout=None):
+        if url.endswith("/v1/chat/completions"):
+            calls["llm_payloads"].append(json)
+            return _FakeHTTPResponse(responses.pop(0))
+        if url.endswith("/tools/get_schema"):
+            calls["tool_payloads"].append(("get_schema", json))
+            return _FakeHTTPResponse({"result": "events(id int, label text)"})
+        if url.endswith("/sandbox/verify_scope_fn"):
+            calls["verify_payloads"].append(json)
+            return _FakeHTTPResponse(
+                {"compiles": True, "all_tests_passed": True, "results": []}
+            )
+        raise AssertionError(f"unexpected URL: {url}")
+
+    monkeypatch.setattr(mod.httpx, "post", fake_post)
+
+    mod.main()
+
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == {"scope_fn": scope_fn}
+    assert calls["inits"] == []
+    assert len(calls["llm_payloads"]) == 2
+    assert {t["function"]["name"] for t in calls["llm_payloads"][0]["tools"]} == {
+        "get_schema",
+        "execute_sql",
+    }
+    assert "tools" not in calls["llm_payloads"][1]
+    assert calls["tool_payloads"][0][0] == "get_schema"
+    assert calls["verify_payloads"] == [{"source": scope_fn, "tests": []}]
+
+
+def test_scope_agent_wraps_prompt_and_emits_verified_source(monkeypatch, capsys):
     scope_fn = (
         "def scope(sql, params, rows):\n"
         '    return {"allow": True, "rows": [{"match_count": len(rows)}]}\n'
@@ -691,9 +805,8 @@ def test_scope_agent_uses_ai_agent_for_aggregate_policy(monkeypatch, capsys):
         "Which day had the highest number of watches? Return day and count only.",
     )
     monkeypatch.setenv("POLICY_CONTEXT", policy)
-    mod, calls = _load_agent(
+    mod, calls = _load_scope_agent(
         monkeypatch,
-        "agents/default-scope-hermes/agent.py",
         "default_scope_hermes_general_contract_test",
         response=json.dumps({"scope_fn": scope_fn}),
     )
@@ -703,32 +816,24 @@ def test_scope_agent_uses_ai_agent_for_aggregate_policy(monkeypatch, capsys):
     captured = capsys.readouterr()
     emitted = json.loads(captured.out)
     assert emitted == {"scope_fn": scope_fn}
-    assert len(calls["inits"]) == 1
+    assert calls["inits"] == []
     assert len(calls["chats"]) == 1
     body = calls["chats"][0]
     assert "POLICY" in body
     assert policy in body
-    init_kwargs = calls["inits"][0]["kwargs"]
-    assert init_kwargs["max_iterations"] == 4
-    assert init_kwargs["max_tokens"] >= 4096
-    system_prompt = init_kwargs["ephemeral_system_prompt"]
+    system_prompt = mod.SYSTEM_PROMPT
     assert "Treat policy as both permissions and restrictions" in system_prompt
-    assert "Return an empty list" in system_prompt
+    assert "empty list only" in system_prompt
     assert "no policy-compliant useful disclosure" in system_prompt
-    assert init_kwargs["reasoning_config"] == {"enabled": False, "effort": "none"}
-    assert init_kwargs["request_overrides"]["extra_body"]["reasoning"] == {
-        "effort": "none",
-        "exclude": True,
-    }
+    assert calls["verify_payloads"] == [{"source": scope_fn, "tests": []}]
 
 
 def test_scope_agent_extracts_fenced_json_with_scope_dict_literal(monkeypatch, capsys):
     scope_fn = 'def scope(sql, params, rows):\n    return {"allow": True, "rows": rows}\n'
     monkeypatch.setenv("QUERY_PROMPT", "Return aggregate statistics only.")
     monkeypatch.setenv("POLICY_CONTEXT", "Allowed: aggregate statistics.")
-    mod, _calls = _load_agent(
+    mod, _calls = _load_scope_agent(
         monkeypatch,
-        "agents/default-scope-hermes/agent.py",
         "default_scope_hermes_fenced_json_contract_test",
         response="```json\n" + json.dumps({"scope_fn": scope_fn}) + "\n```",
     )
@@ -744,9 +849,8 @@ def test_scope_agent_extracts_last_scope_json_after_diagnostics(monkeypatch, cap
     rejected_scope_fn = 'def scope(sql, params, rows):\n    return {"allow": True, "rows": []}\n'
     final_scope_fn = 'def scope(sql, params, rows):\n    return {"allow": True, "rows": rows}\n'
     monkeypatch.setenv("QUERY_PROMPT", "Return aggregate statistics only.")
-    mod, _calls = _load_agent(
+    mod, _calls = _load_scope_agent(
         monkeypatch,
-        "agents/default-scope-hermes/agent.py",
         "default_scope_hermes_diagnostics_contract_test",
         response=(
             "provider retry diagnostic\n"
@@ -763,15 +867,13 @@ def test_scope_agent_extracts_last_scope_json_after_diagnostics(monkeypatch, cap
     assert "using fallback" not in captured.err
 
 
-def test_scope_agent_redirects_ai_agent_stdout_diagnostics(monkeypatch, capsys):
+def test_scope_agent_does_not_emit_harness_diagnostics(monkeypatch, capsys):
     scope_fn = 'def scope(sql, params, rows):\n    return {"allow": True, "rows": rows}\n'
     monkeypatch.setenv("QUERY_PROMPT", "Return aggregate statistics only.")
-    mod, _calls = _load_agent(
+    mod, _calls = _load_scope_agent(
         monkeypatch,
-        "agents/default-scope-hermes/agent.py",
         "default_scope_hermes_stdout_diagnostic_contract_test",
         response=json.dumps({"scope_fn": scope_fn}),
-        chat_stdout="⚠️  Response truncated (finish_reason='length')",
     )
 
     mod.main()
@@ -779,7 +881,7 @@ def test_scope_agent_redirects_ai_agent_stdout_diagnostics(monkeypatch, capsys):
     captured = capsys.readouterr()
     assert json.loads(captured.out) == {"scope_fn": scope_fn}
     assert "Response truncated" not in captured.out
-    assert "Response truncated" in captured.err
+    assert captured.err == ""
 
 
 def test_scope_agent_retries_unparseable_response_before_empty_fallback(
@@ -797,9 +899,8 @@ def test_scope_agent_retries_unparseable_response_before_empty_fallback(
         "POLICY_CONTEXT",
         "Allowed: aggregate statistics and summaries. Not allowed: raw row dumps.",
     )
-    mod, calls = _load_agent(
+    mod, calls = _load_scope_agent(
         monkeypatch,
-        "agents/default-scope-hermes/agent.py",
         "default_scope_hermes_retry_unparseable_contract_test",
         response=["not json", json.dumps({"scope_fn": passthrough_scope_fn})],
     )
@@ -818,7 +919,7 @@ def test_scope_agent_retries_unparseable_response_before_empty_fallback(
     assert "RECOVERY INSTRUCTION" in calls["chats"][1]
 
 
-def test_scope_agent_retries_when_aggregate_rows_are_dropped(
+def test_scope_agent_retries_when_self_verification_fails(
     monkeypatch,
     capsys,
 ):
@@ -830,9 +931,8 @@ def test_scope_agent_retries_when_aggregate_rows_are_dropped(
         "QUERY_PROMPT",
         "Write a research report with evidence-backed findings.",
     )
-    mod, calls = _load_agent(
+    mod, calls = _load_scope_agent(
         monkeypatch,
-        "agents/default-scope-hermes/agent.py",
         "default_scope_hermes_aggregate_preservation_retry_test",
         response=[
             json.dumps({"scope_fn": empty_scope_fn}),
@@ -854,7 +954,7 @@ def test_scope_agent_retries_when_aggregate_rows_are_dropped(
                 "all_tests_passed": self.passed,
                 "results": [
                     {
-                        "label": "aggregate group labels and metrics are preserved",
+                        "label": "custom verifier rejected the candidate",
                         "allow": True,
                         "rows_returned": self.rows_returned,
                         "expected_min_rows": 2,
@@ -879,9 +979,9 @@ def test_scope_agent_retries_when_aggregate_rows_are_dropped(
     emitted = json.loads(captured.out)
     assert emitted == {"scope_fn": passthrough_scope_fn}
     assert len(calls["chats"]) == 2
-    assert verify_calls[0]["tests"][0]["expect_min_rows"] == 2
-    assert "expected_min_rows" in calls["chats"][1]
-    assert "dropped useful synthetic summary rows" not in captured.err
+    assert verify_calls[0]["tests"] == []
+    assert "custom verifier rejected the candidate" in calls["chats"][1]
+    assert "rows_returned" in calls["chats"][1]
 
 
 def test_scope_agent_retry_includes_specific_verifier_failures(
@@ -902,9 +1002,8 @@ def test_scope_agent_retry_includes_specific_verifier_failures(
         "QUERY_PROMPT",
         "Show me top labels and buckets by count as aggregate tables.",
     )
-    mod, calls = _load_agent(
+    mod, calls = _load_scope_agent(
         monkeypatch,
-        "agents/default-scope-hermes/agent.py",
         "default_scope_hermes_retry_includes_verify_failure_test",
         response=[
             json.dumps({"scope_fn": narrow_scope_fn}),
@@ -927,7 +1026,7 @@ def test_scope_agent_retry_includes_specific_verifier_failures(
                 "all_tests_passed": False,
                 "results": [
                     {
-                        "label": "aggregate group labels and metrics are preserved",
+                        "label": "first verifier fixture",
                         "sql": "SELECT label, COUNT(*)::int AS value FROM allowed_events GROUP BY label",
                         "allow": True,
                         "rows_returned": 2,
@@ -936,7 +1035,7 @@ def test_scope_agent_retry_includes_specific_verifier_failures(
                         "passed": True,
                     },
                     {
-                        "label": "aggregate bucket metrics are preserved",
+                        "label": "second verifier fixture",
                         "sql": "SELECT bucket, COUNT(*)::int AS total FROM allowed_events GROUP BY bucket",
                         "allow": True,
                         "rows_returned": 0,
@@ -958,7 +1057,7 @@ def test_scope_agent_retry_includes_specific_verifier_failures(
     assert emitted == {"scope_fn": passthrough_scope_fn}
     assert len(calls["chats"]) == 2
     retry_body = calls["chats"][1]
-    assert "aggregate bucket metrics are preserved" in retry_body
+    assert "second verifier fixture" in retry_body
     assert "rows_returned" in retry_body
     assert "expected_min_rows" in retry_body
     assert "SELECT bucket" in retry_body
@@ -973,9 +1072,8 @@ def test_scope_agent_accepts_unparseable_retry_after_compile_verification(
         "QUERY_PROMPT",
         "Write a research report with evidence-backed findings.",
     )
-    mod, calls = _load_agent(
+    mod, calls = _load_scope_agent(
         monkeypatch,
-        "agents/default-scope-hermes/agent.py",
         "default_scope_hermes_accept_compile_verified_retry_test",
         response=["not json", json.dumps({"scope_fn": empty_scope_fn})],
     )
@@ -1019,11 +1117,11 @@ def test_scope_prompt_centers_privacy_utility_frontier():
     assert "Do not apply canned policies" in source
     assert "least destructive compliant transform" in source
     assert "Preserve useful information" in source
-    assert "Expensive downstream simulation" in source
-    assert "not a\nresearch phase" in source
-    assert "verify_scope_fn" in source
-    assert "aggregate group labels" in source
-    assert "expect_min_rows" in source
+    assert "downstream simulation" in source
+    assert "not a research phase" in source
+    assert "harness verifies the emitted source" in source
+    assert "policy-agnostic by default" in source
+    assert "canned policy" in source
 
 
 def test_query_prompt_is_tool_aware_without_canned_policy():

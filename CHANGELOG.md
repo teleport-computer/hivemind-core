@@ -33,21 +33,22 @@ surface.
 - Fixed room table allowlist enforcement so valid aggregate SQL using CTEs,
   subqueries, or lateral function aliases is checked against the underlying
   base tables instead of rejecting the derived alias name.
-- Tightened the scope verifier so analytical scope functions must preserve
-  generic aggregate rows, including grouping labels and numeric metrics, rather
-  than silently returning empty tables.
-- Improved scope-Hermes verifier retries so failed aggregate-preservation
-  checks are included in the retry prompt, letting the model repair too-narrow
-  scope transforms instead of repeating the same verifier failure.
+- Changed scope-Hermes host verification to policy-agnostic compile checks
+  instead of prompt-keyword aggregate fixtures, avoiding canned verifier
+  policies that reject legitimate restrictive rooms.
+- Replaced the scope-Hermes `AIAgent` wrapper with a bounded bridge loop so
+  scope design has explicit tool-call caps and no iteration-exhaustion summary
+  path.
 - Added a query-Hermes ranking-table quality retry for duplicate category
   labels or non-descending metrics, forcing the agent to regroup by the cleaned
   displayed label before answering.
-- Hardened query-Hermes runs with higher default tool/SQL caps and retries for
-  timeout/progress-log responses instead of returning unfinished work as final
-  answers.
+- Hardened query-Hermes runs with retries for timeout/progress-log responses
+  instead of returning unfinished work as final answers, lower default SQL/tool
+  caps for latency, and final-output sanitization for invisible format controls
+  that can corrupt numeric tables.
 - Moved expensive scope-Hermes simulation/source-inspection tools behind
   explicit opt-in environment flags so ordinary scoped analytical runs stay on
-  the fast schema/SQL/verification path.
+  the fast schema/SQL path.
 - Changed the hosted Hermes default model from `z-ai/glm-5` to
   `moonshotai/kimi-k2.6` and removed the scope-Hermes hardcoded synthetic
   summary-row gate that could fail otherwise valid analytical runs.
