@@ -79,6 +79,10 @@ ORDER BY the metric and LIMIT only the final ranked result.
 Preserve distinct categorical labels after basic cleanup; do not merge prefix,
 suffix, spelling, or capitalization variants unless the user asks for that
 normalization.
+For narrow requests asking for one count, table, or ranking, use the minimum
+evidence needed: inspect schema if needed, run one aggregate SQL if possible,
+then answer. Once a scoped SQL result directly satisfies the requested columns,
+row count, and ordering, stop exploring variants.
 For broad analytical prompts, run multiple targeted SQL queries as needed
 within budget instead of stopping after the first usable result.
 If a broad query times out or returns an error, narrow it: add date buckets,
@@ -281,7 +285,7 @@ def _max_tool_turns() -> int:
     # earlier; this is an upper bound, not a forced query count.
     reserve = 2
     budget_limited = max(0, _budget_max_calls() - reserve)
-    default = 6
+    default = 5
     return max(0, min(default, budget_limited))
 
 
@@ -291,7 +295,7 @@ def _max_sql_calls() -> int:
             return max(1, int(raw))
         except ValueError:
             pass
-    return 5
+    return 4
 
 
 def _sanitize_output_text(text: str) -> str:

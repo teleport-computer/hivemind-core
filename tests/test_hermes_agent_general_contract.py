@@ -693,7 +693,7 @@ def test_query_agent_allows_more_sql_by_default_without_prompt_classification(
                 )
             ],
         )
-        for idx in range(5)
+        for idx in range(4)
     ]
     final = (
         "| rank | label | value |\n"
@@ -711,8 +711,8 @@ def test_query_agent_allows_more_sql_by_default_without_prompt_classification(
 
     captured = capsys.readouterr()
     assert captured.out.strip() == final.strip()
-    assert len(calls["tool_payloads"]) == 5
-    assert len(calls["llm_payloads"]) == 6
+    assert len(calls["tool_payloads"]) == 4
+    assert len(calls["llm_payloads"]) == 5
     assert "Run enough targeted SQL" in calls["llm_payloads"][0]["messages"][0]["content"]
 
 
@@ -1149,6 +1149,7 @@ def test_query_prompt_is_tool_aware_without_canned_policy():
     assert "duplicate identical labels" in source
     assert "do not apply LIMIT before" in source
     assert "do not merge prefix" in source
+    assert "minimum\nevidence needed" in source
 
 
 def test_hermes_prompts_do_not_embed_canned_privacy_policies():
