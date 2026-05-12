@@ -49,6 +49,10 @@ surface.
 - Added a final generic table-integrity instruction for query-Hermes answers so
   categorical rankings merge duplicate displayed labels and omit blank labels
   unless the user explicitly asks for missing values.
+- Split post-deploy Hermes prod evals into modes: every deploy runs the fast
+  top-table canary, while the deep report/PDF canary runs automatically only
+  for Hermes agent, eval, artifact, sandbox, or pipeline changes unless a manual
+  deploy forces `hermes_eval=full`.
 - Moved expensive scope-Hermes simulation/source-inspection tools behind
   explicit opt-in environment flags so ordinary scoped analytical runs stay on
   the fast schema/SQL path.

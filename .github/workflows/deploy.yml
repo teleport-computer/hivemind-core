@@ -96,6 +96,16 @@ on:
         description: "Optional: rewrite HIVEMIND_DATABASE_URL in the relay's deploy/phala/.env (persistent — used for pg cutover). Leave empty to keep the existing value."
         required: false
         default: ""
+      hermes_eval:
+        description: "Post-deploy Hermes eval mode: auto runs the fast canary always and the deep report only for relevant changes."
+        required: false
+        default: "auto"
+        type: choice
+        options:
+          - auto
+          - fast
+          - full
+          - skip
 
 concurrency:
   group: phala-deploy-${{ github.event.inputs.target || 'core' }}-${{ github.event.inputs.core_name }}${{ github.event.inputs.pg_name }}
@@ -471,6 +481,7 @@ jobs:
     if: |
       needs.deploy.result == 'success' &&
       vars.HERMES_PROD_EVAL_ROOM != '' &&
+      (github.event_name != 'workflow_dispatch' || github.event.inputs.hermes_eval != 'skip') &&
       (github.event_name == 'workflow_run' ||
        github.event.inputs.target == 'core' ||
        github.event.inputs.target == 'all' ||
@@ -484,6 +495,8 @@ jobs:
       PROVIDER: ${{ vars.HERMES_PROD_EVAL_PROVIDER || 'openrouter' }}
       HMCTL_PROFILE: ${{ vars.HERMES_PROD_EVAL_HMCTL_PROFILE || 'prod-eval' }}
       HMCTL_SERVICE: ${{ vars.HERMES_PROD_EVAL_SERVICE || 'https://hivemind.teleport.computer' }}
+      HERMES_EVAL_MODE: ${{ github.event.inputs.hermes_eval || vars.HERMES_POST_DEPLOY_EVAL_MODE || 'auto' }}
+      EVAL_REF: ${{ github.event.inputs.ref || github.event.workflow_run.head_sha || 'main' }}
 
     steps:
       - name: Configure SSH
@@ -511,12 +524,16 @@ jobs:
             -o ServerAliveInterval=30 -o ServerAliveCountMax=20 \
             -o TCPKeepAlive=yes \
             "${EC2_USER}@${EC2_HOST}" \
-            "ROOM=$(q "$ROOM") MODELS=$(q "$MODELS") PROVIDER=$(q "$PROVIDER") HMCTL_PROFILE=$(q "$HMCTL_PROFILE") HMCTL_SERVICE=$(q "$HMCTL_SERVICE") HMCTL_API_KEY=$(q "$HMCTL_API_KEY") bash -s" <<'REMOTE'
+            "ROOM=$(q "$ROOM") MODELS=$(q "$MODELS") PROVIDER=$(q "$PROVIDER") HMCTL_PROFILE=$(q "$HMCTL_PROFILE") HMCTL_SERVICE=$(q "$HMCTL_SERVICE") HMCTL_API_KEY=$(q "$HMCTL_API_KEY") HERMES_EVAL_MODE=$(q "$HERMES_EVAL_MODE") EVAL_REF=$(q "$EVAL_REF") bash -s" <<'REMOTE'
           set -euo pipefail
           cd ~/hivemind-core
 
           git fetch --prune origin
-          git checkout --detach origin/main
+          if git rev-parse --verify --quiet "${EVAL_REF}^{commit}" >/dev/null; then
+            git checkout --detach "$EVAL_REF"
+          else
+            git checkout --detach "origin/${EVAL_REF#origin/}"
+          fi
           echo "HEAD: $(git rev-parse --short HEAD)"
 
           if ! command -v uv >/dev/null 2>&1; then
@@ -593,10 +610,42 @@ jobs:
           PY
           }
 
+          mode="$(printf '%s' "${HERMES_EVAL_MODE:-auto}" | tr '[:upper:]' '[:lower:]')"
+          scenarios=(watch_history_top_hashtags)
+          case "$mode" in
+            skip)
+              echo "Skipping post-deploy Hermes prod eval because HERMES_EVAL_MODE=skip"
+              exit 0
+              ;;
+            fast)
+              echo "Post-deploy Hermes prod eval mode: fast"
+              ;;
+            full)
+              echo "Post-deploy Hermes prod eval mode: full"
+              scenarios+=(watch_history_report_artifact)
+              ;;
+            auto|"")
+              changed_files="$(git diff --name-only HEAD^ HEAD 2>/dev/null || true)"
+              echo "Post-deploy Hermes prod eval mode: auto"
+              echo "Changed files considered for deep report canary:"
+              printf '%s\n' "$changed_files"
+              if [ -z "$changed_files" ] || printf '%s\n' "$changed_files" | grep -Eq '^(agents/(base-hermes|default-(query|scope|mediator)-hermes)/|eval/|hivemind/(pipeline\.py|sandbox/|agent_base_bootstrap\.py|api/agent_uploads\.py)|tests/(test_eval_cli\.py|test_hermes_|test_artifact_upload\.py|test_pipeline\.py)|\.github/workflows/(deploy|hermes-prod-eval)\.yml|pyproject\.toml|uv\.lock)'; then
+                echo "Deep report/artifact canary enabled by changed runtime/eval/artifact files."
+                scenarios+=(watch_history_report_artifact)
+              else
+                echo "Deep report/artifact canary skipped; no relevant runtime/eval/artifact files changed."
+              fi
+              ;;
+            *)
+              echo "::error::invalid HERMES_EVAL_MODE=${HERMES_EVAL_MODE}; expected auto, fast, full, or skip"
+              exit 1
+              ;;
+          esac
+
           echo "Waiting for post-deploy gateway/app warmup before canaries"
           sleep 60
 
-          for scenario in watch_history_top_hashtags watch_history_report_artifact; do
+          for scenario in "${scenarios[@]}"; do
             for attempt in 1 2 3; do
               out_dir="eval/results/prod/$(date -u +%Y%m%dT%H%M%SZ)-post-deploy-${scenario}-attempt-${attempt}"
               mkdir -p "$out_dir"
