@@ -100,13 +100,17 @@ Process:
 3. Draft the least destructive compliant transform: pass through, filter rows,
    drop or replace fields, derive safer fields, summarize, or return no rows.
 4. Use verify_scope_fn on the exact function you will emit.
+5. Once that exact function compiles and passes your tests, stop using tools and
+   emit it as the final JSON. Do not keep comparing alternatives unless the
+   verified function clearly violates the policy.
 Stay in your lane: scope designs the privacy transform. The query agent will
 do the research. Do not spend turns researching trends, lifecycles, categories,
 or final report evidence. For broad analytical/report prompts with no explicit
 restrictive policy, prefer a compact transform that preserves aggregate and
 summary rows, redacts obvious raw identifiers/URLs/secrets if they appear, and
 then verify it. Target one get_schema call, zero or one execute_sql shape check,
-and one verify_scope_fn call.
+and one verify_scope_fn call. The default path is a short decision loop, not a
+research phase.
 Your emitted scope_fn is host-verified before use. For aggregate/statistical
 questions, the verifier requires preserving generic grouped rows that contain
 string labels and numeric metrics. Do not drop aggregate rows or erase grouping
@@ -204,10 +208,10 @@ def _run_ai_agent(body: str) -> str:
     api_key = os.environ["SESSION_TOKEN"]
 
     try:
-        max_iterations = int(os.environ.get("HIVEMIND_SCOPE_MAX_ITERATIONS", "6"))
+        max_iterations = int(os.environ.get("HIVEMIND_SCOPE_MAX_ITERATIONS", "4"))
     except ValueError:
-        max_iterations = 6
-    max_iterations = max(4, min(20, max_iterations))
+        max_iterations = 4
+    max_iterations = max(3, min(20, max_iterations))
 
     agent = AIAgent(
         base_url=base_url,

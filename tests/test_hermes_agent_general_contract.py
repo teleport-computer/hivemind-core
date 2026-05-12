@@ -709,6 +709,7 @@ def test_scope_agent_uses_ai_agent_for_aggregate_policy(monkeypatch, capsys):
     assert "POLICY" in body
     assert policy in body
     init_kwargs = calls["inits"][0]["kwargs"]
+    assert init_kwargs["max_iterations"] == 4
     assert init_kwargs["max_tokens"] >= 4096
     system_prompt = init_kwargs["ephemeral_system_prompt"]
     assert "Treat policy as both permissions and restrictions" in system_prompt
@@ -1019,6 +1020,7 @@ def test_scope_prompt_centers_privacy_utility_frontier():
     assert "least destructive compliant transform" in source
     assert "Preserve useful information" in source
     assert "Expensive downstream simulation" in source
+    assert "not a\nresearch phase" in source
     assert "verify_scope_fn" in source
     assert "aggregate group labels" in source
     assert "expect_min_rows" in source
