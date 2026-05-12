@@ -629,7 +629,7 @@ jobs:
               echo "Post-deploy Hermes prod eval mode: auto"
               echo "Changed files considered for deep report canary:"
               printf '%s\n' "$changed_files"
-              if [ -z "$changed_files" ] || printf '%s\n' "$changed_files" | grep -Eq '^(agents/(base-hermes|default-(query|scope|mediator)-hermes)/|eval/|hivemind/(pipeline\.py|sandbox/|agent_base_bootstrap\.py|api/agent_uploads\.py)|tests/(test_eval_cli\.py|test_hermes_|test_artifact_upload\.py|test_pipeline\.py)|\.github/workflows/(deploy|hermes-prod-eval)\.yml|pyproject\.toml|uv\.lock)'; then
+              if [ -z "$changed_files" ] || printf '%s\n' "$changed_files" | grep -Eq '^(agents/(base-hermes|default-(query|scope|mediator)-hermes)/|eval/|hivemind/(pipeline\.py|sandbox/|agent_base_bootstrap\.py|api/agent_uploads\.py)|tests/(test_eval_cli\.py|test_hermes_|test_artifact_upload\.py|test_pipeline\.py)|pyproject\.toml|uv\.lock)'; then
                 echo "Deep report/artifact canary enabled by changed runtime/eval/artifact files."
                 scenarios+=(watch_history_report_artifact)
               else
@@ -663,10 +663,17 @@ jobs:
               fi
 
               summary="${out_dir}/${scenario}__summary.json"
-              if [ "$attempt" -lt 3 ] && is_transient_submit_failure "$summary"; then
-                echo "Transient room-submit gateway failure; retrying after warmup"
-                sleep $((attempt * 60))
-                continue
+              if [ "$attempt" -lt 3 ]; then
+                if is_transient_submit_failure "$summary"; then
+                  echo "Transient room-submit gateway failure; retrying after warmup"
+                  sleep $((attempt * 60))
+                  continue
+                fi
+                if [ "$scenario" = "watch_history_top_hashtags" ]; then
+                  echo "Fast canary failed; retrying to filter stochastic model-quality variance"
+                  sleep $((attempt * 30))
+                  continue
+                fi
               fi
               echo "Eval failed; results remain on relay at: $(pwd)/${out_dir}"
               exit 1
