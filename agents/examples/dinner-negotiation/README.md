@@ -70,10 +70,10 @@ demos and structural filters, prefer hand-rolled.
 ## Running it end-to-end
 
 You need two distinct hmctl profiles — one for Alice, one for Bob.
-Both can be self-serve signups against the public service. Whether
-the starter credit auto-applies depends on the deployment's
-`signup_starter_credit_code` setting; if it doesn't, redeem a credit
-code manually (your operator publishes one).
+Both can be self-serve signups against the public service. Hosted website
+signup auto-applies a starter credit when configured; direct CLI/API signup
+depends on the deployment's `signup_starter_credit_code` setting. Check your
+balance after signup and redeem an operator-issued code only if needed.
 
 ### Prereqs
 
@@ -103,11 +103,8 @@ target local dev or a self-hosted deployment.
 hmctl --profile alice signup alice
 hmctl --profile alice balance
 
-# If balance is $0 (the deployment hasn't enabled auto-credit yet),
-# redeem the public starter code. This code has 1000 redemptions
-# capped at $1 each; one redemption per tenant. If exhausted, ask
-# the operator for a fresh code.
-hmctl --profile alice redeem-credit hmcc_0F7HJvv8uYNwMj1QPcplj3tGx-zNrcXm9s8ulLLKJd0
+# If balance is $0, redeem an operator-issued code.
+hmctl --profile alice redeem-credit hmcc_...
 
 # Seed Alice's calendar table.
 # On hmctl 0.3.7+:
@@ -149,7 +146,7 @@ hmctl --profile alice room create agents/examples/dinner-negotiation/scope-agent
 hmctl --profile bob signup bob
 hmctl --profile bob balance
 # If balance is $0:
-hmctl --profile bob redeem-credit hmcc_0F7HJvv8uYNwMj1QPcplj3tGx-zNrcXm9s8ulLLKJd0
+hmctl --profile bob redeem-credit hmcc_...
 
 ROOM='hmroom://...'  # paste the URI Alice shared
 hmctl --profile bob room inspect "$ROOM"

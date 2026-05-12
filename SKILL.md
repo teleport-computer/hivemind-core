@@ -66,17 +66,15 @@ hmctl --profile alice init --api-key hmk_...
 
 ### Funding the tenant
 
-`signup` provisions a $0 balance. If the deployment has
-`signup_starter_credit_code` set on the server (env var
-`HIVEMIND_SIGNUP_STARTER_CREDIT_CODE`), signup auto-redeems and you
-have enough for one full run. Otherwise the balance is $0 and you must
-redeem a code:
+`signup` may land with starter credit depending on deployment policy. The
+hosted website signup path auto-applies a $5 starter credit when its signup
+credit code is configured; direct API/CLI signup depends on the server's
+`signup_starter_credit_code` setting. Check the balance after signup and
+redeem an operator-issued code only if needed:
 
 ```bash
-# Public starter code: $1, 1000 redemptions, 90-day expiry. One per
-# tenant. If exhausted, ask the operator for a fresh code.
-hmctl --profile alice redeem-credit hmcc_0F7HJvv8uYNwMj1QPcplj3tGx-zNrcXm9s8ulLLKJd0
-hmctl --profile bob   redeem-credit hmcc_0F7HJvv8uYNwMj1QPcplj3tGx-zNrcXm9s8ulLLKJd0
+hmctl --profile alice balance
+hmctl --profile alice redeem-credit hmcc_...  # only if an operator gives you a code
 ```
 
 ## What your code can do inside the CVM (sandbox rules)
