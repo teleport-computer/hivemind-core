@@ -275,10 +275,6 @@ jobs:
                   "execute_sql",
                   "get_schema",
                   "verify_scope_fn",
-                  "simulate_query",
-                  "simulate_multi",
-                  "list_query_agent_files",
-                  "read_query_agent_file",
               },
               "mediator": set(),
           }[role]
