@@ -198,6 +198,19 @@ _PROVIDER_CAPACITY_FAILURE_MARKERS = (
     "http 429",
     "temporarily unavailable due to rate limiting",
 )
+_SUBSTANTIAL_OUTPUT_MARKERS = (
+    "artifact",
+    "deep research",
+    "lifecycle",
+    "long-form",
+    "memo",
+    "pdf",
+    "report",
+    "research",
+    "study",
+    "whitepaper",
+    "writeup",
+)
 _UNRESOLVED_RESPONSE_MARKERS = (
     "would you like me to",
     "should i try",
@@ -283,7 +296,10 @@ def _max_sql_calls() -> int:
             return max(1, int(raw))
         except ValueError:
             pass
-    return 4
+    prompt = f"{QUERY_PROMPT}\n{QUERY_CONTEXT}".lower()
+    if any(marker in prompt for marker in _SUBSTANTIAL_OUTPUT_MARKERS):
+        return 4
+    return 2
 
 
 def _sanitize_output_text(text: str) -> str:

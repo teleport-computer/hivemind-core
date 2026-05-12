@@ -663,7 +663,7 @@ def test_query_agent_retries_timed_out_progress_log_for_requested_table(
     assert "The SQL queries timed out" in retry_body
 
 
-def test_query_agent_allows_more_sql_by_default_without_prompt_classification(
+def test_query_agent_caps_short_prompts_to_two_sql_calls_by_default(
     monkeypatch,
     capsys,
 ):
@@ -684,7 +684,7 @@ def test_query_agent_allows_more_sql_by_default_without_prompt_classification(
                 )
             ],
         )
-        for idx in range(4)
+        for idx in range(2)
     ]
     final = (
         "| rank | label | value |\n"
@@ -693,7 +693,7 @@ def test_query_agent_allows_more_sql_by_default_without_prompt_classification(
     )
     mod, calls = _load_query_agent(
         monkeypatch,
-        "default_query_hermes_general_budget_contract_test",
+        "default_query_hermes_short_budget_contract_test",
         chat_responses=[*tool_responses, _chat_response(final)],
         tool_results={"execute_sql": '[{"category": "alpha", "count": 42}]'},
     )
@@ -702,9 +702,49 @@ def test_query_agent_allows_more_sql_by_default_without_prompt_classification(
 
     captured = capsys.readouterr()
     assert captured.out.strip() == final.strip()
+    assert len(calls["tool_payloads"]) == 2
+    assert len(calls["llm_payloads"]) == 3
+    assert "up to 2 SQL calls" in calls["llm_payloads"][0]["messages"][0]["content"]
+
+
+def test_query_agent_keeps_larger_sql_budget_for_substantial_reports(
+    monkeypatch,
+    capsys,
+):
+    monkeypatch.setenv("QUERY_PROMPT", "Write a deep research report as a PDF.")
+    tool_responses = [
+        _chat_response(
+            "",
+            tool_calls=[
+                _tool_call(
+                    "execute_sql",
+                    {
+                        "sql": (
+                            "SELECT category, COUNT(*) FROM events GROUP BY 1 "
+                            f"-- {idx}"
+                        )
+                    },
+                    call_id=f"report_call_{idx}",
+                )
+            ],
+        )
+        for idx in range(4)
+    ]
+    final = "# Report\n\n" + ("finding evidence limitation implication " * 140)
+    mod, calls = _load_query_agent(
+        monkeypatch,
+        "default_query_hermes_report_budget_contract_test",
+        chat_responses=[*tool_responses, _chat_response(final)],
+        tool_results={"execute_sql": '[{"category": "alpha", "count": 42}]'},
+    )
+
+    mod.main()
+
+    captured = capsys.readouterr()
+    assert captured.out.startswith("# Report")
     assert len(calls["tool_payloads"]) == 4
     assert len(calls["llm_payloads"]) == 5
-    assert "Run enough targeted SQL" in calls["llm_payloads"][0]["messages"][0]["content"]
+    assert "up to 4 SQL calls" in calls["llm_payloads"][0]["messages"][0]["content"]
 
 
 def test_query_agent_retries_retriable_runtime_failure(

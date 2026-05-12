@@ -43,6 +43,9 @@ surface.
   responses instead of returning unfinished work as final answers, lower default
   SQL/tool caps for latency, and final-output sanitization for invisible format
   controls that can corrupt numeric tables.
+- Tuned query-Hermes SQL budgets by requested output depth: short answers and
+  tables default to two SQL calls, while substantial reports/studies/PDF-style
+  outputs keep the larger evidence budget.
 - Moved expensive scope-Hermes simulation/source-inspection tools behind
   explicit opt-in environment flags so ordinary scoped analytical runs stay on
   the fast schema/SQL path.
