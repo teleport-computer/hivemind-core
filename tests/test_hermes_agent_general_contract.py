@@ -788,7 +788,10 @@ def test_scope_agent_uses_bounded_bridge_loop(monkeypatch, capsys):
     }
     assert "tools" not in calls["llm_payloads"][1]
     assert calls["tool_payloads"][0][0] == "get_schema"
-    assert calls["verify_payloads"] == [{"source": scope_fn, "tests": []}]
+    assert calls["verify_payloads"][0]["source"] == scope_fn
+    assert calls["verify_payloads"][0]["tests"][0]["label"] == (
+        "benign labeled metric rows survive"
+    )
 
 
 def test_scope_agent_wraps_prompt_and_emits_verified_source(monkeypatch, capsys):
@@ -825,7 +828,10 @@ def test_scope_agent_wraps_prompt_and_emits_verified_source(monkeypatch, capsys)
     assert "Treat policy as both permissions and restrictions" in system_prompt
     assert "empty list only" in system_prompt
     assert "no policy-compliant useful disclosure" in system_prompt
-    assert calls["verify_payloads"] == [{"source": scope_fn, "tests": []}]
+    assert calls["verify_payloads"][0]["source"] == scope_fn
+    assert calls["verify_payloads"][0]["tests"][0]["label"] == (
+        "benign labeled metric rows survive"
+    )
 
 
 def test_scope_agent_extracts_fenced_json_with_scope_dict_literal(monkeypatch, capsys):
@@ -979,7 +985,7 @@ def test_scope_agent_retries_when_self_verification_fails(
     emitted = json.loads(captured.out)
     assert emitted == {"scope_fn": passthrough_scope_fn}
     assert len(calls["chats"]) == 2
-    assert verify_calls[0]["tests"] == []
+    assert verify_calls[0]["tests"][0]["label"] == "benign labeled metric rows survive"
     assert "custom verifier rejected the candidate" in calls["chats"][1]
     assert "rows_returned" in calls["chats"][1]
 
@@ -1120,8 +1126,8 @@ def test_scope_prompt_centers_privacy_utility_frontier():
     assert "downstream simulation" in source
     assert "not a research phase" in source
     assert "harness verifies the emitted source" in source
-    assert "policy-agnostic by default" in source
-    assert "canned policy" in source
+    assert "benign labeled metric rows survive" in source
+    assert "canned policies" in source
 
 
 def test_query_prompt_is_tool_aware_without_canned_policy():

@@ -122,6 +122,27 @@ _NO_REASONING_OVERRIDES = {"extra_body": {"reasoning": {"effort": "none", "exclu
 _HTTP_TIMEOUT = httpx.Timeout(120.0)
 _MAX_TOOL_RESULT_CHARS = 12_000
 _MAX_RETRY_CONTEXT_CHARS = 3000
+_UTILITY_VERIFY_TESTS: list[dict[str, Any]] = [
+    {
+        "label": "benign labeled metric rows survive",
+        "sql": "SELECT label, value FROM source_rows ORDER BY value DESC",
+        "params": [],
+        "rows": [
+            {"label": "alpha", "value": 42},
+            {"label": "beta", "value": 17},
+        ],
+        "expect_allow": True,
+        "expect_min_rows": 2,
+    },
+    {
+        "label": "benign record fields survive",
+        "sql": "SELECT name, score, note FROM source_rows",
+        "params": [],
+        "rows": [{"name": "alpha", "score": 9, "note": "summary"}],
+        "expect_allow": True,
+        "expect_min_rows": 1,
+    },
+]
 _SCOPE_TOOLS = [
     {
         "type": "function",
@@ -161,13 +182,15 @@ _ALLOWED_TOOL_NAMES = {"get_schema", "execute_sql"}
 
 
 def _verification_tests() -> list[dict]:
-    """Host verification is policy-agnostic by default.
-
-    Unconditional utility fixtures are tempting, but they become a canned policy:
-    a room whose policy truly permits no disclosure would correctly emit an empty
-    transform and should not be rejected by a benchmark-shaped verifier.
-    """
-    return []
+    """Use generic utility smoke tests, never benchmark/prompt-keyword fixtures."""
+    if os.environ.get("HIVEMIND_SCOPE_VERIFY_USEFUL_ROWS", "true").strip().lower() in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }:
+        return []
+    return _UTILITY_VERIFY_TESTS
 
 
 def _completion_token_cap(default: int = 4096, hard_cap: int = 8192) -> int:

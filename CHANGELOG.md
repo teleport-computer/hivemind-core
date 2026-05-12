@@ -33,9 +33,9 @@ surface.
 - Fixed room table allowlist enforcement so valid aggregate SQL using CTEs,
   subqueries, or lateral function aliases is checked against the underlying
   base tables instead of rejecting the derived alias name.
-- Changed scope-Hermes host verification to policy-agnostic compile checks
-  instead of prompt-keyword aggregate fixtures, avoiding canned verifier
-  policies that reject legitimate restrictive rooms.
+- Changed scope-Hermes host verification to generic useful-row smoke checks
+  instead of prompt-keyword aggregate fixtures, avoiding benchmark-shaped
+  verifier policies while still catching destructive empty transforms.
 - Replaced the scope-Hermes `AIAgent` wrapper with a bounded bridge loop so
   scope design has explicit tool-call caps and no iteration-exhaustion summary
   path.
