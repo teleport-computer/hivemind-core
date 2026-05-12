@@ -243,20 +243,6 @@ _UNRESOLVED_RESPONSE_MARKERS = (
     "full report content is available in my previous response",
     "i have completed a deep research-level report",
 )
-_RANK_HEADER_NAMES = {"rank", "#", "position"}
-_METRIC_HEADER_MARKERS = (
-    "count",
-    "total",
-    "occurrences",
-    "records",
-    "rows",
-    "value",
-    "metric",
-    "amount",
-    "number",
-    "score",
-)
-
 
 def _completion_token_cap(default: int = 8192, hard_cap: int = 16384) -> int:
     raw_budget = os.environ.get("BUDGET_MAX_TOKENS", "")
@@ -320,120 +306,6 @@ def _looks_like_retriable_runtime_failure(text: str) -> bool:
 def _looks_like_unresolved_response(text: str) -> bool:
     lower = (text or "").lower()
     return any(marker in lower for marker in _UNRESOLVED_RESPONSE_MARKERS)
-
-
-def _markdown_cells(line: str) -> list[str]:
-    stripped = line.strip()
-    if not stripped.startswith("|") or "|" not in stripped[1:]:
-        return []
-    return [cell.strip() for cell in stripped.strip("|").split("|")]
-
-
-def _is_markdown_separator(cells: list[str]) -> bool:
-    return bool(cells) and all(re.fullmatch(r":?-{3,}:?", cell.strip()) for cell in cells)
-
-
-def _parse_number(value: str) -> float | None:
-    cleaned = re.sub(r"[^0-9.\-]+", "", value or "")
-    if not cleaned or cleaned in {"-", ".", "-."}:
-        return None
-    try:
-        return float(cleaned)
-    except ValueError:
-        return None
-
-
-def _normal_label(value: str) -> str:
-    return re.sub(r"\s+", " ", (value or "").strip().strip("`\"'[]")).lower()
-
-
-def _looks_like_fragmented_ranking_table(text: str) -> bool:
-    lines = (text or "").splitlines()
-    idx = 0
-    while idx < len(lines):
-        header = _markdown_cells(lines[idx])
-        if not header:
-            idx += 1
-            continue
-        if idx + 1 >= len(lines):
-            idx += 1
-            continue
-        sep = _markdown_cells(lines[idx + 1])
-        if not _is_markdown_separator(sep):
-            idx += 1
-            continue
-
-        headers = [h.lower().strip() for h in header]
-        rank_idx = next(
-            (i for i, h in enumerate(headers) if h in _RANK_HEADER_NAMES),
-            None,
-        )
-        if rank_idx is None:
-            idx += 2
-            continue
-
-        rows: list[list[str]] = []
-        cursor = idx + 2
-        while cursor < len(lines):
-            cells = _markdown_cells(lines[cursor])
-            if not cells or len(cells) < len(headers):
-                break
-            rows.append(cells)
-            cursor += 1
-        if len(rows) <= 1:
-            idx = max(cursor, idx + 2)
-            continue
-
-        metric_idx = next(
-            (
-                i
-                for i, h in enumerate(headers)
-                if i != rank_idx and any(marker in h for marker in _METRIC_HEADER_MARKERS)
-            ),
-            None,
-        )
-        if metric_idx is None:
-            numeric_counts: list[tuple[int, int]] = []
-            for col_idx in range(len(headers)):
-                if col_idx == rank_idx:
-                    continue
-                count = sum(
-                    1
-                    for cells in rows
-                    if col_idx < len(cells) and _parse_number(cells[col_idx]) is not None
-                )
-                numeric_counts.append((count, col_idx))
-            numeric_counts.sort(reverse=True)
-            if numeric_counts and numeric_counts[0][0] == len(rows):
-                metric_idx = numeric_counts[0][1]
-        if metric_idx is None:
-            idx = max(cursor, idx + 2)
-            continue
-
-        label_idx = next(
-            (i for i, h in enumerate(headers) if i not in {rank_idx, metric_idx} and h),
-            None,
-        )
-        if label_idx is None:
-            idx = max(cursor, idx + 2)
-            continue
-
-        seen_labels: set[str] = set()
-        previous_metric: float | None = None
-        for cells in rows:
-            label = _normal_label(cells[label_idx])
-            metric = _parse_number(cells[metric_idx])
-            if label and label in seen_labels:
-                return True
-            if label:
-                seen_labels.add(label)
-            if metric is not None:
-                if previous_metric is not None and metric > previous_metric:
-                    return True
-                previous_metric = metric
-
-        return False
-    return False
 
 
 def _bridge_url() -> str:
@@ -598,7 +470,7 @@ def _maybe_upload_report_artifact(markdown: str) -> None:
         print(f"report artifact upload unavailable: {e}", file=sys.stderr)
 
 
-def _user_facing_fallback() -> str:
+def _user_facing_failure_response() -> str:
     q_trim = (QUERY_PROMPT or "your question").strip().rstrip("?.! ")
     return (
         f"For your question about {q_trim!r}, I wasn't able to produce "
@@ -723,10 +595,7 @@ def _retry_body(body: str, reason: str, previous_response: str) -> str:
         "must directly satisfy the user's requested format and depth, not be a "
         "work summary, progress log, or reference to a previous response. Do "
         "not ask the user for schema, columns, or date formats that can be "
-        "discovered with tools. For table quality failures, rerun the aggregate "
-        "SQL, group by the exact cleaned label you will display, combine "
-        "duplicate labels before answering, and sort by the requested metric "
-        "when an order is requested.\n\n"
+        "discovered with tools.\n\n"
         f"PREVIOUS RESPONSE:\n{previous}"
     )
 
@@ -757,13 +626,6 @@ def _retry_query_agent(
             file=sys.stderr,
         )
         return None
-    if _looks_like_fragmented_ranking_table(retry_response):
-        print(
-            f"query harness retry ranking-table quality failure after {reason}: "
-            f"{retry_response[:500]}",
-            file=sys.stderr,
-        )
-        return None
     return retry_response
 
 
@@ -790,7 +652,7 @@ def main() -> None:
         response = _run_query_agent(body)
     except Exception as e:
         print(f"query harness error: {e}", file=sys.stderr)
-        print(_user_facing_fallback())
+        print(_user_facing_failure_response())
         return
 
     if not response or not response.strip():
@@ -801,7 +663,7 @@ def main() -> None:
         ):
             print(answer)
             return
-        print(_user_facing_fallback())
+        print(_user_facing_failure_response())
         return
     if _looks_like_runtime_failure(response):
         print(f"Hermes runtime failure from query harness: {response[:500]}", file=sys.stderr)
@@ -813,7 +675,7 @@ def main() -> None:
             ):
                 print(answer)
                 return
-        print(_user_facing_fallback())
+        print(_user_facing_failure_response())
         return
     if _looks_like_unresolved_response(response):
         print(f"Unresolved query harness response: {response[:500]}", file=sys.stderr)
@@ -824,23 +686,8 @@ def main() -> None:
         ):
             print(answer)
             return
-        print(_user_facing_fallback())
+        print(_user_facing_failure_response())
         return
-    if _looks_like_fragmented_ranking_table(response):
-        print(f"Fragmented ranking table from query harness: {response[:500]}", file=sys.stderr)
-        if answer := _retry_query_agent(
-            body,
-            reason=(
-                "ranking-table quality failure: duplicate labels or "
-                "non-descending metrics"
-            ),
-            previous_response=response,
-        ):
-            print(answer)
-            return
-        print(_user_facing_fallback())
-        return
-
     print(response)
 
 

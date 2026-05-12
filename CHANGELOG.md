@@ -39,13 +39,10 @@ surface.
 - Replaced the scope-Hermes `AIAgent` wrapper with a bounded bridge loop so
   scope design has explicit tool-call caps and no iteration-exhaustion summary
   path.
-- Added a query-Hermes ranking-table quality retry for duplicate category
-  labels or non-descending metrics, forcing the agent to regroup by the cleaned
-  displayed label before answering.
-- Hardened query-Hermes runs with retries for timeout/progress-log responses
-  instead of returning unfinished work as final answers, lower default SQL/tool
-  caps for latency, and final-output sanitization for invisible format controls
-  that can corrupt numeric tables.
+- Hardened query-Hermes runs with generic retries for timeout/progress-log
+  responses instead of returning unfinished work as final answers, lower default
+  SQL/tool caps for latency, and final-output sanitization for invisible format
+  controls that can corrupt numeric tables.
 - Moved expensive scope-Hermes simulation/source-inspection tools behind
   explicit opt-in environment flags so ordinary scoped analytical runs stay on
   the fast schema/SQL path.
