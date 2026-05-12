@@ -60,6 +60,29 @@ def test_query_role_registers_artifact_upload_tool(monkeypatch):
     assert "rendered PDF" in report_schema["description"]
 
 
+def test_scope_role_omits_expensive_tools_by_default(monkeypatch):
+    _module, registrations = _load_plugin(monkeypatch, "scope")
+
+    assert set(registrations) == {
+        "execute_sql",
+        "get_schema",
+        "verify_scope_fn",
+    }
+
+
+def test_scope_role_can_opt_into_expensive_tools(monkeypatch):
+    monkeypatch.setenv("HIVEMIND_SCOPE_ENABLE_SIMULATION_TOOLS", "true")
+    monkeypatch.setenv("HIVEMIND_SCOPE_ENABLE_AGENT_FILE_TOOLS", "true")
+    _module, registrations = _load_plugin(monkeypatch, "scope")
+
+    assert {
+        "simulate_query",
+        "simulate_multi",
+        "list_query_agent_files",
+        "read_query_agent_file",
+    }.issubset(registrations)
+
+
 @pytest.mark.asyncio
 async def test_upload_artifact_tool_uploads_text(monkeypatch):
     module, registrations = _load_plugin(monkeypatch, "query")

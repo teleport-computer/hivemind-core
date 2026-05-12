@@ -891,7 +891,7 @@ def test_scope_agent_retry_includes_specific_verifier_failures(
         'def scope(sql, params, rows):\n'
         "    kept = []\n"
         "    for row in rows:\n"
-        "        kept.append({k: row[k] for k in ('category', 'watches') if k in row})\n"
+        "        kept.append({k: row[k] for k in ('label', 'value') if k in row})\n"
         '    return {"allow": True, "rows": kept}\n'
     )
     passthrough_scope_fn = (
@@ -899,7 +899,7 @@ def test_scope_agent_retry_includes_specific_verifier_failures(
     )
     monkeypatch.setenv(
         "QUERY_PROMPT",
-        "Show me top hashtags and buckets by count as aggregate tables.",
+        "Show me top labels and buckets by count as aggregate tables.",
     )
     mod, calls = _load_agent(
         monkeypatch,
@@ -927,7 +927,7 @@ def test_scope_agent_retry_includes_specific_verifier_failures(
                 "results": [
                     {
                         "label": "aggregate group labels and metrics are preserved",
-                        "sql": "SELECT category, COUNT(*)::int AS watches FROM allowed_events GROUP BY category",
+                        "sql": "SELECT label, COUNT(*)::int AS value FROM allowed_events GROUP BY label",
                         "allow": True,
                         "rows_returned": 2,
                         "expected_allow": True,
@@ -1018,9 +1018,8 @@ def test_scope_prompt_centers_privacy_utility_frontier():
     assert "Do not apply canned policies" in source
     assert "least destructive compliant transform" in source
     assert "Preserve useful information" in source
-    assert "simulate_multi" in source
+    assert "Expensive downstream simulation" in source
     assert "verify_scope_fn" in source
-    assert "Do not inspect query source just to answer ordinary" in source
     assert "aggregate group labels" in source
     assert "expect_min_rows" in source
 

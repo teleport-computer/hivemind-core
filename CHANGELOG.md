@@ -45,6 +45,9 @@ surface.
 - Hardened query-Hermes runs with higher default tool/SQL caps and retries for
   timeout/progress-log responses instead of returning unfinished work as final
   answers.
+- Moved expensive scope-Hermes simulation/source-inspection tools behind
+  explicit opt-in environment flags so ordinary scoped analytical runs stay on
+  the fast schema/SQL/verification path.
 - Changed the hosted Hermes default model from `z-ai/glm-5` to
   `moonshotai/kimi-k2.6` and removed the scope-Hermes hardcoded synthetic
   summary-row gate that could fail otherwise valid analytical runs.

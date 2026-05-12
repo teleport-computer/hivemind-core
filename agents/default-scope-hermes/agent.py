@@ -85,14 +85,13 @@ fields plus metric fields, even when aliases are domain-specific instead of
 generic names like count, total, sum, min, max, or avg. Return an empty list
 only after you have no policy-compliant useful disclosure to preserve.
 
-Tools:
+Default tools:
 - get_schema(): inspect tables, columns, and types.
 - execute_sql(sql, params): sample or compute facts needed for the policy.
 - verify_scope_fn(source, tests): fast compile/test of your candidate.
-- simulate_query(scope_fn_source, prompt) and simulate_multi(candidates, prompt):
-  expensive downstream checks; use only when the tradeoff is unclear.
-- list_query_agent_files() and read_query_agent_file(path): inspect the query
-  agent if its behavior matters.
+Expensive downstream simulation and query-agent source inspection are advanced
+tools that may be enabled by deployment policy, but they are not part of the
+default fast path.
 
 Process:
 1. Read the policy and question.
@@ -100,24 +99,18 @@ Process:
    the data shape or policy boundary.
 3. Draft the least destructive compliant transform: pass through, filter rows,
    drop or replace fields, derive safer fields, summarize, or return no rows.
-4. Use verify_scope_fn on the exact function you will emit. Use simulate_query
-   or simulate_multi only when comparing candidates would materially clarify
-   the privacy/utility frontier.
+4. Use verify_scope_fn on the exact function you will emit.
 Stay in your lane: scope designs the privacy transform. The query agent will
 do the research. Do not spend turns researching trends, lifecycles, categories,
 or final report evidence. For broad analytical/report prompts with no explicit
 restrictive policy, prefer a compact transform that preserves aggregate and
 summary rows, redacts obvious raw identifiers/URLs/secrets if they appear, and
 then verify it. Target one get_schema call, zero or one execute_sql shape check,
-and one verify_scope_fn call. Avoid simulate_query/simulate_multi unless the
-policy boundary is genuinely ambiguous.
-Use list_query_agent_files/read_query_agent_file only when the question asks
-about the query agent or the policy boundary depends on its implementation.
-Do not inspect query source just to answer ordinary analytical/report prompts.
+and one verify_scope_fn call.
 Your emitted scope_fn is host-verified before use. For aggregate/statistical
 questions, the verifier requires preserving generic grouped rows that contain
 string labels and numeric metrics. Do not drop aggregate rows or erase grouping
-labels such as category/hashtag/bucket unless the policy explicitly forbids
+labels such as label/group/bucket unless the policy explicitly forbids
 that aggregate shape.
 
 Function contract:
@@ -147,13 +140,13 @@ _AGGREGATE_VERIFY_TESTS: list[dict] = [
     {
         "label": "aggregate group labels and metrics are preserved",
         "sql": (
-            "SELECT category, COUNT(*)::int AS watches "
-            "FROM allowed_events GROUP BY category ORDER BY watches DESC LIMIT 2"
+            "SELECT label, COUNT(*)::int AS value "
+            "FROM allowed_events GROUP BY label ORDER BY value DESC LIMIT 2"
         ),
         "params": [],
         "rows": [
-            {"category": "alpha", "watches": 42},
-            {"category": "beta", "watches": 17},
+            {"label": "alpha", "value": 42},
+            {"label": "beta", "value": 17},
         ],
         "expect_allow": True,
         "expect_min_rows": 2,
@@ -188,7 +181,6 @@ def _verification_tests() -> list[dict]:
         "report",
         "research",
         "analysis",
-        "hashtag",
     )
     if any(marker in text for marker in aggregate_markers):
         return _AGGREGATE_VERIFY_TESTS

@@ -165,7 +165,7 @@ UPLOAD_REPORT_ARTIFACT_SCHEMA = {
         "properties": {
             "filename": {
                 "type": "string",
-                "description": "Safe basename/stem, e.g. report or watch_history_report.",
+                "description": "Safe basename/stem, e.g. report or study_report.",
                 "default": "report",
             },
             "markdown": {
@@ -489,8 +489,8 @@ async def simulate_multi_handler(args: dict[str, Any], **_kw) -> str:
 # Roles match the access levels in hivemind/sandbox/tools.py:
 #   query        → execute_sql, get_schema, upload_artifact,
 #                  upload_report_artifact
-#   scope        → execute_sql, get_schema, verify_scope_fn,
-#                  simulate_query, simulate_multi
+#   scope        → execute_sql, get_schema, verify_scope_fn
+#                  + optional expensive simulation/source tools when enabled
 #   mediator     → nothing (tools=[] in current default-mediator)
 #
 # Unknown / unset role registers nothing and logs a warning. A sandbox
@@ -512,10 +512,6 @@ _ROLE_TOOLS: dict[str, set[str]] = {
         "execute_sql",
         "get_schema",
         "verify_scope_fn",
-        "simulate_query",
-        "simulate_multi",
-        "list_query_agent_files",
-        "read_query_agent_file",
     },
     "mediator": set(),
 }
@@ -530,6 +526,21 @@ if _allowed is None:
         sorted(_ROLE_TOOLS),
     )
     _allowed = set()
+else:
+    _allowed = set(_allowed)
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+if _role == "scope" and _env_flag("HIVEMIND_SCOPE_ENABLE_SIMULATION_TOOLS"):
+    _allowed.update({"simulate_query", "simulate_multi"})
+if _role == "scope" and _env_flag("HIVEMIND_SCOPE_ENABLE_AGENT_FILE_TOOLS"):
+    _allowed.update({"list_query_agent_files", "read_query_agent_file"})
 
 _REG_KW = dict(
     toolset=TOOLSET,

@@ -1,4 +1,4 @@
 name: hivemind
 version: 0.1.0
-description: "Native Hermes tools for hivemind sandboxed agents — execute_sql, get_schema, verify_scope_fn, simulate_query, simulate_multi, list_query_agent_files, read_query_agent_file. All tools call back to the per-session bridge or bounded query-agent source mount. No MCP (slow). Role gating is enforced by plugin registration and server-side bridge checks."
+description: "Native Hermes tools for hivemind sandboxed agents. Role gating registers the default fast path for each agent and keeps expensive scope simulation/source-inspection tools opt-in. All tools call back to the per-session bridge or bounded query-agent source mount. No MCP (slow)."
 author: "hivemind-core"
