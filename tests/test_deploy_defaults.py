@@ -71,6 +71,19 @@ def test_default_hermes_build_matrix_excludes_retired_index_agent():
     assert "default-index-hermes" not in workflow
 
 
+def test_post_deploy_hermes_eval_keeps_fast_canary_small():
+    workflow = Path(".github/workflows/deploy.yml").read_text()
+
+    assert "hermes_eval:" in workflow
+    assert "max_tokens=250000" in workflow
+    assert "max_llm_calls=20" in workflow
+    assert "timeout_seconds=300" in workflow
+    assert "max_tokens=1000000" in workflow
+    assert "watch_history_report_artifact" in workflow
+    assert "Deep report/artifact canary skipped" in workflow
+    assert "Fast canary failed; retrying to filter stochastic" not in workflow
+
+
 def test_phala_deploy_guards_update_vs_create_mode():
     deploy_sh = Path("deploy/phala/deploy.sh").read_text()
 

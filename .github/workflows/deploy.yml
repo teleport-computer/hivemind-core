@@ -647,15 +647,23 @@ jobs:
 
           for scenario in "${scenarios[@]}"; do
             for attempt in 1 2 3; do
+              max_tokens=1000000
+              max_llm_calls=60
+              timeout_seconds=900
+              if [ "$scenario" = "watch_history_top_hashtags" ]; then
+                max_tokens=250000
+                max_llm_calls=20
+                timeout_seconds=300
+              fi
               out_dir="eval/results/prod/$(date -u +%Y%m%dT%H%M%SZ)-post-deploy-${scenario}-attempt-${attempt}"
               mkdir -p "$out_dir"
-              echo "Running ${scenario} against ${ROOM} (attempt ${attempt}/3)"
+              echo "Running ${scenario} against ${ROOM} (attempt ${attempt}/3; max_tokens=${max_tokens}, max_llm_calls=${max_llm_calls}, timeout=${timeout_seconds}s)"
               if uv run --python 3.12 python -m eval run-room "$scenario" "$ROOM" \
                 --provider "$PROVIDER" \
                 "${profile_args[@]}" \
-                --max-tokens 1000000 \
-                --max-llm-calls 60 \
-                --timeout 900 \
+                --max-tokens "$max_tokens" \
+                --max-llm-calls "$max_llm_calls" \
+                --timeout "$timeout_seconds" \
                 --output-dir "$out_dir" \
                 "${model_args[@]}"; then
                 echo "Eval results remain on relay at: $(pwd)/${out_dir}"
@@ -667,11 +675,6 @@ jobs:
                 if is_transient_submit_failure "$summary"; then
                   echo "Transient room-submit gateway failure; retrying after warmup"
                   sleep $((attempt * 60))
-                  continue
-                fi
-                if [ "$scenario" = "watch_history_top_hashtags" ]; then
-                  echo "Fast canary failed; retrying to filter stochastic model-quality variance"
-                  sleep $((attempt * 30))
                   continue
                 fi
               fi

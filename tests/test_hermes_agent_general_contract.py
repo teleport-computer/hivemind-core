@@ -279,6 +279,9 @@ def test_query_agent_uses_bridge_tool_loop_for_benchmark_like_aggregate_prompt(
     system_prompt = payload["messages"][0]["content"]
     assert "structured Markdown report" in system_prompt
     assert "Do not shorten a requested report" in system_prompt
+    assert "For JSON or JSONB arrays, unnest one element per row" in system_prompt
+    assert "spend a remaining SQL call" in system_prompt
+    assert "corrected normalization query" in system_prompt
     assert payload["extra_body"]["reasoning"] == {
         "effort": "none",
         "exclude": True,

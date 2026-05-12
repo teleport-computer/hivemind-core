@@ -95,9 +95,16 @@ The relay job needs tenant access to the eval room. Store that key as GitHub
 secret `HERMES_PROD_EVAL_API_KEY`; the workflow writes a temporary hmctl
 profile on the relay before running the scenarios.
 
-The gate runs `watch_history_top_hashtags` and
-`watch_history_report_artifact` with `--max-tokens 1000000`,
-`--max-llm-calls 60`, and `--timeout 900`. It fails deploy follow-up checks on
-utility/privacy regressions, missing report artifacts, or latency over budget.
-Immediately after a CVM redeploy it retries transient room-submit 502/503/504
-gateway failures, but it does not retry deterministic grading failures.
+The gate always runs `watch_history_top_hashtags` as the fast canary with
+`--max-tokens 250000`, `--max-llm-calls 20`, and `--timeout 300`. In `auto`
+mode it only adds `watch_history_report_artifact` for Hermes agent, eval,
+artifact, sandbox, pipeline, dependency, or related test changes; manual
+deploys can force this with `hermes_eval=full`, restrict to the fast canary
+with `hermes_eval=fast`, or skip with `hermes_eval=skip`. The deep report
+canary keeps the larger `--max-tokens 1000000`, `--max-llm-calls 60`, and
+`--timeout 900` budget.
+
+The gate fails deploy follow-up checks on utility/privacy regressions, missing
+report artifacts, or latency over budget. Immediately after a CVM redeploy it
+retries transient room-submit 502/503/504 gateway failures, but it does not
+retry deterministic grading failures.

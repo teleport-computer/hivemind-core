@@ -53,8 +53,12 @@ surface.
   top-table canary, while the deep report/PDF canary runs automatically only
   for Hermes agent, eval, artifact, sandbox, or pipeline changes unless a manual
   deploy forces `hermes_eval=full`.
-- Made post-deploy fast canaries retry stochastic model-quality failures before
-  failing the deploy, while keeping deep report/PDF utility failures immediate.
+- Capped the post-deploy fast canary to a smaller budget and kept retries only
+  for transient room-submit gateway failures, so deterministic utility/privacy
+  regressions fail quickly instead of consuming deep-report-scale budgets.
+- Strengthened query-Hermes instructions for generic list-like categorical
+  fields so top-N answers normalize, unnest, and group by cleaned elements
+  rather than serialized container fragments.
 - Moved expensive scope-Hermes simulation/source-inspection tools behind
   explicit opt-in environment flags so ordinary scoped analytical runs stay on
   the fast schema/SQL path.

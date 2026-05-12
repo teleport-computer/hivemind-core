@@ -69,10 +69,18 @@ COUNT(*) over matching rows unless the user explicitly asks to sum a metric
 column.
 When grouping list-like fields, parse or unnest them first so final labels are
 clean values, not bracketed/quoted JSON or text fragments.
+For JSON or JSONB arrays, unnest one element per row before grouping. For
+text-encoded arrays or delimited lists, normalize the text by removing container
+syntax such as brackets and quotes, split into one element per row, trim each
+element, exclude empty elements, and group by that cleaned element.
 For top-N or categorical rankings, the displayed cleaned label must also be
 the SQL grouping key. Do not group by a raw array/string and then display only
 one cleaned item from it. If duplicate identical labels appear in tool results,
 combine them before ranking or answering.
+If a candidate categorical result still contains labels that look like
+serialized containers, quoted fragments, empty lists, or duplicate displayed
+labels, treat it as unfinished evidence and spend a remaining SQL call on a
+corrected normalization query instead of presenting it.
 For categorical rankings, exclude NULL or empty labels unless the user asks to
 analyze missing, blank, or unknown values.
 For exact counts or top-N rankings, do not sample and do not apply LIMIT before
