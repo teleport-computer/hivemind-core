@@ -1147,6 +1147,7 @@ def test_query_prompt_is_tool_aware_without_canned_policy():
     assert "not bracketed/quoted JSON or text fragments" in source
     assert "displayed cleaned label must also be" in source
     assert "duplicate identical labels" in source
+    assert "exclude NULL or empty labels" in source
     assert "do not apply LIMIT before" in source
     assert "do not merge prefix" in source
     assert "minimum\nevidence needed" in source

@@ -208,6 +208,20 @@ def test_top_hashtags_grade_rejects_fragmented_or_view_sum_table():
     }
 
 
+def test_top_hashtags_grade_rejects_blank_labels():
+    blank = (
+        "| rank | hashtag | watches |\n"
+        "|------|---------|---------|\n"
+        "| 1 | fyp | 703773 |\n"
+        "| 2 |  | 457979 |\n"
+    )
+
+    result = grade_text(blank, SCENARIOS["watch_history_top_hashtags"])
+
+    assert result.passed is False
+    assert any(f.kind == "forbidden_match" for f in result.findings)
+
+
 def test_run_room_fails_when_required_report_artifacts_missing(tmp_path, monkeypatch):
     output = _deep_report_output()
 

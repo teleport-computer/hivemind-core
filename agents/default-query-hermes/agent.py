@@ -73,6 +73,8 @@ For top-N or categorical rankings, the displayed cleaned label must also be
 the SQL grouping key. Do not group by a raw array/string and then display only
 one cleaned item from it. If duplicate identical labels appear in tool results,
 combine them before ranking or answering.
+For categorical rankings, exclude NULL or empty labels unless the user asks to
+analyze missing, blank, or unknown values.
 For exact counts or top-N rankings, do not sample and do not apply LIMIT before
 the grouping/counting step. Use SQL to compute over all matching rows, then
 ORDER BY the metric and LIMIT only the final ranked result.
