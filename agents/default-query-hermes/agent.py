@@ -69,10 +69,27 @@ COUNT(*) over matching rows unless the user explicitly asks to sum a metric
 column.
 When grouping list-like fields, parse or unnest them first so final labels are
 clean values, not bracketed/quoted JSON or text fragments.
+Before writing the aggregation SQL, determine the column's actual Postgres
+storage type. Same conceptual data ships as different types and each takes a
+different unnest function; guessing wrong returns "function ... does not exist"
+or "operator ... does not exist" and burns an SQL-call slot. Either call
+get_schema OR run a one-row probe like ``SELECT pg_typeof(<col>) FROM <tbl>
+LIMIT 1`` once, then branch:
+  - native array (``pg_typeof`` ends in ``[]``, e.g. ``text[]``): use
+    ``unnest(<col>)``;
+  - ``jsonb`` / ``json`` containing an array: use
+    ``jsonb_array_elements_text(<col>::jsonb)``;
+  - ``text`` storing a JSON-serialized array (e.g. ``'["fyp","cooking"]'``):
+    cast first with ``jsonb_array_elements_text(<col>::jsonb)``;
+  - ``text`` storing a delimited list (e.g. ``'fyp,cooking'``): use
+    ``unnest(string_to_array(<col>, ','))`` and ``trim()`` each element.
 For JSON or JSONB arrays, unnest one element per row before grouping. For
 text-encoded arrays or delimited lists, normalize the text by removing container
 syntax such as brackets and quotes, split into one element per row, trim each
 element, exclude empty elements, and group by that cleaned element.
+When PostgreSQL JSON array functions fail because a column is stored as text,
+retry with an explicit jsonb cast for valid JSON arrays or fall back to
+regexp_split_to_table over cleaned text; do not stop at a compatibility note.
 For top-N or categorical rankings, the displayed cleaned label must also be
 the SQL grouping key. Do not group by a raw array/string and then display only
 one cleaned item from it. If duplicate identical labels appear in tool results,
@@ -263,6 +280,19 @@ _UNRESOLVED_RESPONSE_MARKERS = (
     "report content is available in my previous response",
     "full report content is available in my previous response",
     "i have completed a deep research-level report",
+    "data unavailable",
+    "function compatibility issues",
+    "no usable ranked results",
+    "sql execution errors",
+    "unable to produce",
+    "unable to successfully query",
+    "what the analysis would show",
+)
+_UNRESOLVED_RESPONSE_PATTERNS = (
+    r"\bi(?:'m| am)? unable to (?:produce|calculate|determine|complete|successfully query)\b",
+    r"\bquer(?:y|ies)\b.{0,120}\b(?:timed out|failed|couldn'?t complete|could not complete)\b",
+    r"\bscheduled query\b.{0,120}\b(?:timed out|couldn'?t complete|could not complete)\b",
+    r"\bno usable\b.{0,80}\bresults\b",
 )
 
 def _completion_token_cap(default: int = 8192, hard_cap: int = 16384) -> int:
@@ -329,7 +359,9 @@ def _looks_like_retriable_runtime_failure(text: str) -> bool:
 
 def _looks_like_unresolved_response(text: str) -> bool:
     lower = (text or "").lower()
-    return any(marker in lower for marker in _UNRESOLVED_RESPONSE_MARKERS)
+    return any(marker in lower for marker in _UNRESOLVED_RESPONSE_MARKERS) or any(
+        re.search(pattern, lower, flags=re.DOTALL) for pattern in _UNRESOLVED_RESPONSE_PATTERNS
+    )
 
 
 def _bridge_url() -> str:

@@ -211,6 +211,15 @@ class SandboxBackend:
             run_id=run_id,
             run_store=run_store,
             llm_egress_enabled=llm_egress_enabled,
+            debug_trace_enabled=bool(
+                getattr(self.settings, "debug_trace_enabled", False)
+            ),
+            debug_trace_max_entries=int(
+                getattr(self.settings, "debug_trace_max_entries", 200)
+            ),
+            debug_trace_max_chars_per_entry=int(
+                getattr(self.settings, "debug_trace_max_chars_per_entry", 4_000)
+            ),
         )
 
         try:
@@ -310,6 +319,16 @@ class SandboxBackend:
                 telemetry = get_telemetry()
                 if telemetry:
                     usage_summary["bridge"] = telemetry
+            # Operator-only debug capture. Empty list when the bridge had
+            # ``debug_trace_enabled=False`` (production default), so this
+            # is a no-op outside dev / self-hosted deployments. The trace
+            # rides usage_json into the run row and surfaces in the admin
+            # run-detail "Usage breakdown" panel without any other plumbing.
+            get_debug_trace = getattr(bridge, "get_debug_trace", None)
+            if callable(get_debug_trace):
+                trace = get_debug_trace()
+                if trace:
+                    usage_summary["debug_trace"] = trace
 
             if return_budget_summary and return_tape:
                 return output, usage_summary, tape_data

@@ -668,6 +668,91 @@ def test_query_agent_retries_timed_out_progress_log_for_requested_table(
     assert "The SQL queries timed out" in retry_body
 
 
+def test_query_agent_retries_timeout_apology_from_live_table_run(
+    monkeypatch,
+    capsys,
+):
+    monkeypatch.setenv(
+        "QUERY_PROMPT",
+        "Show me my top 30 hashtags by watch count as a markdown table with "
+        "columns: rank, hashtag, watches. Just the table, no explanation.",
+    )
+    apology = (
+        "I'm unable to produce the requested table because the query to aggregate "
+        "hashtags by watch count timed out. The hashtag data is stored as JSON "
+        "text arrays, and the scheduled query couldn't complete the required "
+        "parsing and grouping within the time budget.\n\n"
+        "No usable ranked results were returned."
+    )
+    fixed = (
+        "| rank | hashtag | watches |\n"
+        "|---|---:|---:|\n"
+        "| 1 | fyp | 703773 |\n"
+        "| 2 | viral | 201314 |\n"
+    )
+    mod, calls = _load_query_agent(
+        monkeypatch,
+        "default_query_hermes_retry_live_timeout_apology_contract_test",
+        chat_responses=[_chat_response(apology), _chat_response(fixed)],
+    )
+
+    mod.main()
+
+    captured = capsys.readouterr()
+    assert captured.out.strip() == fixed.strip()
+    assert len(calls["llm_payloads"]) == 2
+    retry_body = calls["llm_payloads"][1]["messages"][1]["content"]
+    assert "unresolved query harness response" in retry_body
+    assert "unable to produce" in retry_body
+    assert "query to aggregate" in retry_body
+
+
+def test_query_agent_retries_data_unavailable_analysis_placeholder(
+    monkeypatch,
+    capsys,
+):
+    monkeypatch.setenv(
+        "QUERY_PROMPT",
+        "Show me whether my TikTok feed got bigger or smaller this week. "
+        "Calculate category diversity by day. Return a markdown table with "
+        "columns: day, diversity_score, top_category, percent_top_category, "
+        "wider_or_narrower_than_yesterday. Then write one sentence the cat would say.",
+    )
+    placeholder = (
+        "## TikTok Feed Diversity This Week\n\n"
+        "| day | diversity_score | top_category | percent_top_category | "
+        "wider_or_narrower_than_yesterday |\n"
+        "|---|---|---|---|---|\n"
+        "| *(data unavailable)* | - | - | - | - |\n\n"
+        "I was unable to successfully query the database due to SQL execution errors. "
+        "The queries failed on function compatibility issues with this PostgreSQL "
+        "instance.\n\n"
+        "**What the analysis would show:** category diversity by day."
+    )
+    fixed = (
+        "| day | diversity_score | top_category | percent_top_category | "
+        "wider_or_narrower_than_yesterday |\n"
+        "|---|---:|---|---:|---|\n"
+        "| 2026-05-11 | 0.82 | fyp | 18.4% | - |\n"
+        "| 2026-05-12 | 0.87 | cooking | 14.2% | wider |\n\n"
+        "The cat says: More windows, fewer repeats."
+    )
+    mod, calls = _load_query_agent(
+        monkeypatch,
+        "default_query_hermes_retry_data_unavailable_contract_test",
+        chat_responses=[_chat_response(placeholder), _chat_response(fixed)],
+    )
+
+    mod.main()
+
+    captured = capsys.readouterr()
+    assert captured.out.strip() == fixed.strip()
+    assert len(calls["llm_payloads"]) == 2
+    retry_body = calls["llm_payloads"][1]["messages"][1]["content"]
+    assert "data unavailable" in retry_body
+    assert "function compatibility issues" in retry_body
+
+
 def test_query_agent_caps_short_prompts_to_two_sql_calls_by_default(
     monkeypatch,
     capsys,

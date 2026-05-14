@@ -411,6 +411,9 @@ class BridgeServer:
         run_id: str | None = None,
         run_store=None,
         llm_egress_enabled: bool = True,
+        debug_trace_enabled: bool = False,
+        debug_trace_max_entries: int = 200,
+        debug_trace_max_chars_per_entry: int = 4_000,
     ):
         self.session_token = session_token
         self.tools = {t.name: t for t in tools}
@@ -444,6 +447,17 @@ class BridgeServer:
         self._llm_tool_call_names: list[str] = []
         self._tool_call_names: list[str] = []
         self._finish_reasons: dict[str, int] = {}
+
+        # Operator-only debug trace. Default is OFF. The production CVM
+        # promises participants that arguments, SQL strings, returned rows,
+        # and PG error text do not leak outside the enclave. When the
+        # operator sets HIVEMIND_DEBUG_TRACE_ENABLED=1 (self-hosted /
+        # development only), every tool call is captured here and flushed
+        # to ``usage_json.debug_trace`` in backend.py once the agent exits.
+        self.debug_trace_enabled = bool(debug_trace_enabled)
+        self._debug_trace_max_entries = int(debug_trace_max_entries)
+        self._debug_trace_max_chars = int(debug_trace_max_chars_per_entry)
+        self._debug_trace: list[dict] = []
 
     @staticmethod
     def _count_names(names: list[str]) -> dict[str, int]:
@@ -488,6 +502,75 @@ class BridgeServer:
 
     def _record_tool_call(self, tool_name: str) -> None:
         self._tool_call_names.append(tool_name)
+
+    def _truncate(self, value: object) -> str:
+        """Stringify and truncate a value to the per-entry debug cap."""
+        if value is None:
+            return ""
+        try:
+            text = value if isinstance(value, str) else json.dumps(value, default=str)
+        except (TypeError, ValueError):
+            text = str(value)
+        if len(text) > self._debug_trace_max_chars:
+            return text[: self._debug_trace_max_chars] + "... [truncated]"
+        return text
+
+    def _record_debug_trace(
+        self,
+        tool_name: str,
+        arguments: dict,
+        result: str,
+        error: str | None,
+    ) -> None:
+        """Append one tool-call entry to the in-memory debug trace.
+
+        No-op when the operator hasn't enabled HIVEMIND_DEBUG_TRACE_ENABLED;
+        keeps the privacy contract intact in production. When enabled, stores
+        the actual SQL strings + params + result preview + PG error text so
+        operators can debug why a query agent failed.
+        """
+        if not self.debug_trace_enabled:
+            return
+        if len(self._debug_trace) >= self._debug_trace_max_entries:
+            return
+        sql = arguments.get("sql") if isinstance(arguments, dict) else None
+        params = arguments.get("params") if isinstance(arguments, dict) else None
+        entry: dict = {
+            "ts": time.time(),
+            "role": self.role,
+            "tool": tool_name,
+        }
+        if sql is not None:
+            entry["sql"] = self._truncate(sql)
+        if params is not None:
+            entry["params"] = self._truncate(params)
+        # For non-SQL tools, keep the full args under a generic key.
+        if sql is None and params is None and arguments:
+            entry["arguments"] = self._truncate(arguments)
+        # Tools.execute_sql returns ``{"error": "..."}`` as a JSON-encoded
+        # *result* rather than raising, so the same field shows up either
+        # via the handler exception path (rare) or embedded in result.
+        # Surface both as ``entry.error`` for uniform reading by operators.
+        inline_error = None
+        if not error and isinstance(result, str) and result.startswith("{"):
+            try:
+                parsed = json.loads(result)
+                if isinstance(parsed, dict) and parsed.get("error"):
+                    inline_error = str(parsed["error"])
+            except (TypeError, ValueError):
+                pass
+        if error or inline_error:
+            entry["error"] = self._truncate(error or inline_error)
+        else:
+            entry["result_preview"] = self._truncate(result)
+        self._debug_trace.append(entry)
+
+    def get_debug_trace(self) -> list[dict]:
+        """Return captured tool-call entries.
+
+        Empty when ``debug_trace_enabled`` is False (production default).
+        """
+        return list(self._debug_trace)
 
     async def _handle_llm_call(self, kwargs: dict) -> dict:
         """Shared LLM call handler with tape replay/record and budget enforcement.
@@ -871,16 +954,19 @@ class BridgeServer:
             )
             bridge._record_tool_call(tool_name)
             if tool_name not in bridge.tools:
-                return BridgeToolResponse(
-                    result="",
-                    error=f"Unknown tool '{tool_name}'. "
-                    f"Available: {', '.join(bridge.tools)}",
+                err = (
+                    f"Unknown tool '{tool_name}'. "
+                    f"Available: {', '.join(bridge.tools)}"
                 )
+                bridge._record_debug_trace(tool_name, req.arguments, "", err)
+                return BridgeToolResponse(result="", error=err)
             try:
                 result = await bridge.on_tool_call(tool_name, req.arguments)
+                bridge._record_debug_trace(tool_name, req.arguments, result, None)
                 return BridgeToolResponse(result=result)
             except Exception as e:
                 logger.warning("Tool %s error: %s", tool_name, e)
+                bridge._record_debug_trace(tool_name, req.arguments, "", str(e))
                 return BridgeToolResponse(result="", error=str(e))
 
         # ── Scope-agent-only endpoints ──

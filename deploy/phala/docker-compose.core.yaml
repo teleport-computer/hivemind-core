@@ -143,6 +143,11 @@ services:
       HIVEMIND_MAX_TOKENS: ${HIVEMIND_MAX_TOKENS:-100000000}
       HIVEMIND_MAX_LLM_CALLS: ${HIVEMIND_MAX_LLM_CALLS:-100}
       HIVEMIND_AGENT_TIMEOUT: ${HIVEMIND_AGENT_TIMEOUT:-900}
+      # Operator debug trace. Set true only while debugging: it records
+      # SQL/tool args, result previews, and errors into usage_json.debug_trace.
+      HIVEMIND_DEBUG_TRACE_ENABLED: ${HIVEMIND_DEBUG_TRACE_ENABLED:-false}
+      HIVEMIND_DEBUG_TRACE_MAX_ENTRIES: ${HIVEMIND_DEBUG_TRACE_MAX_ENTRIES:-200}
+      HIVEMIND_DEBUG_TRACE_MAX_CHARS_PER_ENTRY: ${HIVEMIND_DEBUG_TRACE_MAX_CHARS_PER_ENTRY:-4000}
       # Metering is always recorded when available. Credit enforcement
       # rejects query-token runs without a payer key or enough balance.
       HIVEMIND_BILLING_ENFORCE_CREDITS: ${HIVEMIND_BILLING_ENFORCE_CREDITS:-true}

@@ -128,6 +128,9 @@ class SandboxSettings(BaseModel):
     global_max_llm_calls: int = Field(default=50, ge=1)
     global_max_tokens: int = Field(default=100_000_000, ge=1)
     global_timeout_seconds: int = Field(default=300, ge=1)
+    debug_trace_enabled: bool = False
+    debug_trace_max_entries: int = Field(default=200, ge=1)
+    debug_trace_max_chars_per_entry: int = Field(default=4_000, ge=1)
 
 
 # ── Bridge request/response models ──

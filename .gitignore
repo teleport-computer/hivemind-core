@@ -53,3 +53,4 @@ deploy/contracts/broadcast/
 deploy/contracts/cache/
 deploy/contracts/out/
 deploy/contracts/lib/
+.gstack/

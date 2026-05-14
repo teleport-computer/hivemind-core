@@ -126,6 +126,22 @@ class Settings(BaseSettings):
     # allowing deep report-style answers in hmctl.
     max_run_output_chars: int = 50_000
 
+    # Operator-only debug trace. OFF by default. Hivemind's privacy contract
+    # is that the operator does not see tool arguments, SQL strings, query
+    # results, or PG error text inside the CVM. When this flag is enabled
+    # (env: HIVEMIND_DEBUG_TRACE_ENABLED=1), the bridge captures every
+    # ``execute_sql`` / tool call (sql, params, result preview, error) into
+    # the run's ``usage_json.debug_trace`` so the operator can read what the
+    # query agent actually saw. Use only in self-hosted / dev deployments:
+    # turning this on in a shared production CVM breaks the privacy promise
+    # the room manifest signs to participants.
+    debug_trace_enabled: bool = False
+    # Hard cap on captured-trace size per run, in characters. Each tool call
+    # entry's sql/params/result fields get truncated to roughly this many
+    # chars combined; the whole trace also truncates after N entries.
+    debug_trace_max_entries: int = 200
+    debug_trace_max_chars_per_entry: int = 4_000
+
     # On-chain governance (feedling's third attestation binding).
     # `app_auth_contract` is the deployed HivemindAppAuth address; when
     # set, the CLI queries `isAppAllowed(compose_hash)` on every

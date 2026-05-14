@@ -268,6 +268,119 @@ async def test_bridge_telemetry_records_llm_tool_calls_and_tool_dispatch(bridge)
 
 
 @pytest.mark.asyncio
+async def test_debug_trace_off_by_default_captures_nothing(bridge):
+    """The privacy contract: when the operator hasn't set
+    HIVEMIND_DEBUG_TRACE_ENABLED, no SQL, params, results, or error text
+    survive the bridge. get_debug_trace() must return []."""
+    server, client, budget = bridge
+    headers = {"Authorization": "Bearer test-token-123"}
+    resp = await client.post(
+        "/tools/execute_sql",
+        headers=headers,
+        json={"arguments": {"sql": "SELECT * FROM secrets", "params": [42]}},
+    )
+    assert resp.status_code == 200
+    assert server.get_debug_trace() == []
+
+
+@pytest.mark.asyncio
+async def test_debug_trace_on_captures_sql_params_and_pg_errors():
+    """When the operator opts in, the trace records sql + params + result
+    preview, AND surfaces tool-layer inline errors (the ``{"error": "..."}``
+    JSON envelope that tools.execute_sql returns) as entry.error."""
+
+    async def on_tool_call_with_inline_error(name, args):
+        if args.get("sql", "").startswith("BROKEN"):
+            return json.dumps(
+                {"error": 'function unnest(text) does not exist'}
+            )
+        return '[{"id": 1}]'
+
+    budget = Budget(max_calls=10, max_tokens=100_000)
+    server = BridgeServer(
+        session_token="t",
+        tools=_make_tools(),
+        on_tool_call=on_tool_call_with_inline_error,
+        llm_caller=_mock_llm_caller,
+        budget=budget,
+        host="127.0.0.1",
+        debug_trace_enabled=True,
+    )
+    port = await server.start()
+    client = httpx.AsyncClient(base_url=f"http://127.0.0.1:{port}")
+    try:
+        headers = {"Authorization": "Bearer t"}
+
+        # 1) Successful tool call: sql + params + result_preview captured.
+        await client.post(
+            "/tools/execute_sql",
+            headers=headers,
+            json={"arguments": {"sql": "SELECT 1", "params": [7]}},
+        )
+        # 2) Inline-error tool call (the standard PG failure path).
+        await client.post(
+            "/tools/execute_sql",
+            headers=headers,
+            json={"arguments": {"sql": "BROKEN unnest(hashtags)", "params": []}},
+        )
+
+        trace = server.get_debug_trace()
+        assert len(trace) == 2
+        ok, err = trace
+        assert ok["tool"] == "execute_sql"
+        assert ok["sql"] == "SELECT 1"
+        assert "[7]" in ok["params"]
+        assert "result_preview" in ok and "error" not in ok
+        assert err["sql"].startswith("BROKEN")
+        assert "function unnest(text) does not exist" in err["error"]
+        assert "result_preview" not in err
+    finally:
+        await client.aclose()
+        await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_debug_trace_truncates_and_caps_entries():
+    """Per-entry char cap and per-trace entry cap both fire."""
+
+    big = "x" * 10_000
+
+    async def big_result(name, args):
+        return big
+
+    budget = Budget(max_calls=10, max_tokens=100_000)
+    server = BridgeServer(
+        session_token="t",
+        tools=_make_tools(),
+        on_tool_call=big_result,
+        llm_caller=_mock_llm_caller,
+        budget=budget,
+        host="127.0.0.1",
+        debug_trace_enabled=True,
+        debug_trace_max_entries=3,
+        debug_trace_max_chars_per_entry=50,
+    )
+    port = await server.start()
+    client = httpx.AsyncClient(base_url=f"http://127.0.0.1:{port}")
+    try:
+        headers = {"Authorization": "Bearer t"}
+        for _ in range(5):
+            await client.post(
+                "/tools/execute_sql",
+                headers=headers,
+                json={"arguments": {"sql": big}},
+            )
+        trace = server.get_debug_trace()
+        assert len(trace) == 3, "max_entries cap should drop entries past 3"
+        for entry in trace:
+            assert "[truncated]" in entry["sql"]
+            assert "[truncated]" in entry["result_preview"]
+    finally:
+        await client.aclose()
+        await server.stop()
+
+
+@pytest.mark.asyncio
 async def test_tool_call_unknown(bridge):
     server, client, budget = bridge
     headers = {"Authorization": "Bearer test-token-123"}

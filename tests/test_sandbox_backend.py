@@ -17,6 +17,9 @@ def _settings(**overrides) -> SandboxSettings:
         "global_max_llm_calls": 50,
         "global_max_tokens": 200_000,
         "global_timeout_seconds": 300,
+        "debug_trace_enabled": False,
+        "debug_trace_max_entries": 200,
+        "debug_trace_max_chars_per_entry": 4_000,
     }
     data.update(overrides)
     return SandboxSettings(**data)
@@ -74,6 +77,7 @@ def _patch_runner(monkeypatch, runner_cls):
 @pytest.mark.asyncio
 async def test_backend_returns_output_and_usage_on_success(monkeypatch):
     runner_instances = []
+    bridge_instances = []
     bridge_events = {"started": 0, "stopped": 0}
 
     class _Runner:
@@ -94,6 +98,7 @@ async def test_backend_returns_output_and_usage_on_success(monkeypatch):
     class _Bridge:
         def __init__(self, *args, **kwargs):
             self.kwargs = kwargs
+            bridge_instances.append(self)
 
         async def start(self) -> int:
             bridge_events["started"] += 1
@@ -136,6 +141,7 @@ async def test_backend_returns_output_and_usage_on_success(monkeypatch):
     assert usage["max_tokens"] == 900
     assert usage["bridge"] == {"llm_calls": 0, "tool_call_counts": {"list": 1}}
     assert bridge_events == {"started": 1, "stopped": 1}
+    assert bridge_instances[0].kwargs["debug_trace_enabled"] is False
 
     run_kwargs = runner_instances[0].run_kwargs
     env = run_kwargs["env"]
@@ -154,6 +160,69 @@ async def test_backend_returns_output_and_usage_on_success(monkeypatch):
     capped_agent = run_kwargs["agent"]
     assert capped_agent.memory_mb == 128
     assert capped_agent.timeout_seconds == 20
+
+
+@pytest.mark.asyncio
+async def test_backend_passes_debug_trace_settings_and_returns_trace(monkeypatch):
+    bridge_instances = []
+
+    class _Runner:
+        def __init__(self, settings):
+            self.settings = settings
+
+        async def run_agent(self, **kwargs):
+            return ContainerResult(
+                stdout="final answer\n",
+                stderr="",
+                exit_code=0,
+                timed_out=False,
+            )
+
+    class _Bridge:
+        def __init__(self, *args, **kwargs):
+            self.kwargs = kwargs
+            bridge_instances.append(self)
+
+        async def start(self) -> int:
+            return 9999
+
+        async def stop(self):
+            return None
+
+        def get_debug_trace(self):
+            return [{"tool": "execute_sql", "sql": "SELECT 1"}]
+
+    _patch_runner(monkeypatch, _Runner)
+    monkeypatch.setattr(backend_module, "BridgeServer", _Bridge)
+
+    backend = backend_module.SandboxBackend(
+        llm_client=AsyncMock(),
+        llm_model="model",
+        settings=_settings(
+            debug_trace_enabled=True,
+            debug_trace_max_entries=7,
+            debug_trace_max_chars_per_entry=123,
+        ),
+        agent=_agent(),
+    )
+
+    async def on_tool_call(name: str, args: dict) -> str:
+        return "[]"
+
+    output, usage = await backend.run(
+        role="query",
+        env={"QUERY_PROMPT": "hi"},
+        tools=_tools(),
+        on_tool_call=on_tool_call,
+        return_budget_summary=True,
+    )
+
+    assert output == "final answer"
+    assert usage["debug_trace"] == [{"tool": "execute_sql", "sql": "SELECT 1"}]
+    bridge_kwargs = bridge_instances[0].kwargs
+    assert bridge_kwargs["debug_trace_enabled"] is True
+    assert bridge_kwargs["debug_trace_max_entries"] == 7
+    assert bridge_kwargs["debug_trace_max_chars_per_entry"] == 123
 
 
 @pytest.mark.asyncio

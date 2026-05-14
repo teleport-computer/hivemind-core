@@ -27,4 +27,7 @@ def build_sandbox_settings(settings: Settings) -> SandboxSettings:
         global_max_llm_calls=settings.max_llm_calls,
         global_max_tokens=settings.max_tokens,
         global_timeout_seconds=settings.agent_timeout,
+        debug_trace_enabled=settings.debug_trace_enabled,
+        debug_trace_max_entries=settings.debug_trace_max_entries,
+        debug_trace_max_chars_per_entry=settings.debug_trace_max_chars_per_entry,
     )
