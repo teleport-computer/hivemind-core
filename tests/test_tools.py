@@ -236,6 +236,36 @@ class TestValidateTableAllowlist:
 
         assert _validate_table_allowlist(sql, ["watch_history"]) is None
 
+    def test_allows_comma_joined_table_valued_json_function(self):
+        sql = """
+        WITH hashtag_watches AS (
+          SELECT trim(both '"' FROM elem) AS hashtag
+          FROM watch_history,
+               jsonb_array_elements_text(hashtags::jsonb) AS elem
+          WHERE hashtags IS NOT NULL
+        )
+        SELECT
+          ROW_NUMBER() OVER (ORDER BY COUNT(*) DESC) AS rank,
+          hashtag,
+          COUNT(*) AS watches
+        FROM hashtag_watches
+        GROUP BY hashtag
+        ORDER BY watches DESC
+        LIMIT 30
+        """
+
+        assert _validate_table_allowlist(sql, ["watch_history"]) is None
+
+    def test_table_valued_function_subquery_still_checks_inner_tables(self):
+        sql = """
+        SELECT *
+        FROM jsonb_array_elements_text(
+          (SELECT private_payload FROM private_watch_history LIMIT 1)::jsonb
+        ) AS elem
+        """
+
+        assert _validate_table_allowlist(sql, ["watch_history"]) == "query rejected"
+
     def test_rejects_disallowed_table_inside_cte(self):
         sql = """
         WITH safe AS (

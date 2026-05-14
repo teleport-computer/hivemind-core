@@ -90,7 +90,7 @@ def _load_query_agent(
     module_name: str,
     *,
     chat_responses: list[dict],
-    tool_results: dict[str, str] | None = None,
+    tool_results: dict[str, str | list[str]] | None = None,
 ):
     mod, calls = _load_agent(
         monkeypatch,
@@ -112,7 +112,10 @@ def _load_query_agent(
         if "/tools/" in url:
             name = url.rsplit("/", 1)[-1]
             calls["tool_payloads"].append((name, json))
-            return _FakeHTTPResponse({"result": tool_results.get(name, "[]")})
+            result = tool_results.get(name, "[]")
+            if isinstance(result, list):
+                result = result.pop(0) if result else "[]"
+            return _FakeHTTPResponse({"result": result})
         if url.endswith("/sandbox/report-artifact"):
             calls["artifact_payloads"].append(json)
             return _FakeHTTPResponse(
@@ -377,6 +380,7 @@ def test_query_agent_forces_final_answer_after_tool_turn_cap_and_uploads_report(
     final_instruction = calls["llm_payloads"][1]["messages"][-1]["content"]
     assert "FINALIZATION INSTRUCTION" in final_instruction
     assert "do not list the same displayed label twice" in final_instruction
+    assert "Do not infer exact counts or top-N rankings" in final_instruction
     assert calls["artifact_payloads"] == [
         {
             "filename": "write_a_deep_research_report_and_upload_a_pdf_when_possible",
@@ -876,6 +880,63 @@ def test_query_agent_caps_short_prompts_to_three_sql_calls_by_default(
     assert len(calls["tool_payloads"]) == 3
     assert len(calls["llm_payloads"]) == 4
     assert "up to 3 SQL calls" in calls["llm_payloads"][0]["messages"][0]["content"]
+
+
+def test_query_agent_does_not_count_sql_error_as_evidence_budget(
+    monkeypatch,
+    capsys,
+):
+    monkeypatch.setenv("QUERY_PROMPT", "Show the top categories by count.")
+    monkeypatch.setenv("HIVEMIND_QUERY_MAX_SQL_CALLS", "1")
+    fixed = (
+        "| rank | category | count |\n"
+        "|---|---|---:|\n"
+        "| 1 | alpha | 42 |\n"
+    )
+    mod, calls = _load_query_agent(
+        monkeypatch,
+        "default_query_hermes_sql_error_not_evidence_contract_test",
+        chat_responses=[
+            _chat_response(
+                "",
+                tool_calls=[
+                    _tool_call(
+                        "execute_sql",
+                        {"sql": "SELECT * FROM missing_table"},
+                        call_id="bad_sql",
+                    )
+                ],
+            ),
+            _chat_response(
+                "",
+                tool_calls=[
+                    _tool_call(
+                        "execute_sql",
+                        {"sql": "SELECT category, COUNT(*) FROM events GROUP BY 1"},
+                        call_id="good_sql",
+                    )
+                ],
+            ),
+            _chat_response(fixed),
+        ],
+        tool_results={
+            "execute_sql": [
+                '{"error": "query rejected"}',
+                '[{"category": "alpha", "count": 42}]',
+            ]
+        },
+    )
+
+    mod.main()
+
+    captured = capsys.readouterr()
+    assert captured.out.strip() == fixed.strip()
+    assert [name for name, _payload in calls["tool_payloads"]] == [
+        "execute_sql",
+        "execute_sql",
+    ]
+    final_payload = calls["llm_payloads"][-1]
+    assert "SQL evidence budget reached" in final_payload["messages"][-1]["content"]
 
 
 def test_query_agent_keeps_larger_sql_budget_for_substantial_reports(

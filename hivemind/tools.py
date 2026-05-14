@@ -282,6 +282,15 @@ def _validate_table_allowlist(
                 if schema in _HIDDEN_SCHEMAS:
                     return "query rejected"
 
+                # sqlglot represents PostgreSQL table-valued functions in
+                # comma joins, e.g. ``FROM t, jsonb_array_elements_text(...)``,
+                # as ``exp.Table`` sources with an empty table name. They are
+                # not tenant tables, so allowlist only the real base tables
+                # they are joined against. Subqueries inside function arguments
+                # are still traversed as their own scopes.
+                if not name and isinstance(table.this, exp.Func):
+                    continue
+
                 if any(name.startswith(p) for p in _INTERNAL_TABLE_PREFIXES):
                     return "query rejected"
 

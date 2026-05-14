@@ -476,6 +476,21 @@ def _call_query_tool(name: str, args: dict[str, Any]) -> str:
     return _compact_tool_result(data.get("result") or "")
 
 
+def _tool_result_has_error(result: str) -> bool:
+    text = (result or "").strip()
+    if not text:
+        return False
+    if text.lower().startswith("error:"):
+        return True
+    if not text.startswith("{"):
+        return False
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        return False
+    return isinstance(parsed, dict) and bool(parsed.get("error"))
+
+
 def _assistant_message_for_history(message: dict[str, Any]) -> dict[str, Any]:
     keep: dict[str, Any] = {
         "role": "assistant",
@@ -500,7 +515,10 @@ def _finalization_instruction(reason: str) -> str:
         "before writing it: do not include blank labels unless the user asked "
         "for missing values, do not list the same displayed label twice, sum "
         "duplicate displayed labels when the metric is additive, then sort and "
-        "rank the merged rows by the requested metric."
+        "rank the merged rows by the requested metric. Do not infer exact "
+        "counts or top-N rankings from schema probes or small sample rows; if "
+        "no successful aggregate evidence supports the requested ranking, say "
+        "so plainly rather than inventing values."
     )
 
 
@@ -634,7 +652,10 @@ def _run_query_agent(body: str) -> str:
                 try:
                     result = _call_query_tool(name, args)
                     if name == "execute_sql":
-                        sql_calls += 1
+                        if _tool_result_has_error(result):
+                            finalization_reason = "SQL tool error encountered"
+                        else:
+                            sql_calls += 1
                         if sql_calls >= max_sql_calls:
                             finalization_reason = "SQL evidence budget reached"
                 except Exception as e:
