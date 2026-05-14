@@ -542,6 +542,7 @@ jobs:
 
           cd "$EVAL_CHECKOUT"
 
+          git remote set-url origin "$SOURCE_REPO"
           git fetch --prune origin
           if git rev-parse --verify --quiet "${EVAL_REF}^{commit}" >/dev/null; then
             git checkout --force --detach "$EVAL_REF"
