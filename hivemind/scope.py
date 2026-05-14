@@ -56,7 +56,11 @@ _SCOPE_BUILTINS: dict = {
 }
 
 MAX_SCOPE_FN_LENGTH = 10_000
-SCOPE_FN_TIMEOUT = 5  # seconds
+# Scope functions run in a spawned child interpreter in production. On Phala
+# CVMs the first cold spawn can take more than 5s even for a tiny function, so
+# keep the isolation deadline high enough to avoid rejecting good transforms
+# while still killing runaway code promptly.
+SCOPE_FN_TIMEOUT = 15  # seconds
 
 # Note: there is intentionally no module-level "default scope_fn" constant.
 # A previous version stored a Python source string named DEFAULT_SCOPE_FN_SOURCE

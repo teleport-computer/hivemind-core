@@ -314,9 +314,9 @@ class TestScopeRuntimeIsolation:
         elapsed = time.monotonic() - t0
         assert result["allow"] is False
         assert "timed out" in result["error"].lower()
-        # Subprocess fork + kill overhead can add a couple seconds beyond the
-        # nominal 5s budget; we just want to confirm the kill happened, not
-        # let the test wedge on a regression that fails to kill at all.
+        # Subprocess spawn + kill overhead can add a couple seconds beyond the
+        # nominal budget; we just want to confirm the kill happened, not let the
+        # test wedge on a regression that fails to kill at all.
         assert elapsed < SCOPE_FN_TIMEOUT + 5
 
     def test_memory_blowup_is_killed(self):
