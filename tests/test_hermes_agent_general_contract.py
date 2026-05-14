@@ -1237,6 +1237,72 @@ def test_scope_agent_accepts_unparseable_retry_after_compile_verification(
     assert "unparseable or unverifiable scope JSON" not in captured.err
 
 
+def test_scope_agent_uses_no_policy_recovery_after_unsafe_retry(
+    monkeypatch,
+    capsys,
+):
+    import_scope_fn = (
+        "def scope(sql, params, rows):\n"
+        "    import json\n"
+        '    return {"allow": True, "rows": rows}\n'
+    )
+    eval_scope_fn = (
+        "def scope(sql, params, rows):\n"
+        '    return eval("{\\"allow\\": True, \\"rows\\": rows}")\n'
+    )
+    monkeypatch.delenv("POLICY_CONTEXT", raising=False)
+    monkeypatch.setenv("QUERY_PROMPT", "Show me a markdown table of safe metrics.")
+    mod, calls = _load_scope_agent(
+        monkeypatch,
+        "default_scope_hermes_no_policy_recovery_test",
+        response=[
+            json.dumps({"scope_fn": import_scope_fn}),
+            json.dumps({"scope_fn": eval_scope_fn}),
+        ],
+    )
+    verified_sources = []
+
+    class FakeVerifyResponse:
+        def __init__(self, source):
+            self.source = source
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            verified_sources.append(self.source)
+            if self.source == mod._NO_POLICY_RECOVERY_SCOPE_FN:
+                return {"compiles": True, "all_tests_passed": True, "results": []}
+            if "import json" in self.source:
+                return {
+                    "compiles": False,
+                    "compile_error": "Scope functions cannot use imports",
+                }
+            return {
+                "compiles": False,
+                "compile_error": "Scope functions cannot call 'eval'",
+            }
+
+    def fake_post(_url, *, json, headers, timeout):
+        return FakeVerifyResponse(json["source"])
+
+    monkeypatch.setattr(mod.httpx, "post", fake_post)
+
+    mod.main()
+
+    captured = capsys.readouterr()
+    emitted = json.loads(captured.out)
+    assert emitted == {"scope_fn": mod._NO_POLICY_RECOVERY_SCOPE_FN}
+    assert compile_scope_fn(emitted["scope_fn"])
+    assert len(calls["chats"]) == 2
+    assert verified_sources == [
+        import_scope_fn,
+        eval_scope_fn,
+        mod._NO_POLICY_RECOVERY_SCOPE_FN,
+    ]
+    assert "scope no-policy recovery activated" in captured.err
+
+
 def test_scope_prompt_centers_privacy_utility_frontier():
     source = (ROOT / "agents/default-scope-hermes/agent.py").read_text()
 

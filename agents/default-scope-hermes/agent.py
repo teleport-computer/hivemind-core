@@ -122,6 +122,27 @@ _NO_REASONING_OVERRIDES = {"extra_body": {"reasoning": {"effort": "none", "exclu
 _HTTP_TIMEOUT = httpx.Timeout(120.0)
 _MAX_TOOL_RESULT_CHARS = 12_000
 _MAX_RETRY_CONTEXT_CHARS = 3000
+_NO_POLICY_RECOVERY_SCOPE_FN = (
+    "def scope(sql, params, rows):\n"
+    "    redacted_keys = ('email', 'phone', 'address', 'url', 'link', 'token', 'secret', 'password', 'api_key', 'cookie', 'session', 'auth')\n"
+    "    safe_rows = []\n"
+    "    for row in rows:\n"
+    "        if not isinstance(row, dict):\n"
+    "            continue\n"
+    "        out = {}\n"
+    "        for key, value in row.items():\n"
+    "            name = str(key).lower()\n"
+    "            redact = False\n"
+    "            for marker in redacted_keys:\n"
+    "                if marker in name:\n"
+    "                    redact = True\n"
+    "            if redact:\n"
+    "                out[key] = '[redacted]'\n"
+    "            else:\n"
+    "                out[key] = value\n"
+    "        safe_rows.append(out)\n"
+    "    return {'allow': True, 'rows': safe_rows}\n"
+)
 _UTILITY_VERIFY_TESTS: list[dict[str, Any]] = [
     {
         "label": "benign labeled metric rows survive",
@@ -452,6 +473,24 @@ def _emit_verified_scope(source: str) -> tuple[bool, str]:
     return False, reason
 
 
+def _emit_no_policy_recovery_scope(reason: str) -> bool:
+    """Last-resort recovery for model authoring errors when no policy exists."""
+    if POLICY_CONTEXT:
+        return False
+    print(
+        f"scope no-policy recovery activated after verifier rejection: {reason}",
+        file=sys.stderr,
+    )
+    verified, recovery_reason = _emit_verified_scope(_NO_POLICY_RECOVERY_SCOPE_FN)
+    if verified:
+        return True
+    print(
+        f"scope no-policy recovery failed self verification: {recovery_reason}",
+        file=sys.stderr,
+    )
+    return False
+
+
 def _fail_scope(reason: str, previous_response: str = "") -> None:
     preview = (previous_response or "").strip()[:500]
     if preview:
@@ -584,10 +623,14 @@ def main() -> None:
             retry_verified, retry_reason = _emit_verified_scope(retry["scope_fn"])
             if retry_verified:
                 return
+            if _emit_no_policy_recovery_scope(retry_reason):
+                return
             _fail_scope(
                 f"scope_fn failed self verification after retry: {retry_reason}",
                 response,
             )
+        if _emit_no_policy_recovery_scope(verify_reason):
+            return
         _fail_scope("scope_fn failed self verification", response)
 
     retry = _retry_scope_emit(
@@ -599,10 +642,14 @@ def main() -> None:
         retry_verified, retry_reason = _emit_verified_scope(retry["scope_fn"])
         if retry_verified:
             return
+        if _emit_no_policy_recovery_scope(retry_reason):
+            return
         _fail_scope(
             f"retry scope_fn failed self verification: {retry_reason}",
             response,
         )
+    if _emit_no_policy_recovery_scope("unparseable or truncated scope JSON"):
+        return
     _fail_scope("unparseable or unverifiable scope JSON", response)
 
 
