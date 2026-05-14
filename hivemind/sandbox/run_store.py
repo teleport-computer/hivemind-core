@@ -234,9 +234,16 @@ class RunStore:
                 stages.update(
                     {k: v for k, v in src.items() if isinstance(v, dict)}
                 )
+        merged = dict(existing)
+        merged.update(new)
+        debug_trace: list = []
+        for src in (existing.get("debug_trace"), new.get("debug_trace")):
+            if isinstance(src, list):
+                debug_trace.extend(entry for entry in src if isinstance(entry, dict))
+        if debug_trace:
+            merged["debug_trace"] = debug_trace
         if not stages:
-            return dict(new)
-        merged = dict(new)
+            return merged
         merged["stages"] = stages
         for key in ("calls", "prompt_tokens", "completion_tokens", "total_tokens"):
             merged[key] = sum(int(s.get(key) or 0) for s in stages.values())

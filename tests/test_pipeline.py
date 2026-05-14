@@ -11,6 +11,7 @@ from hivemind.models import QueryRequest, StoreRequest
 from hivemind.pipeline import Pipeline, _add_stage_usage, _new_usage_summary
 from hivemind.sandbox.agents import AgentStore
 from hivemind.sandbox.models import AgentConfig
+from hivemind.sandbox.run_store import RunStore
 
 
 def _make_pipeline(db: Database) -> Pipeline:
@@ -58,6 +59,71 @@ def test_add_stage_usage_preserves_bridge_telemetry():
     stage = summary["stages"]["query"]
     assert stage["bridge"]["llm_tool_call_counts"] == {"execute_sql": 1}
     assert stage["bridge"]["tool_call_counts"] == {"execute_sql": 1}
+
+
+def test_add_stage_usage_lifts_debug_trace_to_run_summary():
+    summary = _new_usage_summary(max_tokens=100)
+    _add_stage_usage(
+        summary,
+        "query",
+        {
+            "calls": 1,
+            "prompt_tokens": 10,
+            "completion_tokens": 5,
+            "total_tokens": 15,
+            "debug_trace": [
+                {
+                    "tool": "execute_sql",
+                    "arguments": {"sql": "SELECT 1"},
+                    "result_preview": "[{\"x\": 1}]",
+                }
+            ],
+        },
+        provider="openrouter",
+        model="test/model",
+    )
+
+    assert summary["debug_trace"] == [
+        {
+            "stage": "query",
+            "tool": "execute_sql",
+            "arguments": {"sql": "SELECT 1"},
+            "result_preview": "[{\"x\": 1}]",
+        }
+    ]
+
+
+def test_run_store_merge_usage_preserves_debug_trace():
+    existing = {
+        "calls": 1,
+        "prompt_tokens": 10,
+        "completion_tokens": 1,
+        "total_tokens": 11,
+        "max_tokens": 100,
+        "debug_trace": [{"stage": "scope", "tool": "get_schema"}],
+        "stages": {
+            "scope": {"calls": 1, "prompt_tokens": 10, "completion_tokens": 1}
+        },
+    }
+    new = {
+        "calls": 1,
+        "prompt_tokens": 20,
+        "completion_tokens": 2,
+        "total_tokens": 22,
+        "max_tokens": 200,
+        "debug_trace": [{"stage": "query", "tool": "execute_sql"}],
+        "stages": {
+            "query": {"calls": 1, "prompt_tokens": 20, "completion_tokens": 2}
+        },
+    }
+
+    merged = RunStore._merge_usage(existing, new)
+
+    assert merged["debug_trace"] == [
+        {"stage": "scope", "tool": "get_schema"},
+        {"stage": "query", "tool": "execute_sql"},
+    ]
+    assert set(merged["stages"]) == {"scope", "query"}
 
 
 @pytest.fixture

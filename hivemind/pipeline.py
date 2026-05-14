@@ -188,6 +188,17 @@ def _add_stage_usage(
     }
     if isinstance(usage.get("bridge"), dict):
         item["bridge"] = usage["bridge"]
+    debug_trace = usage.get("debug_trace")
+    if isinstance(debug_trace, list) and debug_trace:
+        stage_trace = []
+        for entry in debug_trace:
+            if not isinstance(entry, dict):
+                continue
+            tagged = dict(entry)
+            tagged.setdefault("stage", stage)
+            stage_trace.append(tagged)
+        if stage_trace:
+            summary.setdefault("debug_trace", []).extend(stage_trace)
     summary["calls"] += item["calls"]
     summary["prompt_tokens"] += item["prompt_tokens"]
     summary["completion_tokens"] += item["completion_tokens"]
