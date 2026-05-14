@@ -543,11 +543,18 @@ jobs:
           cd "$EVAL_CHECKOUT"
 
           git remote set-url origin "$SOURCE_REPO"
-          git fetch --prune origin
+          git fetch --prune origin \
+            '+refs/heads/*:refs/remotes/origin/*' \
+            '+refs/remotes/origin/*:refs/remotes/source-origin/*'
           if git rev-parse --verify --quiet "${EVAL_REF}^{commit}" >/dev/null; then
             git checkout --force --detach "$EVAL_REF"
           else
-            git checkout --force --detach "origin/${EVAL_REF#origin/}"
+            ref_name="${EVAL_REF#origin/}"
+            if git rev-parse --verify --quiet "origin/${ref_name}^{commit}" >/dev/null; then
+              git checkout --force --detach "origin/${ref_name}"
+            else
+              git checkout --force --detach "source-origin/${ref_name}"
+            fi
           fi
           echo "HEAD: $(git rev-parse --short HEAD)"
 
