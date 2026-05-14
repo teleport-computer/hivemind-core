@@ -71,10 +71,26 @@ def test_default_hermes_build_matrix_excludes_retired_index_agent():
     assert "default-index-hermes" not in workflow
 
 
+def test_build_images_uses_target_aware_push_plan():
+    workflow = Path(".github/workflows/build-images.yml").read_text()
+
+    assert "Changed files that drive image target plan" in workflow
+    assert "build_base_sdk: ${{ steps.plan.outputs.build_base_sdk }}" in workflow
+    assert "build_default_hermes: ${{ steps.plan.outputs.build_default_hermes }}" in workflow
+    assert "build_core: ${{ steps.plan.outputs.build_core }}" in workflow
+    assert "if: needs.prepare.outputs.build_default_hermes == 'true'" in workflow
+    assert "if: needs.prepare.outputs.build_core == 'true'" in workflow
+    assert "github.event_name != 'workflow_dispatch' ||" not in workflow
+
+
 def test_post_deploy_hermes_eval_keeps_fast_canary_small():
     workflow = Path(".github/workflows/deploy.yml").read_text()
 
     assert "hermes_eval:" in workflow
+    assert 'default: "fast"' in workflow
+    assert "HERMES_POST_DEPLOY_EVAL_MODE || 'fast'" in workflow
+    assert "HERMES_EVAL_WARMUP_SECONDS" in workflow
+    assert "sleep 60" not in workflow
     assert "max_tokens=250000" in workflow
     assert "max_llm_calls=20" in workflow
     assert "timeout_seconds=300" in workflow

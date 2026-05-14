@@ -50,7 +50,17 @@ jobs:
       ns: ${{ steps.lower.outputs.ns }}
       version: ${{ steps.ver.outputs.version }}
       short_sha: ${{ steps.sha.outputs.short_sha }}
+      build_base_sdk: ${{ steps.plan.outputs.build_base_sdk }}
+      build_base_sdk_hermes: ${{ steps.plan.outputs.build_base_sdk_hermes }}
+      build_default_hermes: ${{ steps.plan.outputs.build_default_hermes }}
+      build_core: ${{ steps.plan.outputs.build_core }}
+      build_postgres: ${{ steps.plan.outputs.build_postgres }}
+      build_sql_proxy: ${{ steps.plan.outputs.build_sql_proxy }}
     steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          fetch-depth: 0
+
       - id: lower
         run: echo "ns=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
       - id: ver
@@ -62,14 +72,137 @@ jobs:
           fi
       - id: sha
         run: echo "short_sha=$(echo '${{ github.sha }}' | cut -c1-7)" >> "$GITHUB_OUTPUT"
+      - id: plan
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          DISPATCH_TARGETS: ${{ github.event.inputs.targets || '' }}
+          BEFORE_SHA: ${{ github.event.before || '' }}
+          AFTER_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          build_base_sdk=false
+          build_base_sdk_hermes=false
+          build_default_hermes=false
+          build_core=false
+          build_postgres=false
+          build_sql_proxy=false
+
+          enable_all() {
+            build_base_sdk=true
+            build_base_sdk_hermes=true
+            build_default_hermes=true
+            build_core=true
+            build_postgres=true
+            build_sql_proxy=true
+          }
+
+          emit_plan() {
+            {
+              echo "build_base_sdk=${build_base_sdk}"
+              echo "build_base_sdk_hermes=${build_base_sdk_hermes}"
+              echo "build_default_hermes=${build_default_hermes}"
+              echo "build_core=${build_core}"
+              echo "build_postgres=${build_postgres}"
+              echo "build_sql_proxy=${build_sql_proxy}"
+            } >> "$GITHUB_OUTPUT"
+
+            {
+              echo "### Image build plan"
+              echo "- base-sdk: \`${build_base_sdk}\`"
+              echo "- base-sdk-hermes: \`${build_base_sdk_hermes}\`"
+              echo "- default-hermes: \`${build_default_hermes}\`"
+              echo "- core: \`${build_core}\`"
+              echo "- postgres: \`${build_postgres}\`"
+              echo "- sql-proxy: \`${build_sql_proxy}\`"
+            } >> "$GITHUB_STEP_SUMMARY"
+          }
+
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            targets="$(printf '%s' "$DISPATCH_TARGETS" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+            [ -n "$targets" ] || targets=all
+            if [ "$targets" = "all" ]; then
+              enable_all
+            else
+              case ",${targets}," in *",base-sdk,"*) build_base_sdk=true ;; esac
+              case ",${targets}," in *",base-sdk-hermes,"*) build_base_sdk_hermes=true ;; esac
+              case ",${targets}," in
+                *",default-hermes,"*)
+                  build_base_sdk_hermes=true
+                  build_default_hermes=true
+                  ;;
+              esac
+              case ",${targets}," in *",core,"*) build_core=true ;; esac
+              case ",${targets}," in *",postgres,"*) build_postgres=true ;; esac
+              case ",${targets}," in *",sql-proxy,"*) build_sql_proxy=true ;; esac
+            fi
+            emit_plan
+            exit 0
+          fi
+
+          before="$BEFORE_SHA"
+          after="$AFTER_SHA"
+          if [ -n "$before" ] && [ "$before" != "0000000000000000000000000000000000000000" ] && git cat-file -e "${before}^{commit}" 2>/dev/null; then
+            changed_files="$(git diff --name-only "$before" "$after")"
+          else
+            changed_files="$(git diff-tree --no-commit-id --name-only -r "$after")"
+          fi
+          if [ -z "$changed_files" ]; then
+            # Fail open: a build workflow that was triggered but cannot infer
+            # a diff should still produce the core tag auto-deploy expects.
+            build_core=true
+          fi
+
+          echo "Changed files that drive image target plan:"
+          printf '%s\n' "$changed_files"
+
+          while IFS= read -r path; do
+            [ -n "$path" ] || continue
+            case "$path" in
+              .dockerignore|.github/workflows/build-images.yml)
+                enable_all
+                ;;
+              .github/workflows/deploy.yml)
+                build_core=true
+                ;;
+              pyproject.toml|uv.lock|LICENSE|README.md|hivemind/*|hivemind/**|deploy/Dockerfile|deploy/boot.sh)
+                build_core=true
+                ;;
+              agents/base/*|agents/base/**)
+                build_base_sdk=true
+                build_core=true
+                ;;
+              agents/base-hermes/*|agents/base-hermes/**)
+                build_base_sdk_hermes=true
+                build_default_hermes=true
+                build_core=true
+                ;;
+              agents/default-query-hermes/*|agents/default-query-hermes/**|agents/default-scope-hermes/*|agents/default-scope-hermes/**|agents/default-mediator-hermes/*|agents/default-mediator-hermes/**)
+                build_base_sdk_hermes=true
+                build_default_hermes=true
+                build_core=true
+                ;;
+              agents/*|agents/**)
+                build_core=true
+                ;;
+              deploy/postgres/*|deploy/postgres/**)
+                build_core=true
+                build_postgres=true
+                build_sql_proxy=true
+                ;;
+              deploy/*|deploy/**)
+                build_core=true
+                ;;
+            esac
+          done <<< "$changed_files"
+
+          emit_plan
 
   # ---------- base SDK (shared layer for all agent images) ----------
   base-sdk:
     needs: prepare
-    if: >-
-      github.event_name != 'workflow_dispatch' ||
-      contains(github.event.inputs.targets, 'base-sdk') ||
-      github.event.inputs.targets == 'all'
+    if: needs.prepare.outputs.build_base_sdk == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -114,11 +247,7 @@ jobs:
   # ---------- base SDK Hermes (NousResearch/hermes-agent harness) ----------
   base-sdk-hermes:
     needs: prepare
-    if: >-
-      github.event_name != 'workflow_dispatch' ||
-      contains(github.event.inputs.targets, 'base-sdk-hermes') ||
-      contains(github.event.inputs.targets, 'default-hermes') ||
-      github.event.inputs.targets == 'all'
+    if: needs.prepare.outputs.build_base_sdk_hermes == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -163,10 +292,7 @@ jobs:
   # ---------- default Hermes agents (query/scope/mediator) ----------
   default-hermes:
     needs: [prepare, base-sdk-hermes]
-    if: >-
-      github.event_name != 'workflow_dispatch' ||
-      contains(github.event.inputs.targets, 'default-hermes') ||
-      github.event.inputs.targets == 'all'
+    if: needs.prepare.outputs.build_default_hermes == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -296,10 +422,7 @@ jobs:
   # ---------- hivemind-core ----------
   core:
     needs: prepare
-    if: >-
-      github.event_name != 'workflow_dispatch' ||
-      contains(github.event.inputs.targets, 'core') ||
-      github.event.inputs.targets == 'all'
+    if: needs.prepare.outputs.build_core == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -344,10 +467,7 @@ jobs:
   # ---------- hivemind-postgres ----------
   postgres:
     needs: prepare
-    if: >-
-      github.event_name != 'workflow_dispatch' ||
-      contains(github.event.inputs.targets, 'postgres') ||
-      github.event.inputs.targets == 'all'
+    if: needs.prepare.outputs.build_postgres == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -392,10 +512,7 @@ jobs:
   # ---------- sql-proxy (sidecar for postgres CVM) ----------
   sql-proxy:
     needs: prepare
-    if: >-
-      github.event_name != 'workflow_dispatch' ||
-      contains(github.event.inputs.targets, 'sql-proxy') ||
-      github.event.inputs.targets == 'all'
+    if: needs.prepare.outputs.build_sql_proxy == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read

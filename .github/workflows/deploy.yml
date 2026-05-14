@@ -97,13 +97,13 @@ on:
         required: false
         default: ""
       hermes_eval:
-        description: "Post-deploy Hermes eval mode: auto runs the fast canary always and the deep report only for relevant changes."
+        description: "Post-deploy Hermes eval mode: fast runs one canary; auto/full run deeper checks when needed."
         required: false
-        default: "auto"
+        default: "fast"
         type: choice
         options:
-          - auto
           - fast
+          - auto
           - full
           - skip
 
@@ -495,7 +495,8 @@ jobs:
       PROVIDER: ${{ vars.HERMES_PROD_EVAL_PROVIDER || 'openrouter' }}
       HMCTL_PROFILE: ${{ vars.HERMES_PROD_EVAL_HMCTL_PROFILE || 'prod-eval' }}
       HMCTL_SERVICE: ${{ vars.HERMES_PROD_EVAL_SERVICE || 'https://hivemind.teleport.computer' }}
-      HERMES_EVAL_MODE: ${{ github.event.inputs.hermes_eval || vars.HERMES_POST_DEPLOY_EVAL_MODE || 'auto' }}
+      HERMES_EVAL_MODE: ${{ github.event.inputs.hermes_eval || vars.HERMES_POST_DEPLOY_EVAL_MODE || 'fast' }}
+      HERMES_EVAL_WARMUP_SECONDS: ${{ vars.HERMES_EVAL_WARMUP_SECONDS || '20' }}
       EVAL_REF: ${{ github.event.inputs.ref || github.event.workflow_run.head_sha || 'main' }}
 
     steps:
@@ -524,7 +525,7 @@ jobs:
             -o ServerAliveInterval=30 -o ServerAliveCountMax=20 \
             -o TCPKeepAlive=yes \
             "${EC2_USER}@${EC2_HOST}" \
-            "ROOM=$(q "$ROOM") MODELS=$(q "$MODELS") PROVIDER=$(q "$PROVIDER") HMCTL_PROFILE=$(q "$HMCTL_PROFILE") HMCTL_SERVICE=$(q "$HMCTL_SERVICE") HMCTL_API_KEY=$(q "$HMCTL_API_KEY") HERMES_EVAL_MODE=$(q "$HERMES_EVAL_MODE") EVAL_REF=$(q "$EVAL_REF") bash -s" <<'REMOTE'
+            "ROOM=$(q "$ROOM") MODELS=$(q "$MODELS") PROVIDER=$(q "$PROVIDER") HMCTL_PROFILE=$(q "$HMCTL_PROFILE") HMCTL_SERVICE=$(q "$HMCTL_SERVICE") HMCTL_API_KEY=$(q "$HMCTL_API_KEY") HERMES_EVAL_MODE=$(q "$HERMES_EVAL_MODE") HERMES_EVAL_WARMUP_SECONDS=$(q "$HERMES_EVAL_WARMUP_SECONDS") EVAL_REF=$(q "$EVAL_REF") bash -s" <<'REMOTE'
           set -euo pipefail
           SOURCE_REPO="$HOME/hivemind-core"
           EVAL_CHECKOUT="$HOME/hivemind-core-eval"
@@ -688,8 +689,15 @@ jobs:
               ;;
           esac
 
-          echo "Waiting for post-deploy gateway/app warmup before canaries"
-          sleep 60
+          warmup_seconds="${HERMES_EVAL_WARMUP_SECONDS:-20}"
+          case "$warmup_seconds" in
+            ''|*[!0-9]*)
+              echo "::warning::invalid HERMES_EVAL_WARMUP_SECONDS=${warmup_seconds}; using 20"
+              warmup_seconds=20
+              ;;
+          esac
+          echo "Waiting ${warmup_seconds}s for post-deploy gateway/app warmup before canaries"
+          sleep "$warmup_seconds"
 
           for scenario in "${scenarios[@]}"; do
             for attempt in 1 2 3; do
