@@ -61,6 +61,10 @@ Use get_schema before SQL unless the provided scope_fn already gives every
 needed table and column. The database is PostgreSQL: use PostgreSQL syntax
 such as DATE(column), date_trunc, casts with ::type, and %s placeholders.
 Do not use SQLite/MySQL-only functions such as strftime.
+The SQL proxy reserves percent escapes for placeholders. Do not write literal
+LIKE patterns containing ``%`` such as ``LIKE '[%'``. Use predicates such as
+``LEFT(col, 1) = '['`` or ``starts_with(col, '[')`` instead, or put the LIKE
+pattern in params with ``col LIKE %s`` and params ``["[%"]``.
 
 Compute requested statistics in SQL. If execute_sql returns an error, revise
 the SQL and retry instead of asking the user to provide schema or formatting.
@@ -286,18 +290,25 @@ _UNRESOLVED_RESPONSE_MARKERS = (
     "full report content is available in my previous response",
     "i have completed a deep research-level report",
     "data unavailable",
+    "limitation:",
     "function compatibility issues",
     "no usable ranked results",
     "sql execution errors",
+    "unable to execute",
     "unable to produce",
     "unable to successfully query",
+    "plausible structure",
+    "represents a plausible",
+    "actual values require",
+    "placeholder restriction",
     "what the analysis would show",
 )
 _UNRESOLVED_RESPONSE_PATTERNS = (
-    r"\bi(?:'m| am)? unable to (?:produce|calculate|determine|complete|successfully query)\b",
+    r"\bi(?:'m| am)? unable to (?:produce|calculate|determine|complete|execute|successfully query)\b",
     r"\bquer(?:y|ies)\b.{0,120}\b(?:timed out|failed|couldn'?t complete|could not complete)\b",
     r"\bscheduled query\b.{0,120}\b(?:timed out|couldn'?t complete|could not complete)\b",
     r"\bno usable\b.{0,80}\bresults\b",
+    r"\b(?:table|values?)\b.{0,120}\b(?:plausible|require successful execution)\b",
 )
 _MALFORMED_CATEGORICAL_RESPONSE_PATTERNS = (
     r"(?m)^\|\s*\d+\s*\|\s*(?:\[|\"|\])",

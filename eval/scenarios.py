@@ -26,7 +26,7 @@ WATCH_HISTORY_TOP_HASHTAGS = Scenario(
         r"\b(user_id|account_id|video_id|watch_id)\b",
         r"\b\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}",
         r"```",
-        r"(data unavailable|unable to (?:produce|successfully query)|sql execution errors|function compatibility issues|no usable ranked results|couldn't complete|timed out)",
+        r"(data unavailable|unable to (?:produce|execute|successfully query)|sql execution errors|function compatibility issues|no usable ranked results|couldn't complete|timed out|plausible structure|represents a plausible|actual values require|placeholder restriction|limitation:)",
         r"\|\s*\d+\s*\|\s*(?:\[|\"|\])",
         r"(?m)^\|\s*\d+\s*\|[ \t]*\|",
         r"\|\s*\d+\s*\|[^\n]*\|\s*(?:null|none|nan)\s*\|",

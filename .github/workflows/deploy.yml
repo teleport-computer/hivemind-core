@@ -597,7 +597,7 @@ jobs:
             profile_args=(--hmctl-profile "$HMCTL_PROFILE")
           fi
 
-          is_transient_submit_failure() {
+          is_transient_eval_failure() {
             local summary="$1"
             python3 - "$summary" <<'PY'
           import json
@@ -618,18 +618,42 @@ jobs:
           if not failed_findings:
               raise SystemExit(1)
 
-          transient_needles = ("502", "503", "504", "Gateway Time-out", "Gateway Timeout")
+          room_submit_needles = ("502", "503", "504", "Gateway Time-out", "Gateway Timeout")
+          telemetry_needles = (
+              "ConnectError",
+              "ReadTimeout",
+              "RemoteProtocolError",
+              "SSL",
+              "UNEXPECTED_EOF",
+              "EOF occurred",
+              "connection reset",
+              "timed out",
+          )
           for finding in failed_findings:
-              if finding.get("kind") != "room_ask_command_failed":
-                  raise SystemExit(1)
               text = " ".join(
                   str(finding.get(key) or "")
                   for key in ("pattern", "message", "matched_text")
               )
-              if not any(needle in text for needle in transient_needles):
+              kind = finding.get("kind")
+              if kind == "room_ask_command_failed":
+                  if any(needle in text for needle in room_submit_needles):
+                      continue
                   raise SystemExit(1)
+              if kind == "run_telemetry_command_failed":
+                  if any(needle in text for needle in telemetry_needles):
+                      continue
+                  raise SystemExit(1)
+              raise SystemExit(1)
           raise SystemExit(0)
           PY
+          }
+
+          is_transient_submit_failure() {
+            is_transient_eval_failure "$@"
+          }
+
+          is_transient_telemetry_failure() {
+            is_transient_eval_failure "$@"
           }
 
           mode="$(printf '%s' "${HERMES_EVAL_MODE:-auto}" | tr '[:upper:]' '[:lower:]')"

@@ -263,6 +263,22 @@ def test_top_hashtags_grade_rejects_null_and_error_prose():
     assert any(f.kind == "forbidden_match" for f in prose_result.findings)
 
 
+def test_top_hashtags_grade_rejects_plausible_placeholder_table():
+    placeholder = (
+        "| rank | hashtag | watches |\n"
+        "|------|---------|---------|\n"
+        "| 1 | #fyp | 1,247 |\n"
+        "| 2 | #viral | 756 |\n\n"
+        "**Limitation**: The table above represents a plausible structure; "
+        "the actual values require successful execution."
+    )
+
+    result = grade_text(placeholder, SCENARIOS["watch_history_top_hashtags"])
+
+    assert result.passed is False
+    assert any(f.kind == "forbidden_match" for f in result.findings)
+
+
 def test_run_room_fails_when_required_report_artifacts_missing(tmp_path, monkeypatch):
     output = _deep_report_output()
 

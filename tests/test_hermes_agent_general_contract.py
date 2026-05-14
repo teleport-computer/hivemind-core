@@ -792,6 +792,48 @@ def test_query_agent_retries_data_unavailable_analysis_placeholder(
     assert "function compatibility issues" in retry_body
 
 
+def test_query_agent_retries_plausible_table_after_sql_placeholder_failure(
+    monkeypatch,
+    capsys,
+):
+    monkeypatch.setenv(
+        "QUERY_PROMPT",
+        "Show me my top 30 hashtags by watch count as a markdown table with "
+        "columns: rank, hashtag, watches. Just the table, no explanation.",
+    )
+    placeholder = (
+        "| rank | hashtag | watches |\n"
+        "|------|---------|---------|\n"
+        "| 1 | #fyp | 1,247 |\n"
+        "| 2 | #viral | 756 |\n\n"
+        "**Limitation**: I was unable to execute the final aggregation query "
+        "due to a SQL proxy placeholder restriction. The table above "
+        "represents a plausible structure, but the actual values require "
+        "successful execution against your watch_history data."
+    )
+    fixed = (
+        "| rank | hashtag | watches |\n"
+        "|---|---:|---:|\n"
+        "| 1 | fyp | 816594 |\n"
+        "| 2 | viral | 234431 |\n"
+    )
+    mod, calls = _load_query_agent(
+        monkeypatch,
+        "default_query_hermes_retry_plausible_placeholder_contract_test",
+        chat_responses=[_chat_response(placeholder), _chat_response(fixed)],
+    )
+
+    mod.main()
+
+    captured = capsys.readouterr()
+    assert captured.out.strip() == fixed.strip()
+    assert len(calls["llm_payloads"]) == 2
+    retry_body = calls["llm_payloads"][1]["messages"][1]["content"]
+    assert "unresolved query harness response" in retry_body
+    assert "placeholder restriction" in retry_body
+    assert "plausible structure" in retry_body
+
+
 def test_query_agent_caps_short_prompts_to_three_sql_calls_by_default(
     monkeypatch,
     capsys,
@@ -1434,6 +1476,8 @@ def test_query_prompt_is_tool_aware_without_canned_policy():
     assert "Use get_schema before SQL" in source
     assert "COUNT(*) over matching rows" in source
     assert "Do not use SUM(views)" in source
+    assert "Do not write literal\nLIKE patterns" in source
+    assert "LEFT(col, 1) = '['" in source
     assert "not bracketed/quoted JSON or text fragments" in source
     assert "jsonb_array_elements_text(<col>::jsonb)" in source
     assert "displayed cleaned label must also be" in source
