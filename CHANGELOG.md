@@ -51,8 +51,11 @@ surface.
   unless the user explicitly asks for missing values.
 - Split post-deploy Hermes prod evals into modes: every deploy runs the fast
   top-table canary, while the deep report/PDF canary runs automatically only
-  for Hermes agent, eval, artifact, sandbox, or pipeline changes unless a manual
-  deploy forces `hermes_eval=full`.
+  for Hermes agent, eval, artifact, sandbox, or pipeline changes unless the
+  eval workflow is configured or manually dispatched for a deep run.
+- Moved Hermes prod evals into a separate workflow triggered after successful
+  auto-deploys, so production deploys finish after CVM deploy plus compose-hash
+  approval instead of waiting on canary asks.
 - Capped the post-deploy fast canary to a smaller budget and kept retries only
   for transient room-submit gateway failures, so deterministic utility/privacy
   regressions fail quickly instead of consuming deep-report-scale budgets.

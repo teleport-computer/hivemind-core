@@ -84,10 +84,10 @@ def test_build_images_uses_target_aware_push_plan():
 
 
 def test_post_deploy_hermes_eval_keeps_fast_canary_small():
-    workflow = Path(".github/workflows/deploy.yml").read_text()
+    workflow = Path(".github/workflows/hermes-prod-eval.yml").read_text()
 
-    assert "hermes_eval:" in workflow
-    assert 'default: "fast"' in workflow
+    assert 'workflows: ["Deploy to Phala CVM (via EC2 relay)"]' in workflow
+    assert "github.event.workflow_run.event == 'workflow_run'" in workflow
     assert "HERMES_POST_DEPLOY_EVAL_MODE || 'fast'" in workflow
     assert "HERMES_EVAL_WARMUP_SECONDS" in workflow
     assert "sleep 60" not in workflow
@@ -98,6 +98,15 @@ def test_post_deploy_hermes_eval_keeps_fast_canary_small():
     assert "watch_history_report_artifact" in workflow
     assert "Deep report/artifact canary skipped" in workflow
     assert "Fast canary failed; retrying to filter stochastic" not in workflow
+
+
+def test_phala_deploy_does_not_block_on_hermes_eval():
+    workflow = Path(".github/workflows/deploy.yml").read_text()
+
+    assert "hermes_eval:" not in workflow
+    assert "post-deploy-hermes-eval:" not in workflow
+    assert "Run strict Hermes canaries on relay" not in workflow
+    assert "HERMES_POST_DEPLOY_EVAL_MODE" not in workflow
 
 
 def test_phala_deploy_guards_update_vs_create_mode():

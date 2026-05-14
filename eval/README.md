@@ -80,11 +80,14 @@ The runner records:
 - deterministic grade findings;
 - report artifact filenames and fetched paths when artifacts are enabled.
 
-## Post-Deploy Gate
+## Post-Deploy Follow-Up
 
-`.github/workflows/deploy.yml` can run strict Hermes prod canaries after a
-successful core deploy. Set repository variable `HERMES_PROD_EVAL_ROOM` to the
-watch-history room id to enable it. Optional repository variables:
+`.github/workflows/hermes-prod-eval.yml` runs Hermes prod canaries from the EC2
+relay after successful auto-deploys. It is intentionally separate from
+`.github/workflows/deploy.yml`, so live CVM deploys finish after the core deploy
+and on-chain approval instead of waiting for canaries. Set repository variable
+`HERMES_PROD_EVAL_ROOM` to the watch-history room id to enable automatic
+follow-up evals. Optional repository variables:
 
 - `HERMES_PROD_EVAL_MODELS` — comma-separated model ids, default `z-ai/glm-5`.
 - `HERMES_PROD_EVAL_PROVIDER` — default `openrouter`.
@@ -95,16 +98,17 @@ The relay job needs tenant access to the eval room. Store that key as GitHub
 secret `HERMES_PROD_EVAL_API_KEY`; the workflow writes a temporary hmctl
 profile on the relay before running the scenarios.
 
-The gate always runs `watch_history_top_hashtags` as the fast canary with
-`--max-tokens 250000`, `--max-llm-calls 20`, and `--timeout 300`. In `auto`
-mode it only adds `watch_history_report_artifact` for Hermes agent, eval,
-artifact, sandbox, pipeline, dependency, or related test changes; manual
-deploys can force this with `hermes_eval=full`, restrict to the fast canary
-with `hermes_eval=fast`, or skip with `hermes_eval=skip`. The deep report
+Automatic follow-up runs always execute `watch_history_top_hashtags` as the
+fast canary with `--max-tokens 250000`, `--max-llm-calls 20`, and
+`--timeout 300`. In `auto` mode they only add `watch_history_report_artifact`
+for Hermes agent, eval, artifact, sandbox, pipeline, dependency, or related
+test changes; `HERMES_POST_DEPLOY_EVAL_MODE=full` always runs the deep
+report/PDF canary and `skip` disables the automatic follow-up. The deep report
 canary keeps the larger `--max-tokens 1000000`, `--max-llm-calls 60`, and
 `--timeout 900` budget.
 
-The gate fails deploy follow-up checks on utility/privacy regressions, missing
-report artifacts, or latency over budget. Immediately after a CVM redeploy it
-retries transient room-submit 502/503/504 gateway failures, but it does not
-retry deterministic grading failures.
+The same workflow can be manually dispatched for a single scenario against any
+room, with optional artifact fetching. Follow-up evals fail their own workflow
+on utility/privacy regressions, missing report artifacts, or latency over
+budget. Immediately after a CVM redeploy they retry transient room-submit
+502/503/504 gateway failures, but do not retry deterministic grading failures.

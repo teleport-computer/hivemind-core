@@ -1,10 +1,15 @@
-name: Hermes prod eval (manual, via EC2 relay)
+name: Post-deploy Hermes prod eval
 
-# Runs the deterministic eval harness against an existing prod room from the
-# EC2 relay. The relay keeps hmctl profiles and tenant keys local; GitHub logs
-# receive only summary rows, not raw private room output.
+# Runs the deterministic Hermes eval harness against an existing prod room from
+# the EC2 relay. Automatic runs are triggered after successful auto-deploys, but
+# live deploy completion no longer waits on these canaries. Manual dispatch
+# remains available for deep report/PDF checks against any room.
 
 on:
+  workflow_run:
+    workflows: ["Deploy to Phala CVM (via EC2 relay)"]
+    types: [completed]
+    branches: [main]
   workflow_dispatch:
     inputs:
       room:
@@ -33,13 +38,32 @@ on:
         default: true
 
 concurrency:
-  group: hermes-prod-eval-${{ github.event.inputs.scenario }}
+  group: hermes-prod-eval-${{ github.event.inputs.scenario || github.event.workflow_run.id || github.run_id }}
   cancel-in-progress: false
 
 jobs:
   eval:
+    # Auto-eval only follows the normal build-images -> deploy workflow_run path.
+    # Manual deploys can still be followed by a manual dispatch of this workflow.
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'workflow_run' &&
+       vars.HERMES_PROD_EVAL_ROOM != '')
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    env:
+      EVENT_NAME: ${{ github.event_name }}
+      ROOM: ${{ github.event.inputs.room || vars.HERMES_PROD_EVAL_ROOM }}
+      SCENARIO: ${{ github.event.inputs.scenario || '' }}
+      MODELS: ${{ github.event.inputs.models || vars.HERMES_PROD_EVAL_MODELS || 'moonshotai/kimi-k2.6' }}
+      PROVIDER: ${{ github.event.inputs.provider || vars.HERMES_PROD_EVAL_PROVIDER || 'openrouter' }}
+      HMCTL_PROFILE: ${{ github.event.inputs.hmctl_profile || vars.HERMES_PROD_EVAL_HMCTL_PROFILE || 'prod-eval' }}
+      HMCTL_SERVICE: ${{ vars.HERMES_PROD_EVAL_SERVICE || 'https://hivemind.teleport.computer' }}
+      FETCH: ${{ github.event.inputs.fetch || 'false' }}
+      HERMES_EVAL_MODE: ${{ vars.HERMES_POST_DEPLOY_EVAL_MODE || 'fast' }}
+      HERMES_EVAL_WARMUP_SECONDS: ${{ vars.HERMES_EVAL_WARMUP_SECONDS || '20' }}
+      EVAL_REF: ${{ github.event.workflow_run.head_sha || github.sha }}
 
     steps:
       - name: Configure SSH
@@ -53,17 +77,11 @@ jobs:
           chmod 600 ~/.ssh/id_ed25519
           ssh-keyscan -H "$EC2_HOST" >> ~/.ssh/known_hosts 2>/dev/null
 
-      - name: Run eval on relay
+      - name: Run Hermes prod eval on relay
         env:
           EC2_HOST: ${{ secrets.EC2_HOST }}
           EC2_USER: ${{ secrets.EC2_USER }}
-          ROOM: ${{ github.event.inputs.room }}
-          SCENARIO: ${{ github.event.inputs.scenario }}
-          MODELS: ${{ github.event.inputs.models }}
-          PROVIDER: ${{ github.event.inputs.provider }}
-          HMCTL_PROFILE: ${{ github.event.inputs.hmctl_profile }}
-          FETCH: ${{ github.event.inputs.fetch }}
-          EVAL_REF: ${{ github.sha }}
+          HMCTL_API_KEY: ${{ secrets.HERMES_PROD_EVAL_API_KEY }}
         run: |
           set -euo pipefail
           q() {
@@ -73,7 +91,7 @@ jobs:
             -o ServerAliveInterval=30 -o ServerAliveCountMax=20 \
             -o TCPKeepAlive=yes \
             "${EC2_USER}@${EC2_HOST}" \
-            "ROOM=$(q "$ROOM") SCENARIO=$(q "$SCENARIO") MODELS=$(q "$MODELS") PROVIDER=$(q "$PROVIDER") HMCTL_PROFILE=$(q "$HMCTL_PROFILE") FETCH=$(q "$FETCH") EVAL_REF=$(q "$EVAL_REF") bash -s" <<'REMOTE'
+            "EVENT_NAME=$(q "$EVENT_NAME") ROOM=$(q "$ROOM") SCENARIO=$(q "$SCENARIO") MODELS=$(q "$MODELS") PROVIDER=$(q "$PROVIDER") HMCTL_PROFILE=$(q "$HMCTL_PROFILE") HMCTL_SERVICE=$(q "$HMCTL_SERVICE") HMCTL_API_KEY=$(q "$HMCTL_API_KEY") FETCH=$(q "$FETCH") HERMES_EVAL_MODE=$(q "$HERMES_EVAL_MODE") HERMES_EVAL_WARMUP_SECONDS=$(q "$HERMES_EVAL_WARMUP_SECONDS") EVAL_REF=$(q "$EVAL_REF") bash -s" <<'REMOTE'
           set -euo pipefail
           SOURCE_REPO="$HOME/hivemind-core"
           EVAL_CHECKOUT="$HOME/hivemind-core-eval"
@@ -112,28 +130,200 @@ jobs:
             export PATH="$HOME/.local/bin:$PATH"
           fi
 
-          out_dir="eval/results/prod/$(date -u +%Y%m%dT%H%M%SZ)-${SCENARIO}"
-          mkdir -p "$out_dir"
+          if [ -n "${HMCTL_API_KEY:-}" ] && [ -n "${HMCTL_PROFILE:-}" ]; then
+            mkdir -p "$HOME/.hivemind/profiles"
+            chmod 700 "$HOME/.hivemind" "$HOME/.hivemind/profiles"
+            python3 - "$HOME/.hivemind/profiles/${HMCTL_PROFILE}.yaml" "$HMCTL_SERVICE" "$HMCTL_API_KEY" <<'PY'
+          import json
+          import sys
 
-          args=(python -m eval run-room "$SCENARIO" "$ROOM"
-            --provider "$PROVIDER"
-            --hmctl-profile "$HMCTL_PROFILE"
-            --max-tokens 1000000
-            --max-llm-calls 60
-            --timeout 900
-            --output-dir "$out_dir")
-          IFS=',' read -ra models <<< "$MODELS"
-          for model in "${models[@]}"; do
-            model="$(printf '%s' "$model" | xargs)"
-            [ -n "$model" ] && args+=(--model "$model")
-          done
-          if [ "$FETCH" = "true" ]; then
-            args+=(--fetch)
+          path, service, api_key = sys.argv[1], sys.argv[2], sys.argv[3]
+          with open(path, "w", encoding="utf-8") as fh:
+              fh.write(f"api_key: {json.dumps(api_key)}\n")
+              fh.write("role: tenant\n")
+              fh.write(f"service: {json.dumps(service)}\n")
+          PY
+            chmod 600 "$HOME/.hivemind/profiles/${HMCTL_PROFILE}.yaml"
           fi
 
-          echo "Running ${SCENARIO} against ${ROOM}"
-          uv run --python 3.12 "${args[@]}"
-          echo "Eval results remain on relay at: $(pwd)/${out_dir}"
+          if [ -z "${ROOM:-}" ]; then
+            echo "::error::ROOM is empty"
+            exit 1
+          fi
+
+          IFS=',' read -ra models <<< "$MODELS"
+          model_args=()
+          for model in "${models[@]}"; do
+            model="$(printf '%s' "$model" | xargs)"
+            [ -n "$model" ] && model_args+=(--model "$model")
+          done
+          if [ "${#model_args[@]}" -eq 0 ]; then
+            echo "::error::MODELS resolved to no model ids"
+            exit 1
+          fi
+          profile_args=()
+          if [ -n "${HMCTL_PROFILE:-}" ]; then
+            profile_args=(--hmctl-profile "$HMCTL_PROFILE")
+          fi
+
+          is_transient_eval_failure() {
+            local summary="$1"
+            python3 - "$summary" <<'PY'
+          import json
+          import sys
+
+          path = sys.argv[1]
+          try:
+              rows = json.load(open(path, encoding="utf-8"))
+          except Exception:
+              raise SystemExit(1)
+
+          failed_findings = [
+              finding
+              for row in rows
+              if not row.get("passed")
+              for finding in (row.get("findings") or [])
+          ]
+          if not failed_findings:
+              raise SystemExit(1)
+
+          room_submit_needles = ("502", "503", "504", "Gateway Time-out", "Gateway Timeout")
+          telemetry_needles = (
+              "ConnectError",
+              "ReadTimeout",
+              "RemoteProtocolError",
+              "SSL",
+              "UNEXPECTED_EOF",
+              "EOF occurred",
+              "connection reset",
+              "timed out",
+          )
+          for finding in failed_findings:
+              text = " ".join(
+                  str(finding.get(key) or "")
+                  for key in ("pattern", "message", "matched_text")
+              )
+              kind = finding.get("kind")
+              if kind == "room_ask_command_failed":
+                  if any(needle in text for needle in room_submit_needles):
+                      continue
+                  raise SystemExit(1)
+              if kind == "run_telemetry_command_failed":
+                  if any(needle in text for needle in telemetry_needles):
+                      continue
+                  raise SystemExit(1)
+              raise SystemExit(1)
+          raise SystemExit(0)
+          PY
+          }
+
+          fetch="$(printf '%s' "${FETCH:-false}" | tr '[:upper:]' '[:lower:]')"
+
+          run_scenario() {
+            local scenario="$1"
+            local attempt="$2"
+            local max_tokens=1000000
+            local max_llm_calls=60
+            local timeout_seconds=900
+            if [ "$scenario" = "watch_history_top_hashtags" ]; then
+              max_tokens=250000
+              max_llm_calls=20
+              timeout_seconds=300
+            fi
+
+            local out_dir="eval/results/prod/$(date -u +%Y%m%dT%H%M%SZ)-${scenario}-attempt-${attempt}"
+            mkdir -p "$out_dir"
+            echo "Running ${scenario} against ${ROOM} (attempt ${attempt}; max_tokens=${max_tokens}, max_llm_calls=${max_llm_calls}, timeout=${timeout_seconds}s)"
+
+            args=(python -m eval run-room "$scenario" "$ROOM"
+              --provider "$PROVIDER"
+              "${profile_args[@]}"
+              --max-tokens "$max_tokens"
+              --max-llm-calls "$max_llm_calls"
+              --timeout "$timeout_seconds"
+              --output-dir "$out_dir"
+              "${model_args[@]}")
+            if [ "$fetch" = "true" ]; then
+              args+=(--fetch)
+            fi
+
+            if uv run --python 3.12 "${args[@]}"; then
+              echo "Eval results remain on relay at: $(pwd)/${out_dir}"
+              return 0
+            fi
+
+            summary="${out_dir}/${scenario}__summary.json"
+            echo "$summary" > /tmp/hivemind-last-eval-summary.txt
+            echo "Eval failed; results remain on relay at: $(pwd)/${out_dir}"
+            return 1
+          }
+
+          if [ "${EVENT_NAME}" = "workflow_dispatch" ]; then
+            if [ -z "${SCENARIO:-}" ]; then
+              echo "::error::SCENARIO is empty"
+              exit 1
+            fi
+            run_scenario "$SCENARIO" 1
+            exit $?
+          fi
+
+          mode="$(printf '%s' "${HERMES_EVAL_MODE:-fast}" | tr '[:upper:]' '[:lower:]')"
+          scenarios=(watch_history_top_hashtags)
+          case "$mode" in
+            skip)
+              echo "Skipping post-deploy Hermes prod eval because HERMES_EVAL_MODE=skip"
+              exit 0
+              ;;
+            fast)
+              echo "Post-deploy Hermes prod eval mode: fast"
+              ;;
+            full)
+              echo "Post-deploy Hermes prod eval mode: full"
+              scenarios+=(watch_history_report_artifact)
+              ;;
+            auto|"")
+              changed_files="$(git diff --name-only HEAD^ HEAD 2>/dev/null || true)"
+              echo "Post-deploy Hermes prod eval mode: auto"
+              echo "Changed files considered for deep report canary:"
+              printf '%s\n' "$changed_files"
+              if [ -z "$changed_files" ] || printf '%s\n' "$changed_files" | grep -Eq '^(agents/(base-hermes|default-(query|scope|mediator)-hermes)/|eval/|hivemind/(pipeline\.py|sandbox/|agent_base_bootstrap\.py|api/agent_uploads\.py)|tests/(test_eval_cli\.py|test_hermes_|test_artifact_upload\.py|test_pipeline\.py)|pyproject\.toml|uv\.lock)'; then
+                echo "Deep report/artifact canary enabled by changed runtime/eval/artifact files."
+                scenarios+=(watch_history_report_artifact)
+              else
+                echo "Deep report/artifact canary skipped; no relevant runtime/eval/artifact files changed."
+              fi
+              ;;
+            *)
+              echo "::error::invalid HERMES_EVAL_MODE=${HERMES_EVAL_MODE}; expected auto, fast, full, or skip"
+              exit 1
+              ;;
+          esac
+
+          warmup_seconds="${HERMES_EVAL_WARMUP_SECONDS:-20}"
+          case "$warmup_seconds" in
+            ''|*[!0-9]*)
+              echo "::warning::invalid HERMES_EVAL_WARMUP_SECONDS=${warmup_seconds}; using 20"
+              warmup_seconds=20
+              ;;
+          esac
+          echo "Waiting ${warmup_seconds}s for post-deploy gateway/app warmup before canaries"
+          sleep "$warmup_seconds"
+
+          for scenario in "${scenarios[@]}"; do
+            for attempt in 1 2 3; do
+              if run_scenario "$scenario" "$attempt"; then
+                break
+              fi
+
+              summary="$(cat /tmp/hivemind-last-eval-summary.txt 2>/dev/null || true)"
+              if [ "$attempt" -lt 3 ] && [ -n "$summary" ] && is_transient_eval_failure "$summary"; then
+                echo "Transient gateway/telemetry failure; retrying after warmup"
+                sleep $((attempt * 60))
+                continue
+              fi
+              exit 1
+            done
+          done
           REMOTE
 
       - name: Cleanup SSH key
