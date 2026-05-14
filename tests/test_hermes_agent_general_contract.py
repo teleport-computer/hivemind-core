@@ -707,6 +707,45 @@ def test_query_agent_retries_timeout_apology_from_live_table_run(
     assert "query to aggregate" in retry_body
 
 
+def test_query_agent_retries_malformed_categorical_table_with_json_guidance(
+    monkeypatch,
+    capsys,
+):
+    monkeypatch.setenv(
+        "QUERY_PROMPT",
+        "Show me my top labels by watch count as a markdown table with "
+        "columns: rank, label, watches. Just the table, no explanation.",
+    )
+    malformed = (
+        "| rank | label | watches |\n"
+        "|---|---|---|\n"
+        "| 1 | [\"alpha\" | null |\n"
+        "| 2 | \"beta\"] | null |\n"
+    )
+    fixed = (
+        "| rank | label | watches |\n"
+        "|---|---:|---:|\n"
+        "| 1 | alpha | 703773 |\n"
+        "| 2 | beta | 201314 |\n"
+    )
+    mod, calls = _load_query_agent(
+        monkeypatch,
+        "default_query_hermes_retry_malformed_category_contract_test",
+        chat_responses=[_chat_response(malformed), _chat_response(fixed)],
+    )
+
+    mod.main()
+
+    captured = capsys.readouterr()
+    assert captured.out.strip() == fixed.strip()
+    assert len(calls["llm_payloads"]) == 2
+    retry_body = calls["llm_payloads"][1]["messages"][1]["content"]
+    assert "malformed categorical ranking response" in retry_body
+    assert "jsonb_array_elements_text(<column>::jsonb)" in retry_body
+    assert "do not split it with string_to_array" in retry_body
+    assert "COUNT(*) or COUNT(DISTINCT row identifier)" in retry_body
+
+
 def test_query_agent_retries_data_unavailable_analysis_placeholder(
     monkeypatch,
     capsys,
@@ -753,7 +792,7 @@ def test_query_agent_retries_data_unavailable_analysis_placeholder(
     assert "function compatibility issues" in retry_body
 
 
-def test_query_agent_caps_short_prompts_to_two_sql_calls_by_default(
+def test_query_agent_caps_short_prompts_to_three_sql_calls_by_default(
     monkeypatch,
     capsys,
 ):
@@ -774,7 +813,7 @@ def test_query_agent_caps_short_prompts_to_two_sql_calls_by_default(
                 )
             ],
         )
-        for idx in range(2)
+        for idx in range(3)
     ]
     final = (
         "| rank | label | value |\n"
@@ -792,9 +831,9 @@ def test_query_agent_caps_short_prompts_to_two_sql_calls_by_default(
 
     captured = capsys.readouterr()
     assert captured.out.strip() == final.strip()
-    assert len(calls["tool_payloads"]) == 2
-    assert len(calls["llm_payloads"]) == 3
-    assert "up to 2 SQL calls" in calls["llm_payloads"][0]["messages"][0]["content"]
+    assert len(calls["tool_payloads"]) == 3
+    assert len(calls["llm_payloads"]) == 4
+    assert "up to 3 SQL calls" in calls["llm_payloads"][0]["messages"][0]["content"]
 
 
 def test_query_agent_keeps_larger_sql_budget_for_substantial_reports(
@@ -1394,7 +1433,9 @@ def test_query_prompt_is_tool_aware_without_canned_policy():
     assert "structured Markdown report" in source
     assert "Use get_schema before SQL" in source
     assert "COUNT(*) over matching rows" in source
+    assert "Do not use SUM(views)" in source
     assert "not bracketed/quoted JSON or text fragments" in source
+    assert "jsonb_array_elements_text(<col>::jsonb)" in source
     assert "displayed cleaned label must also be" in source
     assert "duplicate identical labels" in source
     assert "exclude NULL or empty labels" in source

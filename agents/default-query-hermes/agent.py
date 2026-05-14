@@ -67,6 +67,8 @@ the SQL and retry instead of asking the user to provide schema or formatting.
 Interpret requests for counts of records, events, items, or occurrences as
 COUNT(*) over matching rows unless the user explicitly asks to sum a metric
 column.
+For "watch count" in event logs, count watch events/rows after any required
+unnesting. Do not use SUM(views) unless the user explicitly asks for view count.
 When grouping list-like fields, parse or unnest them first so final labels are
 clean values, not bracketed/quoted JSON or text fragments.
 Before writing the aggregation SQL, determine the column's actual Postgres
@@ -83,6 +85,9 @@ LIMIT 1`` once, then branch:
     cast first with ``jsonb_array_elements_text(<col>::jsonb)``;
   - ``text`` storing a delimited list (e.g. ``'fyp,cooking'``): use
     ``unnest(string_to_array(<col>, ','))`` and ``trim()`` each element.
+If a text sample begins with ``[`` and contains quoted values, treat it as a
+JSON-serialized array. Do not use ``string_to_array`` on that shape; it leaves
+brackets and quotes in labels. Use ``jsonb_array_elements_text(<col>::jsonb)``.
 For JSON or JSONB arrays, unnest one element per row before grouping. For
 text-encoded arrays or delimited lists, normalize the text by removing container
 syntax such as brackets and quotes, split into one element per row, trim each
@@ -294,6 +299,10 @@ _UNRESOLVED_RESPONSE_PATTERNS = (
     r"\bscheduled query\b.{0,120}\b(?:timed out|couldn'?t complete|could not complete)\b",
     r"\bno usable\b.{0,80}\bresults\b",
 )
+_MALFORMED_CATEGORICAL_RESPONSE_PATTERNS = (
+    r"(?m)^\|\s*\d+\s*\|\s*(?:\[|\"|\])",
+    r"(?m)^\|\s*\d+\s*\|[^\n]*\|\s*(?:null|none|nan)\s*\|?\s*$",
+)
 
 def _completion_token_cap(default: int = 8192, hard_cap: int = 16384) -> int:
     raw_budget = os.environ.get("BUDGET_MAX_TOKENS", "")
@@ -337,7 +346,7 @@ def _max_sql_calls() -> int:
     prompt = f"{QUERY_PROMPT}\n{QUERY_CONTEXT}".lower()
     if any(marker in prompt for marker in _SUBSTANTIAL_OUTPUT_MARKERS):
         return 4
-    return 2
+    return 3
 
 
 def _sanitize_output_text(text: str) -> str:
@@ -361,6 +370,15 @@ def _looks_like_unresolved_response(text: str) -> bool:
     lower = (text or "").lower()
     return any(marker in lower for marker in _UNRESOLVED_RESPONSE_MARKERS) or any(
         re.search(pattern, lower, flags=re.DOTALL) for pattern in _UNRESOLVED_RESPONSE_PATTERNS
+    )
+
+
+def _looks_like_malformed_categorical_response(text: str) -> bool:
+    if not text or "|" not in text:
+        return False
+    return any(
+        re.search(pattern, text, flags=re.IGNORECASE)
+        for pattern in _MALFORMED_CATEGORICAL_RESPONSE_PATTERNS
     )
 
 
@@ -644,6 +662,18 @@ def _retry_body(body: str, reason: str, previous_response: str) -> str:
     previous = (previous_response or "").strip()
     if len(previous) > 2000:
         previous = previous[:2000] + "\n[truncated]"
+    categorical_guidance = ""
+    if "malformed categorical" in reason.lower():
+        categorical_guidance = (
+            "\nThe previous categorical table had malformed labels or metrics. "
+            "If a list-like text sample starts with '[' and contains quoted "
+            "values, parse it as a JSON array with "
+            "jsonb_array_elements_text(<column>::jsonb); do not split it with "
+            "string_to_array. Use COUNT(*) or COUNT(DISTINCT row identifier) "
+            "for event/item/watch counts unless the user explicitly asked to "
+            "sum another metric column. Before finalizing, reject labels that "
+            "still start with '[', ']', or '\"', and reject NULL/NaN metrics.\n"
+        )
     return (
         f"{body}\n\n"
         "RECOVERY INSTRUCTION:\n"
@@ -656,7 +686,8 @@ def _retry_body(body: str, reason: str, previous_response: str) -> str:
         "must directly satisfy the user's requested format and depth, not be a "
         "work summary, progress log, or reference to a previous response. Do "
         "not ask the user for schema, columns, or date formats that can be "
-        "discovered with tools.\n\n"
+        "discovered with tools."
+        f"{categorical_guidance}\n"
         f"PREVIOUS RESPONSE:\n{previous}"
     )
 
@@ -684,6 +715,13 @@ def _retry_query_agent(
     if _looks_like_unresolved_response(retry_response):
         print(
             f"query harness retry unresolved after {reason}: {retry_response[:500]}",
+            file=sys.stderr,
+        )
+        return None
+    if _looks_like_malformed_categorical_response(retry_response):
+        print(
+            f"query harness retry malformed categorical response after {reason}: "
+            f"{retry_response[:500]}",
             file=sys.stderr,
         )
         return None
@@ -743,6 +781,17 @@ def main() -> None:
         if answer := _retry_query_agent(
             body,
             reason="unresolved query harness response",
+            previous_response=response,
+        ):
+            print(answer)
+            return
+        print(_user_facing_failure_response())
+        return
+    if _looks_like_malformed_categorical_response(response):
+        print(f"Malformed categorical query response: {response[:500]}", file=sys.stderr)
+        if answer := _retry_query_agent(
+            body,
+            reason="malformed categorical ranking response",
             previous_response=response,
         ):
             print(answer)
