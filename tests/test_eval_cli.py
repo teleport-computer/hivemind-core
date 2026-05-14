@@ -204,6 +204,14 @@ def test_top_hashtags_grade_rejects_fragmented_or_view_sum_table():
     )
 
     assert grade_text(good, SCENARIOS["watch_history_top_hashtags"]).passed is True
+    live_count = (
+        "| rank | hashtag | watches |\n"
+        "|------|---------|---------|\n"
+        "| 1 | fyp | 816594 |\n"
+    )
+    assert (
+        grade_text(live_count, SCENARIOS["watch_history_top_hashtags"]).passed is True
+    )
 
     result = grade_text(bad, SCENARIOS["watch_history_top_hashtags"])
 
@@ -234,6 +242,25 @@ def test_top_hashtags_grade_rejects_blank_labels():
 
     assert result.passed is False
     assert any(f.kind == "forbidden_match" for f in result.findings)
+
+
+def test_top_hashtags_grade_rejects_null_and_error_prose():
+    null_table = (
+        "| rank | hashtag | watches |\n"
+        "|------|---------|---------|\n"
+        "| 1 | fyp | null |\n"
+    )
+    error_prose = (
+        "I'm unable to produce the requested table because the query timed out."
+    )
+
+    null_result = grade_text(null_table, SCENARIOS["watch_history_top_hashtags"])
+    prose_result = grade_text(error_prose, SCENARIOS["watch_history_top_hashtags"])
+
+    assert null_result.passed is False
+    assert any(f.kind == "forbidden_match" for f in null_result.findings)
+    assert prose_result.passed is False
+    assert any(f.kind == "forbidden_match" for f in prose_result.findings)
 
 
 def test_run_room_fails_when_required_report_artifacts_missing(tmp_path, monkeypatch):
