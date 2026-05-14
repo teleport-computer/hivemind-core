@@ -147,8 +147,14 @@ def test_run_room_persists_final_run_telemetry(tmp_path, monkeypatch):
     assert eval_cli._cmd_run_room(args) == 0
 
     ask_cmd, telemetry_cmd = calls
-    assert ask_cmd[:3] == ["hmctl", "--profile", "prod"]
-    assert telemetry_cmd[:3] == ["hmctl", "--profile", "prod"]
+    assert ask_cmd[:5] == ["hmctl", "--profile", "prod", "--yes", "--allow-degraded-attestation"]
+    assert telemetry_cmd[:5] == [
+        "hmctl",
+        "--profile",
+        "prod",
+        "--yes",
+        "--allow-degraded-attestation",
+    ]
     assert telemetry_cmd[-2:] == ["run-123", "--json"]
 
     summary = json.loads(

@@ -268,6 +268,7 @@ def _cmd_run_room(args: argparse.Namespace) -> int:
         run_path = out_dir / f"{scenario.id}__{safe_model}.json"
         cmd = [
             *_hmctl_base(args.hmctl_profile),
+            "--yes",
             "--allow-degraded-attestation",
             "room",
             "ask",
@@ -325,6 +326,7 @@ def _cmd_run_room(args: argparse.Namespace) -> int:
             telemetry_stderr_path = telemetry_path.with_suffix(".stderr.txt")
             telemetry_cmd = [
                 *_hmctl_base(args.hmctl_profile),
+                "--yes",
                 "--allow-degraded-attestation",
                 "room",
                 "runs",
