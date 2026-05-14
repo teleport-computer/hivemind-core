@@ -245,7 +245,7 @@ class SandboxBackend:
                 "ANTHROPIC_API_KEY": session_token,
                 # Hermes harness: the in-container hivemind plugin reads
                 # HIVEMIND_AGENT_ROLE to gate which tools register for this
-                # role (query/scope/mediator/index). Other harnesses ignore it.
+                # role (query/scope/mediator). Other harnesses ignore it.
                 **(
                     {"HIVEMIND_AGENT_ROLE": role}
                     if getattr(agent, "harness", "claude_code") == "hermes"

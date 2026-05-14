@@ -96,8 +96,9 @@ per-iteration notes in `findings.md`, `LEARNINGS.md`, `CONCLUSIONS.md`._
 
 ## Default agents — what's actually in the implementation
 
-This is what the default scope / mediator / query / index agents look like
-today (post iter60, post-wrap-up).
+This is what the default scope / mediator / query agents look like today
+(post iter60, post-wrap-up). The old default index agent has been retired with
+the standalone index pipeline.
 
 ### `default-scope` — the row transformer
 - **Runtime**: `claude_agent_sdk` Agent SDK (`claude-agent-sdk.query()`
@@ -213,15 +214,6 @@ today (post iter60, post-wrap-up).
   (not a raw error line) — "…I wasn't able to produce an answer
   with individual records — the privacy filter blocked the SQL
   patterns…". Scores higher on utility than generic refusals.
-
-### `default-index` — document indexer
-- **Runtime**: Agent SDK with MCP tools, produces structured JSON
-  `{title, summary, tags, key_claims}` from document text.
-- **Fallback**: heuristic indexer (`_heuristic_index`) extracts title
-  from first line, summary from first two sentences, tags from top
-  word frequencies. Used on SDK crash or JSON extract failure.
-- **Normalizer** (`_normalize_index`): deduplicates and caps lists
-  (max 8 tags, max 12 key_claims), enforces title ≤100 chars.
 
 ### `default-scope-claw` — alternative scope runtime
 - Same role and prompt as `default-scope` but runs via a custom

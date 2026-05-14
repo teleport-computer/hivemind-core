@@ -56,7 +56,7 @@ the local `BridgeServer`.
 - `hivemind/pipeline.py`: scope -> query -> mediator execution and signed
   run attestations.
 - `hivemind/tools.py`: SQL and room-vault tools exposed to agents with
-  `FULL_READ`, `SCOPED`, `FULL_READWRITE`, or `NONE` access.
+  `FULL_READ`, `SCOPED`, or `NONE` access.
 - `hivemind/attestation.py`: dstack quote bootstrap, compose hash surface,
   enclave TLS binding, and KMS-derived run signer.
 
