@@ -145,7 +145,7 @@ services:
       HIVEMIND_AGENT_TIMEOUT: ${HIVEMIND_AGENT_TIMEOUT:-900}
       # Operator debug trace. Set true only while debugging: it records
       # SQL/tool args, result previews, and errors into usage_json.debug_trace.
-      HIVEMIND_DEBUG_TRACE_ENABLED: ${HIVEMIND_DEBUG_TRACE_ENABLED:-true}
+      HIVEMIND_DEBUG_TRACE_ENABLED: "true"
       HIVEMIND_DEBUG_TRACE_MAX_ENTRIES: ${HIVEMIND_DEBUG_TRACE_MAX_ENTRIES:-200}
       HIVEMIND_DEBUG_TRACE_MAX_CHARS_PER_ENTRY: ${HIVEMIND_DEBUG_TRACE_MAX_CHARS_PER_ENTRY:-4000}
       # Metering is always recorded when available. Credit enforcement

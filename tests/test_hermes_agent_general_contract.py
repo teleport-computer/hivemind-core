@@ -1303,6 +1303,69 @@ def test_scope_agent_uses_no_policy_recovery_after_unsafe_retry(
     assert "scope no-policy recovery activated" in captured.err
 
 
+def test_scope_agent_recovers_when_no_policy_scope_redacts_benign_values(
+    monkeypatch,
+    capsys,
+):
+    redacting_scope_fn = (
+        "def scope(sql, params, rows):\n"
+        "    out = []\n"
+        "    for row in rows:\n"
+        "        out.append({'label': '[redacted]', 'value': '[redacted]'})\n"
+        '    return {"allow": True, "rows": out}\n'
+    )
+    monkeypatch.delenv("POLICY_CONTEXT", raising=False)
+    monkeypatch.setenv("QUERY_PROMPT", "Show me a markdown table of safe metrics.")
+    mod, calls = _load_scope_agent(
+        monkeypatch,
+        "default_scope_hermes_no_policy_redaction_recovery_test",
+        response=[
+            json.dumps({"scope_fn": redacting_scope_fn}),
+            json.dumps({"scope_fn": redacting_scope_fn}),
+        ],
+    )
+
+    class FakeVerifyResponse:
+        def __init__(self, source):
+            self.source = source
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            if self.source == mod._NO_POLICY_RECOVERY_SCOPE_FN:
+                return {"compiles": True, "all_tests_passed": True, "results": []}
+            return {
+                "compiles": True,
+                "all_tests_passed": False,
+                "results": [
+                    {
+                        "label": "benign labeled metric rows survive",
+                        "allow": True,
+                        "rows_returned": 1,
+                        "expected_rows": [{"label": "alpha", "value": 42}],
+                        "rows_preview": [{"label": "[redacted]", "value": "[redacted]"}],
+                        "passed": False,
+                    }
+                ],
+            }
+
+    def fake_post(_url, *, json, headers, timeout):
+        return FakeVerifyResponse(json["source"])
+
+    monkeypatch.setattr(mod.httpx, "post", fake_post)
+
+    mod.main()
+
+    captured = capsys.readouterr()
+    emitted = json.loads(captured.out)
+    assert emitted == {"scope_fn": mod._NO_POLICY_RECOVERY_SCOPE_FN}
+    assert len(calls["chats"]) == 2
+    assert "expected_rows" in calls["chats"][1]
+    assert "rows_preview" in calls["chats"][1]
+    assert "scope no-policy recovery activated" in captured.err
+
+
 def test_scope_prompt_centers_privacy_utility_frontier():
     source = (ROOT / "agents/default-scope-hermes/agent.py").read_text()
 

@@ -1216,6 +1216,11 @@ class BridgeServer:
                         if allow and isinstance(outcome.get("rows"), list)
                         else 0
                     )
+                    scoped_rows = (
+                        outcome.get("rows", [])
+                        if allow and isinstance(outcome.get("rows"), list)
+                        else []
+                    )
                     passed: bool | None = None
                     if tc.expect_allow is not None:
                         passed = allow == tc.expect_allow
@@ -1226,6 +1231,17 @@ class BridgeServer:
                         passed = row_count_passed if passed is None else passed and row_count_passed
                         if not row_count_passed:
                             all_passed = False
+                    if tc.expect_rows is not None:
+                        expected_rows_passed = all(
+                            expected in scoped_rows for expected in tc.expect_rows
+                        )
+                        passed = (
+                            expected_rows_passed
+                            if passed is None
+                            else passed and expected_rows_passed
+                        )
+                        if not expected_rows_passed:
+                            all_passed = False
                     results.append(
                         ScopeTestResult(
                             label=tc.label,
@@ -1235,6 +1251,8 @@ class BridgeServer:
                             rows_returned=rows_returned,
                             expected_allow=tc.expect_allow,
                             expected_min_rows=tc.expect_min_rows,
+                            expected_rows=tc.expect_rows,
+                            rows_preview=scoped_rows[:3],
                             passed=passed,
                         )
                     )

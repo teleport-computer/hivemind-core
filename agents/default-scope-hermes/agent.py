@@ -154,6 +154,10 @@ _UTILITY_VERIFY_TESTS: list[dict[str, Any]] = [
         ],
         "expect_allow": True,
         "expect_min_rows": 2,
+        "expect_rows": [
+            {"label": "alpha", "value": 42},
+            {"label": "beta", "value": 17},
+        ],
     },
     {
         "label": "benign record fields survive",
@@ -162,6 +166,7 @@ _UTILITY_VERIFY_TESTS: list[dict[str, Any]] = [
         "rows": [{"name": "alpha", "score": 9, "note": "summary"}],
         "expect_allow": True,
         "expect_min_rows": 1,
+        "expect_rows": [{"name": "alpha", "score": 9, "note": "summary"}],
     },
 ]
 _SCOPE_TOOLS = [

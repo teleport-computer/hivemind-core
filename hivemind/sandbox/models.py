@@ -262,6 +262,7 @@ class ScopeTestCase(BaseModel):
     rows: list[dict] = Field(default_factory=list)
     expect_allow: bool | None = None  # None = don't assert, just record outcome
     expect_min_rows: int | None = None  # None = don't assert row preservation
+    expect_rows: list[dict] | None = None  # None = don't assert exact row utility
     label: str = ""  # human-readable name
 
 
@@ -282,6 +283,8 @@ class ScopeTestResult(BaseModel):
     rows_returned: int = 0
     expected_allow: bool | None = None
     expected_min_rows: int | None = None
+    expected_rows: list[dict] | None = None
+    rows_preview: list[dict] | None = None
     passed: bool | None = None  # None if no expectation provided
 
 
