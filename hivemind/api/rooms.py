@@ -1,12 +1,43 @@
-"""Public room lifecycle, vault, trust, attestation, and run routes."""
+"""Public room lifecycle, vault, trust, attestation, and run routes.
+
+## Room sharing — two distinct primitives
+
+A room can be shared in exactly two ways. These have different auth and
+billing semantics and are *not* interchangeable. Anything that touches a
+room (create, revoke, list) must keep them consistent.
+
+================  ===========================  ==============================
+                  Invite (``hmq_…``)           Share link (``hms_…``)
+================  ===========================  ==============================
+Storage           ``_capability_tokens``       ``_room_share_links``
+Mint trigger      ``POST /v1/rooms`` (auto,    ``POST /v1/rooms/{id}/share-
+                  one per created room)         link`` (explicit, idempotent)
+Bearer payment    Issuing tenant pays          Bearer's own tenant pays
+Bearer needs      *Nothing* — the token IS     A valid ``hmk_…`` tenant key
+own tenant key?    the credential
+URL shape         ``/r/<room>?token=hmq_…``    ``/r/<room>?share=hms_…``
+                  (single-use semantics)        (rotate to invalidate copies)
+Revoke action     ``DELETE /v1/tenant/         ``DELETE /v1/rooms/{id}/
+                  tokens/{id}``                 share-link``
+================  ===========================  ==============================
+
+Both are reachable for the *same* room. ``DELETE /v1/rooms/{id}``
+revokes the room and cascades both: invites for the room are marked
+revoked, the share link row is dropped. Without that cascade, a
+"revoked" room would still have live invites and a live share-link
+URL — which is the opposite of what owners expect from a revoke.
+"""
 
 from __future__ import annotations
 
 import asyncio
 import base64
+import logging
 import time
 from collections.abc import Callable
 from uuid import uuid4
+
+logger = logging.getLogger(__name__)
 
 from cryptography.hazmat.primitives import serialization
 from fastapi import Depends, FastAPI, HTTPException, Request
@@ -342,12 +373,69 @@ def register_room_routes(
     @app.delete("/v1/rooms/{room_id}")
     async def revoke_room(
         room_id: str,
+        request: Request,
         caller: Caller = Depends(requires_role("owner")),
     ):
+        """Revoke a room and cascade-retire every credential pointing at it.
+
+        A room in Hivemind is reachable by exactly two sharing primitives:
+
+          * ``hmq_…`` capability tokens (room "invites") — minted at room
+            create time. One row per invite in ``_capability_tokens``
+            with ``constraints.room_id`` set.
+          * ``hms_…`` share link — at most one row per (tenant, room) in
+            ``_room_share_links``; "Google-Docs URL" model.
+
+        Revoking the room without also retiring these would leave both
+        kinds dangling: invites still resolve at the auth layer (only
+        the run itself would fail), and the share link still exists in
+        ``_room_share_links`` so the next call to GET share-link would
+        keep returning it. We cascade so revoke is actually revocation.
+
+        The cascade is best-effort: if the share-link delete or
+        capability-token sweep fails for any reason, the room itself
+        stays revoked (the primary check). Worst case the owner sees
+        orphaned rows and can revoke them manually from
+        /app/settings — better than leaving the room half-revoked.
+        """
         ok = await asyncio.to_thread(caller.hive.room_store.revoke, room_id)
         if not ok:
             raise HTTPException(404, f"room '{room_id}' not found")
-        return {"status": "ok", "room_id": room_id}
+
+        registry = request.app.state.registry
+        invites_revoked = 0
+        share_disabled = False
+        try:
+            invites_revoked = await asyncio.to_thread(
+                registry.revoke_capabilities_for_room,
+                caller.tenant_id,
+                room_id,
+            )
+        except Exception as exc:
+            logger.warning(
+                "room %s revoke: invite cascade failed: %s",
+                room_id,
+                exc,
+            )
+        try:
+            share_disabled = await asyncio.to_thread(
+                registry.disable_room_share_link,
+                caller.tenant_id,
+                room_id,
+            )
+        except Exception as exc:
+            logger.warning(
+                "room %s revoke: share-link cascade failed: %s",
+                room_id,
+                exc,
+            )
+
+        return {
+            "status": "ok",
+            "room_id": room_id,
+            "invites_revoked": invites_revoked,
+            "share_link_disabled": share_disabled,
+        }
 
     def _share_link_payload(
         request: Request,

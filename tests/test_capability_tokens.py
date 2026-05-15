@@ -457,3 +457,101 @@ def test_resolve_any_wrong_owner_after_eviction_stays_sealed(registry):
     # A bogus hmk_ that doesn't match any tenant row — 401, no thaw.
     assert registry.resolve_any("hmk_bogus_nonexistent_owner_key") is None
     assert not registry.sealer.is_unsealed(t["tenant_id"])
+
+
+# ── room-cascade revoke ──────────────────────────────────────────────
+
+
+def test_revoke_capabilities_for_room_only_targets_matching_room(registry):
+    """Cascade revoke must hit invites for *this* room only, leave others.
+
+    Backs the ``DELETE /v1/rooms/{id}`` cascade: when a room is revoked,
+    every ``hmq_…`` capability that was minted with
+    ``constraints.room_id = <that room>`` is retired in one sweep.
+    Other rooms' invites (and invites with no room constraint, if such
+    a thing existed) stay live.
+    """
+    t = registry.provision("room_cascade")
+    registry._test_created_dbs.append(t["db_name"])
+    tenant_id = t["tenant_id"]
+
+    a_room = "room_targeted_aaa111"
+    b_room = "room_other_bbb222"
+
+    inv_a1 = registry.mint_capability(
+        tenant_id,
+        "query",
+        "invite-a-1",
+        {"scope_agent_id": "sc", "room_id": a_room},
+    )
+    inv_a2 = registry.mint_capability(
+        tenant_id,
+        "query",
+        "invite-a-2",
+        {"scope_agent_id": "sc", "room_id": a_room},
+    )
+    inv_b = registry.mint_capability(
+        tenant_id,
+        "query",
+        "invite-b",
+        {"scope_agent_id": "sc", "room_id": b_room},
+    )
+
+    n = registry.revoke_capabilities_for_room(tenant_id, a_room)
+    assert n == 2
+
+    by_id = {row["token_id"]: row for row in registry.list_capabilities(tenant_id)}
+    assert by_id[inv_a1["token_id"]]["revoked_at"] is not None
+    assert by_id[inv_a2["token_id"]]["revoked_at"] is not None
+    assert by_id[inv_b["token_id"]]["revoked_at"] is None
+
+
+def test_revoke_capabilities_for_room_idempotent(registry):
+    """Calling the cascade twice doesn't double-revoke or error.
+
+    Live → revoked on the first call, then revoked → revoked is a no-op
+    (returns 0) on the second. Important because the API handler can be
+    retried by clients without producing weird side effects.
+    """
+    t = registry.provision("room_cascade_idem")
+    registry._test_created_dbs.append(t["db_name"])
+    tenant_id = t["tenant_id"]
+
+    room = "room_idem_ccc333"
+    inv = registry.mint_capability(
+        tenant_id,
+        "query",
+        "only",
+        {"scope_agent_id": "sc", "room_id": room},
+    )
+
+    assert registry.revoke_capabilities_for_room(tenant_id, room) == 1
+    assert registry.revoke_capabilities_for_room(tenant_id, room) == 0
+
+    row = next(
+        r for r in registry.list_capabilities(tenant_id)
+        if r["token_id"] == inv["token_id"]
+    )
+    assert row["revoked_at"] is not None
+
+
+def test_revoke_capabilities_for_room_unknown_room_returns_zero(registry):
+    """No invites match → nothing changes. Confirms we don't fall back to
+    revoking all tenant invites when the room id is wrong."""
+    t = registry.provision("room_cascade_miss")
+    registry._test_created_dbs.append(t["db_name"])
+    tenant_id = t["tenant_id"]
+
+    inv = registry.mint_capability(
+        tenant_id,
+        "query",
+        "kept",
+        {"scope_agent_id": "sc", "room_id": "room_real"},
+    )
+
+    assert registry.revoke_capabilities_for_room(tenant_id, "room_ghost") == 0
+    row = next(
+        r for r in registry.list_capabilities(tenant_id)
+        if r["token_id"] == inv["token_id"]
+    )
+    assert row["revoked_at"] is None
