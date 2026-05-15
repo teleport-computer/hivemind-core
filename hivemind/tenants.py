@@ -864,6 +864,54 @@ class TenantRegistry(CreditCodeRegistryMixin, BillingRegistryMixin):
         )
         return bool(rowcount)
 
+    def revoke_capabilities_for_room(
+        self, tenant_id: str, room_id: str,
+    ) -> int:
+        """Revoke every live invite (``hmq_…`` capability token) whose
+        constraints bind it to this room.
+
+        Used by the room-revoke cascade so that deleting a room also
+        retires every invite that pointed at it — otherwise revoked
+        rooms leave orphaned invites in /app/settings, which is
+        confusing to owners and means revocation isn't really
+        revocation. The share link (``hms_…``) for the room is handled
+        separately by :meth:`disable_room_share_link`.
+
+        Returns the number of tokens revoked. The filter is done in
+        Python because ``constraints`` is stored as TEXT (JSON-encoded)
+        and we don't want to rely on a Postgres-specific cast.
+        """
+        room_id = (room_id or "").strip()
+        if not room_id:
+            return 0
+        rows = self._control_db.execute(
+            "SELECT token_hash, constraints FROM _capability_tokens "
+            "WHERE tenant_id = %s AND revoked_at IS NULL",
+            [tenant_id],
+        )
+        targets: list[str] = []
+        for row in rows:
+            token_hash = row[0] if not hasattr(row, "keys") else row["token_hash"]
+            constraints_text = (
+                row[1] if not hasattr(row, "keys") else row["constraints"]
+            )
+            try:
+                c = _json.loads(constraints_text or "{}")
+            except Exception:
+                continue
+            if isinstance(c, dict) and c.get("room_id") == room_id:
+                targets.append(token_hash)
+        if not targets:
+            return 0
+        now = time.time()
+        for h in targets:
+            self._control_db.execute_commit(
+                "UPDATE _capability_tokens SET revoked_at = %s "
+                "WHERE token_hash = %s AND revoked_at IS NULL",
+                [now, h],
+            )
+        return len(targets)
+
     # ── Admin operations ────────────────────────────────────────────
 
     def _find_tenants_by_name(self, name: str) -> list[dict]:
