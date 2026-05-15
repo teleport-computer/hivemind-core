@@ -1508,6 +1508,53 @@ def test_scope_agent_recovers_when_no_policy_scope_redacts_benign_values(
     assert "scope no-policy recovery activated" in captured.err
 
 
+def test_no_policy_recovery_scope_preserves_ordinary_data_and_redacts_secrets(
+    monkeypatch,
+):
+    monkeypatch.delenv("POLICY_CONTEXT", raising=False)
+    mod, _calls = _load_scope_agent(
+        monkeypatch,
+        "default_scope_hermes_no_policy_recovery_guard_test",
+        response=json.dumps(
+            {"scope_fn": 'def scope(sql, params, rows):\n    return {"allow": True, "rows": rows}\n'}
+        ),
+    )
+    fn = compile_scope_fn(mod._NO_POLICY_RECOVERY_SCOPE_FN)
+
+    result = fn(
+        "SELECT * FROM rows",
+        [],
+        [
+            {
+                "user_id": "u_123",
+                "hashtag": "fyp",
+                "title": "A normal title",
+                "url": "https://example.com/watch/1",
+                "email": "person@example.com",
+                "api_key": "sk-secret",
+                "session_id": "sess_123",
+                "password": "pw",
+            }
+        ],
+    )
+
+    assert result == {
+        "allow": True,
+        "rows": [
+            {
+                "user_id": "u_123",
+                "hashtag": "fyp",
+                "title": "A normal title",
+                "url": "https://example.com/watch/1",
+                "email": "person@example.com",
+                "api_key": "[redacted]",
+                "session_id": "[redacted]",
+                "password": "[redacted]",
+            }
+        ],
+    }
+
+
 def test_scope_prompt_centers_privacy_utility_frontier():
     source = (ROOT / "agents/default-scope-hermes/agent.py").read_text()
 
@@ -1520,6 +1567,10 @@ def test_scope_prompt_centers_privacy_utility_frontier():
     assert "harness verifies the emitted source" in source
     assert "benign labeled metric rows survive" in source
     assert "canned policies" in source
+    assert "high-sensitivity guard" in source
+    assert "pass through\nrows and fields by default" in source
+    assert "Do not redact\nordinary analytical labels" in source
+    assert "first-principles data minimization" not in source
 
 
 def test_query_prompt_is_tool_aware_without_canned_policy():

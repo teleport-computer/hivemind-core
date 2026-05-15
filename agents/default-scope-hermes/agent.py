@@ -64,7 +64,10 @@ You emit one Python row transformer for a hivemind room.
 Goal: find the best privacy/utility frontier for this question and room. If
 POLICY is present, it is authoritative: enforce exactly that policy,
 with no extra categories and no missing categories. Do not apply canned policies.
-If no policy is present, use first-principles data minimization.
+If no policy is present, use only a narrow high-sensitivity guard: pass through
+rows and fields by default, and redact only obvious credentials, secrets,
+auth tokens, private keys, session cookies, system internals, tool traces, or
+debug output.
 Preserve useful information whenever it is allowed; remove or transform only
 what is necessary for compliance.
 
@@ -93,9 +96,11 @@ Process:
 Stay in your lane: scope designs the privacy transform. The query agent will
 do the research. Do not spend turns researching trends, lifecycles, categories,
 or final report evidence. If no explicit restrictive policy is present, preserve
-useful scoped result rows by default and redact only obvious raw identifiers,
-URLs, secrets, or fields whose disclosure would be needlessly invasive for the
-question. If policy allows row-level records, do not collapse them into counts.
+useful scoped result rows by default and redact only obvious credential, secret,
+auth, session, system-internal, tool-trace, or debug fields. Do not redact
+ordinary analytical labels, categories, tags, topics, titles, URLs, handles,
+timestamps, identifiers, counts, or metric fields merely because no policy was
+signed. If policy allows row-level records, do not collapse them into counts.
 If policy allows summaries, preserve grouping fields and metric fields. Return
 an empty list only when no policy-compliant useful disclosure remains. The
 default path is a short decision loop, not a research phase.
@@ -124,7 +129,7 @@ _MAX_TOOL_RESULT_CHARS = 12_000
 _MAX_RETRY_CONTEXT_CHARS = 3000
 _NO_POLICY_RECOVERY_SCOPE_FN = (
     "def scope(sql, params, rows):\n"
-    "    redacted_keys = ('email', 'phone', 'address', 'url', 'link', 'token', 'secret', 'password', 'api_key', 'cookie', 'session', 'auth')\n"
+    "    redacted_keys = ('token', 'secret', 'password', 'api_key', 'apikey', 'cookie', 'session', 'auth', 'credential', 'private_key', 'bearer')\n"
     "    safe_rows = []\n"
     "    for row in rows:\n"
     "        if not isinstance(row, dict):\n"

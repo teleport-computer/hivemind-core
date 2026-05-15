@@ -36,6 +36,10 @@ surface.
 - Changed scope-Hermes host verification to generic useful-row smoke checks
   instead of prompt-keyword aggregate fixtures, avoiding benchmark-shaped
   verifier policies while still catching destructive empty transforms.
+- Relaxed scope-Hermes behavior for rooms with empty rules: no-policy rooms now
+  pass ordinary rows and analytical fields through by default, while still
+  redacting obvious credentials, secrets, auth/session fields, and debug/system
+  internals.
 - Replaced the scope-Hermes `AIAgent` wrapper with a bounded bridge loop so
   scope design has explicit tool-call caps and no iteration-exhaustion summary
   path.
