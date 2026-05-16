@@ -129,6 +129,12 @@ then answer. Once a scoped SQL result directly satisfies the requested columns,
 row count, and ordering, stop exploring variants.
 For broad analytical prompts, run multiple targeted SQL queries as needed
 within budget instead of stopping after the first usable result.
+When the user asks for a table with explicit analytical columns, include all
+requested columns in the first substantive aggregate SQL whenever PostgreSQL
+can compute them together. For date-bucket comparisons such as wider/narrower
+than the previous bucket, use window functions such as LAG in that same query
+instead of running one query for partial day stats and a second query only to
+add the comparison column.
 If a broad query times out or returns an error, narrow it: add date buckets,
 top-N limits, smaller time windows, selected columns, or simpler GROUP BY
 queries. Do not ask the user for more data or stop at a tool-attempt summary

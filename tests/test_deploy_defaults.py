@@ -94,6 +94,8 @@ def test_post_deploy_hermes_eval_keeps_fast_canary_small():
     assert "max_tokens=250000" in workflow
     assert "max_llm_calls=20" in workflow
     assert "timeout_seconds=300" in workflow
+    assert 'finding.get("kind") == "latency_over_budget"' in workflow
+    assert "Transient gateway/telemetry/latency failure" in workflow
     assert "max_tokens=1000000" in workflow
     assert "watch_history_report_artifact" in workflow
     assert "Deep report/artifact canary skipped" in workflow

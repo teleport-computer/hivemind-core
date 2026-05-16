@@ -1818,6 +1818,8 @@ def test_query_prompt_is_tool_aware_without_canned_policy():
     assert "jsonb_array_elements_text(<col>::jsonb)" in source
     assert "Empty arrays such as ``[]`` mean there is no category element" in source
     assert "literal percent sign" in source
+    assert "include all\nrequested columns in the first substantive aggregate SQL" in source
+    assert "window functions such as LAG" in source
     assert "displayed cleaned label must also be" in source
     assert "duplicate identical labels" in source
     assert "exclude NULL or empty labels" in source

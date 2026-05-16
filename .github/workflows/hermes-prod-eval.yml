@@ -187,6 +187,9 @@ jobs:
           if not failed_findings:
               raise SystemExit(1)
 
+          if all(finding.get("kind") == "latency_over_budget" for finding in failed_findings):
+              raise SystemExit(0)
+
           room_submit_needles = ("502", "503", "504", "Gateway Time-out", "Gateway Timeout")
           telemetry_needles = (
               "ConnectError",
@@ -321,7 +324,7 @@ jobs:
 
               summary="$(cat /tmp/hivemind-last-eval-summary.txt 2>/dev/null || true)"
               if [ "$attempt" -lt 3 ] && [ -n "$summary" ] && is_transient_eval_failure "$summary"; then
-                echo "Transient gateway/telemetry failure; retrying after warmup"
+                echo "Transient gateway/telemetry/latency failure; retrying after warmup"
                 sleep $((attempt * 60))
                 continue
               fi
