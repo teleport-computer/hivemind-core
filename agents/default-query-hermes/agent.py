@@ -293,7 +293,9 @@ _UNRESOLVED_RESPONSE_MARKERS = (
     "limitation:",
     "function compatibility issues",
     "no usable ranked results",
+    "no successful aggregate query",
     "sql execution errors",
+    "timed-out sql",
     "unable to execute",
     "unable to produce",
     "unable to successfully query",
@@ -305,6 +307,8 @@ _UNRESOLVED_RESPONSE_MARKERS = (
 )
 _UNRESOLVED_RESPONSE_PATTERNS = (
     r"\bi(?:'m| am)? unable to (?:produce|calculate|determine|complete|execute|successfully query)\b",
+    r"\bno successful aggregate\b.{0,120}\b(?:query|sql)\b",
+    r"\btimed-out sql\b.{0,120}\b(?:did not return|failed|timed out)\b",
     r"\bquer(?:y|ies)\b.{0,120}\b(?:timed out|failed|couldn'?t complete|could not complete)\b",
     r"\bscheduled query\b.{0,120}\b(?:timed out|couldn'?t complete|could not complete)\b",
     r"\bno usable\b.{0,80}\bresults\b",
@@ -694,6 +698,7 @@ def _retry_body(body: str, reason: str, previous_response: str) -> str:
     previous = (previous_response or "").strip()
     if len(previous) > 2000:
         previous = previous[:2000] + "\n[truncated]"
+    retry_context = f"{reason}\n{previous}\n{body}".lower()
     categorical_guidance = ""
     if "malformed categorical" in reason.lower():
         categorical_guidance = (
@@ -705,6 +710,26 @@ def _retry_body(body: str, reason: str, previous_response: str) -> str:
             "for event/item/watch counts unless the user explicitly asked to "
             "sum another metric column. Before finalizing, reject labels that "
             "still start with '[', ']', or '\"', and reject NULL/NaN metrics.\n"
+        )
+    if any(
+        marker in retry_context
+        for marker in (
+            "placeholder restriction",
+            "timed-out sql",
+            "json text array",
+            "json-serialized array",
+            "hashtag",
+        )
+    ):
+        categorical_guidance += (
+            "\nFor categorical/list-like text fields, prefer the simplest "
+            "shape-specific aggregate that matches the observed sample. If a "
+            "text sample begins with '[' and contains quoted values, use "
+            "jsonb_array_elements_text(<column>::jsonb) directly before "
+            "GROUP BY. Avoid broad CASE expressions that try every possible "
+            "encoding across every row; they are slower and can time out. Do "
+            "not write literal '%' characters in SQL LIKE patterns; use "
+            "LEFT/starts_with predicates or bind the pattern as a parameter.\n"
         )
     return (
         f"{body}\n\n"

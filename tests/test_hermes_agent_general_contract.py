@@ -711,6 +711,47 @@ def test_query_agent_retries_timeout_apology_from_live_table_run(
     assert "query to aggregate" in retry_body
 
 
+def test_query_agent_retries_no_successful_aggregate_timeout(
+    monkeypatch,
+    capsys,
+):
+    monkeypatch.setenv(
+        "QUERY_PROMPT",
+        "Show me my top 30 hashtags by watch count as a markdown table with "
+        "columns: rank, hashtag, watches. Just the table, no explanation.",
+    )
+    failed = (
+        "No successful aggregate query completed in time to produce the hashtag "
+        "ranking. The schema confirms there is a `hashtags` text column in "
+        "`watch_history`, but the timed-out SQL did not return results needed "
+        "for count-based ranking. Therefore, I cannot provide the top 30 "
+        "hashtags by watch count."
+    )
+    fixed = (
+        "| rank | hashtag | watches |\n"
+        "|---|---:|---:|\n"
+        "| 1 | fyp | 922365 |\n"
+        "| 2 | viral | 266010 |\n"
+    )
+    mod, calls = _load_query_agent(
+        monkeypatch,
+        "default_query_hermes_retry_no_successful_aggregate_contract_test",
+        chat_responses=[_chat_response(failed), _chat_response(fixed)],
+    )
+
+    mod.main()
+
+    captured = capsys.readouterr()
+    assert captured.out.strip() == fixed.strip()
+    assert len(calls["llm_payloads"]) == 2
+    retry_body = calls["llm_payloads"][1]["messages"][1]["content"]
+    assert "unresolved query harness response" in retry_body
+    assert "No successful aggregate query" in retry_body
+    assert "timed-out SQL" in retry_body
+    assert "jsonb_array_elements_text(<column>::jsonb)" in retry_body
+    assert "Avoid broad CASE expressions" in retry_body
+
+
 def test_query_agent_retries_malformed_categorical_table_with_json_guidance(
     monkeypatch,
     capsys,

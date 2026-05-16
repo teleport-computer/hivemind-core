@@ -9,6 +9,10 @@ import subprocess
 import sys
 from dataclasses import asdict
 from pathlib import Path
+from urllib.parse import parse_qs, unquote, urlparse
+
+import httpx
+import yaml
 
 from .graders import count_markdown_tables, count_words, grade_text
 from .scenarios import SCENARIOS
@@ -48,6 +52,75 @@ def _hmctl_base(profile: str | None = None) -> list[str]:
     if profile:
         cmd.extend(["--profile", profile])
     return cmd
+
+
+def _profile_name(profile: str | None) -> str:
+    if profile:
+        return profile
+    if env_profile := os.environ.get("HIVEMIND_PROFILE", "").strip():
+        return env_profile
+    active_path = Path.home() / ".hivemind" / "active"
+    try:
+        active = active_path.read_text(encoding="utf-8").strip()
+    except OSError:
+        active = ""
+    return active or "default"
+
+
+def _profile_api_key(profile: str | None) -> str:
+    profile_path = Path.home() / ".hivemind" / "profiles" / f"{_profile_name(profile)}.yaml"
+    try:
+        config = yaml.safe_load(profile_path.read_text(encoding="utf-8")) or {}
+    except OSError:
+        return ""
+    except yaml.YAMLError:
+        return ""
+    api_key = str(config.get("api_key") or "").strip()
+    return api_key
+
+
+def _hmroom_run_headers(room_ref: str, profile: str | None) -> tuple[str, dict] | None:
+    if not room_ref.startswith("hmroom://"):
+        return None
+    parsed = urlparse(room_ref)
+    qs = parse_qs(parsed.query)
+    service = unquote((qs.get("service") or [""])[0]).rstrip("/")
+    token = unquote((qs.get("token") or qs.get("share") or [""])[0])
+    if not service or not token:
+        return None
+    headers = {"Authorization": f"Bearer {token}"}
+    api_key = _profile_api_key(profile)
+    if api_key.startswith("hmk_"):
+        headers["X-Hivemind-Api-Key"] = api_key
+    return service, headers
+
+
+def _fetch_hmroom_run_telemetry(
+    room_ref: str,
+    run_id: str,
+    profile: str | None,
+) -> subprocess.CompletedProcess | None:
+    resolved = _hmroom_run_headers(room_ref, profile)
+    if resolved is None:
+        return None
+    service, headers = resolved
+    cmd = ["GET", f"{service}/v1/runs/{run_id}"]
+    try:
+        resp = httpx.get(
+            f"{service}/v1/runs/{run_id}",
+            headers=headers,
+            timeout=60,
+        )
+    except httpx.HTTPError as e:
+        return subprocess.CompletedProcess(cmd, 1, stdout="", stderr=f"{type(e).__name__}: {e}")
+    if resp.status_code >= 400:
+        return subprocess.CompletedProcess(
+            cmd,
+            1,
+            stdout=resp.text,
+            stderr=f"HTTP {resp.status_code}: {resp.text[:500]}",
+        )
+    return subprocess.CompletedProcess(cmd, 0, stdout=resp.text, stderr="")
 
 
 def _stage_seconds(run: dict, stage: str) -> float | None:
@@ -324,21 +397,27 @@ def _cmd_run_room(args: argparse.Namespace) -> int:
         if run_id:
             telemetry_path = out_dir / f"{scenario.id}__{safe_model}__run.json"
             telemetry_stderr_path = telemetry_path.with_suffix(".stderr.txt")
-            telemetry_cmd = [
-                *_hmctl_base(args.hmctl_profile),
-                "--yes",
-                "--allow-degraded-attestation",
-                "room",
-                "runs",
+            telemetry_proc = _fetch_hmroom_run_telemetry(
+                args.room,
                 run_id,
-                "--json",
-            ]
-            telemetry_proc = subprocess.run(
-                telemetry_cmd,
-                text=True,
-                capture_output=True,
-                timeout=60,
+                args.hmctl_profile,
             )
+            if telemetry_proc is None:
+                telemetry_cmd = [
+                    *_hmctl_base(args.hmctl_profile),
+                    "--yes",
+                    "--allow-degraded-attestation",
+                    "room",
+                    "runs",
+                    run_id,
+                    "--json",
+                ]
+                telemetry_proc = subprocess.run(
+                    telemetry_cmd,
+                    text=True,
+                    capture_output=True,
+                    timeout=60,
+                )
             command_findings.extend(
                 _command_failure_findings(
                     phase="run_telemetry",

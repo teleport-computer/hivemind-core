@@ -175,6 +175,80 @@ def test_run_room_persists_final_run_telemetry(tmp_path, monkeypatch):
     ).exists()
 
 
+def test_run_room_fetches_hmroom_share_telemetry_with_payer_key(
+    tmp_path,
+    monkeypatch,
+):
+    calls = {"subprocess": [], "http": []}
+    output = (
+        "| rank | hashtag | watches |\n"
+        "|---|---|---|\n"
+        "| 1 | fyp | 922365 |\n"
+    )
+
+    profile_dir = tmp_path / ".hivemind" / "profiles"
+    profile_dir.mkdir(parents=True)
+    (profile_dir / "prod.yaml").write_text(
+        'api_key: "hmk_test_payer"\nrole: tenant\n'
+        'service: "https://hivemind.teleport.computer"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    def fake_run(cmd, *, text, capture_output, timeout):
+        calls["subprocess"].append(cmd)
+        assert "ask" in cmd
+        return subprocess.CompletedProcess(
+            cmd,
+            0,
+            stdout=json.dumps({"run_id": "run-123", "output": output}),
+            stderr="",
+        )
+
+    class FakeResponse:
+        status_code = 200
+        text = json.dumps(_report_run_telemetry())
+
+    def fake_get(url, *, headers, timeout):
+        calls["http"].append({"url": url, "headers": headers, "timeout": timeout})
+        return FakeResponse()
+
+    monkeypatch.setenv("HMCTL_BIN", "hmctl")
+    monkeypatch.setattr(eval_cli.subprocess, "run", fake_run)
+    monkeypatch.setattr(eval_cli.httpx, "get", fake_get)
+
+    parser = eval_cli.build_parser()
+    args = parser.parse_args(
+        [
+            "run-room",
+            "watch_history_top_hashtags",
+            (
+                "hmroom:///room_abc?service=https%3A%2F%2Fhivemind.example"
+                "&token=hms_share_token&owner_pubkey=test"
+            ),
+            "--model",
+            "openai/gpt-5",
+            "--hmctl-profile",
+            "prod",
+            "--output-dir",
+            str(tmp_path / "results"),
+        ]
+    )
+
+    assert eval_cli._cmd_run_room(args) == 0
+    assert len(calls["subprocess"]) == 1
+    assert calls["http"] == [
+        {
+            "url": "https://hivemind.example/v1/runs/run-123",
+            "headers": {
+                "Authorization": "Bearer hms_share_token",
+                "X-Hivemind-Api-Key": "hmk_test_payer",
+            },
+            "timeout": 60,
+        }
+    ]
+
+
 def test_report_grade_accepts_privacy_posture_and_requires_depth():
     result = grade_text(_deep_report_output(), SCENARIOS["watch_history_report_artifact"])
 
