@@ -1057,6 +1057,156 @@ def test_scope_agent_uses_bounded_bridge_loop(monkeypatch, capsys):
     )
 
 
+def test_scope_agent_rehearsal_tools_are_opt_in(monkeypatch, capsys):
+    scope_fn = 'def scope(sql, params, rows):\n    return {"allow": True, "rows": rows}\n'
+    monkeypatch.setenv("QUERY_PROMPT", "Use the uploaded agent safely.")
+    monkeypatch.setenv("QUERY_AGENT_ID", "query-agent-1")
+    monkeypatch.setenv("HIVEMIND_SCOPE_ENABLE_AGENT_FILE_TOOLS", "true")
+    monkeypatch.setenv("HIVEMIND_SCOPE_ENABLE_SIMULATION_TOOLS", "true")
+    monkeypatch.setenv("HIVEMIND_SCOPE_ENABLE_ROOM_VAULT_TOOLS", "true")
+    mod, calls = _load_agent(
+        monkeypatch,
+        "agents/default-scope-hermes/agent.py",
+        "default_scope_hermes_rehearsal_tools_contract_test",
+        response="unused",
+    )
+    calls["llm_payloads"] = []
+    calls["tool_payloads"] = []
+    calls["verify_payloads"] = []
+    calls["simulate_payloads"] = []
+    responses = [
+        _chat_response(
+            "",
+            tool_calls=[
+                _tool_call("list_query_agent_files", {}, call_id="list_files"),
+                _tool_call(
+                    "read_query_agent_file",
+                    {"file_path": "agent.py"},
+                    call_id="read_file",
+                ),
+            ],
+        ),
+        _chat_response(
+            "",
+            tool_calls=[
+                _tool_call(
+                    "verify_scope_fn",
+                    {"source": scope_fn, "tests": []},
+                    call_id="verify_candidate",
+                )
+            ],
+        ),
+        _chat_response(
+            "",
+            tool_calls=[
+                _tool_call(
+                    "simulate_query",
+                    {"scope_fn_source": scope_fn},
+                    call_id="simulate_candidate",
+                )
+            ],
+        ),
+        _chat_response(json.dumps({"scope_fn": scope_fn})),
+    ]
+
+    def fake_post(url, *, json=None, headers=None, timeout=None):
+        if url.endswith("/v1/chat/completions"):
+            calls["llm_payloads"].append(json)
+            return _FakeHTTPResponse(responses.pop(0))
+        if "/tools/" in url:
+            name = url.rsplit("/", 1)[-1]
+            calls["tool_payloads"].append((name, json))
+            if name == "list_query_agent_files":
+                return _FakeHTTPResponse(
+                    {"result": '{"files":[{"path":"agent.py","size_bytes":12}]}'}
+                )
+            if name == "read_query_agent_file":
+                return _FakeHTTPResponse({"result": "print('query')"})
+            raise AssertionError(f"unexpected tool URL: {url}")
+        if url.endswith("/sandbox/verify_scope_fn"):
+            calls["verify_payloads"].append(json)
+            return _FakeHTTPResponse(
+                {"compiles": True, "all_tests_passed": True, "results": []}
+            )
+        if url.endswith("/sandbox/simulate"):
+            calls["simulate_payloads"].append(json)
+            return _FakeHTTPResponse({"output": "safe useful answer", "tape": []})
+        raise AssertionError(f"unexpected URL: {url}")
+
+    monkeypatch.setattr(mod.httpx, "post", fake_post)
+
+    mod.main()
+
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == {"scope_fn": scope_fn}
+    tool_names = {t["function"]["name"] for t in calls["llm_payloads"][0]["tools"]}
+    assert {
+        "get_schema",
+        "execute_sql",
+        "get_room_vault_items",
+        "list_query_agent_files",
+        "read_query_agent_file",
+        "verify_scope_fn",
+        "simulate_multi",
+        "simulate_query",
+    }.issubset(tool_names)
+    assert calls["tool_payloads"] == [
+        ("list_query_agent_files", {"arguments": {}}),
+        ("read_query_agent_file", {"arguments": {"file_path": "agent.py"}}),
+    ]
+    assert calls["verify_payloads"][0] == {"source": scope_fn, "tests": []}
+    assert calls["simulate_payloads"][0]["query_agent_id"] == "query-agent-1"
+    assert calls["simulate_payloads"][0]["prompt"] == "Use the uploaded agent safely."
+    assert calls["simulate_payloads"][0]["scope_fn_source"] == scope_fn
+    assert calls["verify_payloads"][-1]["tests"][0]["label"] == (
+        "benign labeled metric rows survive"
+    )
+
+
+def test_scope_agent_rehearsed_mode_enables_rehearsal_tools(monkeypatch, capsys):
+    scope_fn = 'def scope(sql, params, rows):\n    return {"allow": True, "rows": rows}\n'
+    monkeypatch.setenv("QUERY_PROMPT", "Use the uploaded agent safely.")
+    monkeypatch.setenv("QUERY_AGENT_ID", "query-agent-1")
+    monkeypatch.setenv("HIVEMIND_SCOPE_MODE", "rehearsed")
+    monkeypatch.setenv("HIVEMIND_SCOPE_MODE_REASON", "custom_or_uploaded_query_agent")
+    mod, calls = _load_agent(
+        monkeypatch,
+        "agents/default-scope-hermes/agent.py",
+        "default_scope_hermes_rehearsed_mode_tools_contract_test",
+        response="unused",
+    )
+    calls["llm_payloads"] = []
+    calls["verify_payloads"] = []
+    responses = [_chat_response(json.dumps({"scope_fn": scope_fn}))]
+
+    def fake_post(url, *, json=None, headers=None, timeout=None):
+        if url.endswith("/v1/chat/completions"):
+            calls["llm_payloads"].append(json)
+            return _FakeHTTPResponse(responses.pop(0))
+        if url.endswith("/sandbox/verify_scope_fn"):
+            calls["verify_payloads"].append(json)
+            return _FakeHTTPResponse(
+                {"compiles": True, "all_tests_passed": True, "results": []}
+            )
+        raise AssertionError(f"unexpected URL: {url}")
+
+    monkeypatch.setattr(mod.httpx, "post", fake_post)
+
+    mod.main()
+
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == {"scope_fn": scope_fn}
+    tool_names = {t["function"]["name"] for t in calls["llm_payloads"][0]["tools"]}
+    assert "list_query_agent_files" in tool_names
+    assert "read_query_agent_file" in tool_names
+    assert "verify_scope_fn" in tool_names
+    assert "simulate_query" in tool_names
+    assert "simulate_multi" in tool_names
+    system_prompt = calls["llm_payloads"][0]["messages"][0]["content"]
+    assert "Scope mode: rehearsed" in system_prompt
+    assert "custom_or_uploaded_query_agent" in system_prompt
+
+
 def test_scope_agent_wraps_prompt_and_emits_verified_source(monkeypatch, capsys):
     scope_fn = (
         "def scope(sql, params, rows):\n"

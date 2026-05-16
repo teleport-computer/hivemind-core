@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import email.utils
+import json
 from collections.abc import Callable
 from urllib.parse import quote
 
@@ -11,6 +12,52 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, Response
 
 from ..tenants import Caller
+
+
+def _coerce_usage(usage_json) -> dict:
+    if isinstance(usage_json, dict):
+        return usage_json
+    if isinstance(usage_json, str) and usage_json.strip():
+        try:
+            data = json.loads(usage_json)
+        except ValueError:
+            return {}
+        return data if isinstance(data, dict) else {}
+    return {}
+
+
+def _with_run_telemetry_summary(run: dict) -> dict:
+    """Add non-sensitive, client-friendly telemetry fields to a run row."""
+    out = dict(run)
+    usage = _coerce_usage(out.get("usage_json"))
+    if usage:
+        out["usage"] = usage
+    stages = usage.get("stages", {})
+    if not isinstance(stages, dict):
+        stages = {}
+    scope_stage = stages.get("scope", {})
+    if not isinstance(scope_stage, dict):
+        scope_stage = {}
+
+    evidence: dict = {}
+    if mode := scope_stage.get("scope_mode"):
+        evidence["mode"] = mode
+        out["scope_mode"] = mode
+    if reason := scope_stage.get("scope_mode_reason"):
+        evidence["reason"] = reason
+        out["scope_mode_reason"] = reason
+    if inspection := scope_stage.get("query_inspection_mode"):
+        evidence["query_inspection_mode"] = inspection
+        out["query_inspection_mode"] = inspection
+    bridge = scope_stage.get("bridge")
+    if isinstance(bridge, dict):
+        if isinstance(bridge.get("tool_call_counts"), dict):
+            evidence["tool_call_counts"] = bridge["tool_call_counts"]
+        if isinstance(bridge.get("llm_tool_call_counts"), dict):
+            evidence["llm_tool_call_counts"] = bridge["llm_tool_call_counts"]
+    if evidence:
+        out["scope_evidence"] = evidence
+    return out
 
 
 def _caller_can_access_run(
@@ -120,6 +167,7 @@ def register_run_routes(app: FastAPI, requires_role: Callable[..., Callable]) ->
             caller, run, asker_tenant_id=asker,
         ):
             raise HTTPException(404, "Run not found")
+        run = _with_run_telemetry_summary(run)
         if _caller_can_access_run_payload(
             caller, run, asker_tenant_id=asker,
         ) and run.get("artifacts_enabled", True):
@@ -161,7 +209,12 @@ def register_run_routes(app: FastAPI, requires_role: Callable[..., Callable]) ->
             rows = await asyncio.to_thread(
                 caller.hive.run_store.list_by_token, tid, capped,
             )
-            return [_redact_run_payload_for_caller(caller, r) for r in rows]
+            return [
+                _redact_run_payload_for_caller(
+                    caller, _with_run_telemetry_summary(r)
+                )
+                for r in rows
+            ]
         if caller.role == "share":
             asker = _asker_tenant_for_share(caller, request)
             if not asker:
@@ -181,7 +234,9 @@ def register_run_routes(app: FastAPI, requires_role: Callable[..., Callable]) ->
             ]
             return [
                 _redact_run_payload_for_caller(
-                    caller, r, asker_tenant_id=asker,
+                    caller,
+                    _with_run_telemetry_summary(r),
+                    asker_tenant_id=asker,
                 )
                 for r in rows
             ]
@@ -189,11 +244,19 @@ def register_run_routes(app: FastAPI, requires_role: Callable[..., Callable]) ->
             rows = await asyncio.to_thread(
                 caller.hive.run_store.list_by_token, caller.token_id, capped,
             )
-            return [_redact_run_payload_for_caller(caller, r) for r in rows]
+            return [
+                _redact_run_payload_for_caller(
+                    caller, _with_run_telemetry_summary(r)
+                )
+                for r in rows
+            ]
         rows = await asyncio.to_thread(
             caller.hive.run_store.list_recent, capped,
         )
-        return [_redact_run_payload_for_caller(caller, r) for r in rows]
+        return [
+            _redact_run_payload_for_caller(caller, _with_run_telemetry_summary(r))
+            for r in rows
+        ]
 
     @app.get(
         "/v1/runs/{run_id}/artifacts/{filename:path}",

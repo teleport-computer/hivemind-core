@@ -11,11 +11,19 @@ sample when useful, but the query agent does the research.
 
 Env (set automatically by the sandbox runner):
   BRIDGE_URL, SESSION_TOKEN  — bridge connection
-  HIVEMIND_AGENT_ROLE=scope  — plugin registers verify/simulate tools
+  HIVEMIND_AGENT_ROLE=scope  — bridge registers scope-only endpoints
   HIVEMIND_MODEL             — model id passed to the bridge LLM endpoint
   QUERY_PROMPT               — the user's question
   QUERY_AGENT_ID             — the query agent simulate_* will run
   POLICY_CONTEXT             — optional room policy to enforce
+  HIVEMIND_SCOPE_MODE        — fast | rehearsed | sealed_conservative
+  HIVEMIND_SCOPE_MODE_REASON — why the pipeline selected that mode
+  HIVEMIND_SCOPE_ENABLE_SIMULATION_TOOLS=1
+                              — expose simulate_query/simulate_multi
+  HIVEMIND_SCOPE_ENABLE_AGENT_FILE_TOOLS=1
+                              — expose query-agent source inspection tools
+  HIVEMIND_SCOPE_ENABLE_ROOM_VAULT_TOOLS=1
+                              — expose get_room_vault_items when room has vault data
 """
 
 from __future__ import annotations
@@ -57,6 +65,19 @@ QUERY_PROMPT = os.environ.get("QUERY_PROMPT", "")
 QUERY_AGENT_ID = os.environ.get("QUERY_AGENT_ID", "")
 POLICY_CONTEXT = os.environ.get("POLICY_CONTEXT", "").strip()
 HIVEMIND_MODEL = os.environ.get("HIVEMIND_MODEL", "moonshotai/kimi-k2.6")
+SCOPE_MODE = os.environ.get("HIVEMIND_SCOPE_MODE", "fast").strip().lower() or "fast"
+SCOPE_MODE_REASON = os.environ.get("HIVEMIND_SCOPE_MODE_REASON", "").strip()
+QUERY_INSPECTION_MODE = (
+    os.environ.get("HIVEMIND_SCOPE_QUERY_INSPECTION_MODE", "full").strip().lower()
+    or "full"
+)
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 DEFAULT_SYSTEM_PROMPT = """\
 You emit one Python row transformer for a hivemind room.
@@ -174,42 +195,165 @@ _UTILITY_VERIFY_TESTS: list[dict[str, Any]] = [
         "expect_rows": [{"name": "alpha", "score": 9, "note": "summary"}],
     },
 ]
-_SCOPE_TOOLS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "get_schema",
-            "description": (
-                "Get the database schema: table names, column names, types, "
-                "and defaults. Use only when schema helps design the scope."
-            ),
-            "parameters": {"type": "object", "properties": {}, "required": []},
-        },
+_GET_SCHEMA_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "get_schema",
+        "description": (
+            "Get the database schema: table names, column names, types, "
+            "and defaults. Use only when schema helps design the scope."
+        ),
+        "parameters": {"type": "object", "properties": {}, "required": []},
     },
-    {
-        "type": "function",
-        "function": {
-            "name": "execute_sql",
-            "description": (
-                "Execute a small read-only PostgreSQL shape check or sample "
-                "needed to design the privacy transform. Avoid research queries."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "sql": {"type": "string"},
-                    "params": {
-                        "type": "array",
-                        "items": {},
-                        "default": [],
-                    },
+}
+_EXECUTE_SQL_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "execute_sql",
+        "description": (
+            "Execute a small read-only PostgreSQL shape check or sample "
+            "needed to design the privacy transform. Avoid research queries."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "sql": {"type": "string"},
+                "params": {
+                    "type": "array",
+                    "items": {},
+                    "default": [],
                 },
-                "required": ["sql"],
             },
+            "required": ["sql"],
         },
     },
-]
-_ALLOWED_TOOL_NAMES = {"get_schema", "execute_sql"}
+}
+_VERIFY_SCOPE_FN_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "verify_scope_fn",
+        "description": (
+            "Compile and test a candidate scope_fn against synthetic rows. "
+            "Fast and deterministic. Use before expensive simulation when "
+            "you have drafted a candidate."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "source": {
+                    "type": "string",
+                    "description": "Full source: def scope(sql, params, rows): ...",
+                },
+                "tests": {
+                    "type": "array",
+                    "items": {"type": "object"},
+                    "default": [],
+                },
+            },
+            "required": ["source"],
+        },
+    },
+}
+_GET_ROOM_VAULT_ITEMS_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "get_room_vault_items",
+        "description": (
+            "Inspect room vault item rows so the scope_fn can handle vault "
+            "data. Available only for rooms with vault items."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "item_id": {"type": "string", "default": ""},
+            },
+            "required": [],
+        },
+    },
+}
+_LIST_QUERY_AGENT_FILES_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "list_query_agent_files",
+        "description": (
+            "List query-agent source files available to this scope session. "
+            "Use before read_query_agent_file in rehearsed mode."
+        ),
+        "parameters": {"type": "object", "properties": {}, "required": []},
+    },
+}
+_READ_QUERY_AGENT_FILE_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "read_query_agent_file",
+        "description": (
+            "Read one query-agent source file by path. If the agent is sealed, "
+            "the bridge returns an explanation instead of source."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {"file_path": {"type": "string"}},
+            "required": ["file_path"],
+        },
+    },
+}
+_SIMULATE_QUERY_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "simulate_query",
+        "description": (
+            "Run the query agent in a fresh nested sandbox with a candidate "
+            "scope_fn and return the output the user would see. Expensive; "
+            "use only after verify_scope_fn when behavior is uncertain."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "scope_fn_source": {"type": "string"},
+                "prompt": {"type": "string", "default": ""},
+            },
+            "required": ["scope_fn_source"],
+        },
+    },
+}
+_SIMULATE_MULTI_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "simulate_multi",
+        "description": (
+            "Run 2-3 candidate scope_fns against the same query in parallel, "
+            "splitting the simulation budget, and compare outputs."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "candidates": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Full scope_fn source strings; max 3.",
+                },
+                "prompt": {"type": "string", "default": ""},
+            },
+            "required": ["candidates"],
+        },
+    },
+}
+
+
+def _scope_tools() -> list[dict[str, Any]]:
+    tools = [_GET_SCHEMA_TOOL, _EXECUTE_SQL_TOOL]
+    rehearsed_mode = SCOPE_MODE in {"rehearsed", "sealed_conservative"}
+    if _env_flag("HIVEMIND_SCOPE_ENABLE_ROOM_VAULT_TOOLS"):
+        tools.append(_GET_ROOM_VAULT_ITEMS_TOOL)
+    if rehearsed_mode or _env_flag("HIVEMIND_SCOPE_ENABLE_AGENT_FILE_TOOLS"):
+        tools.extend([_LIST_QUERY_AGENT_FILES_TOOL, _READ_QUERY_AGENT_FILE_TOOL])
+    if rehearsed_mode or _env_flag("HIVEMIND_SCOPE_ENABLE_SIMULATION_TOOLS"):
+        tools.extend([_VERIFY_SCOPE_FN_TOOL, _SIMULATE_MULTI_TOOL, _SIMULATE_QUERY_TOOL])
+    return tools
+
+
+_SCOPE_TOOLS = _scope_tools()
+_ALLOWED_TOOL_NAMES = {tool["function"]["name"] for tool in _SCOPE_TOOLS}
 
 
 def _verification_tests() -> list[dict]:
@@ -249,6 +393,12 @@ def _max_tool_turns() -> int:
             return max(0, int(raw))
         except ValueError:
             pass
+    if SCOPE_MODE in {"rehearsed", "sealed_conservative"}:
+        return max(0, min(5, _budget_max_calls() - 1))
+    if _env_flag("HIVEMIND_SCOPE_ENABLE_SIMULATION_TOOLS") or _env_flag(
+        "HIVEMIND_SCOPE_ENABLE_AGENT_FILE_TOOLS"
+    ):
+        return max(0, min(5, _budget_max_calls() - 1))
     return max(0, min(2, _budget_max_calls() - 1))
 
 
@@ -317,21 +467,71 @@ def _compact_tool_result(result: str) -> str:
     )
 
 
+def _bridge_tool(name: str, args: dict[str, Any]) -> str:
+    data = _post_bridge(f"/tools/{name}", {"arguments": args})
+    if data.get("error"):
+        return f"Error: {data['error']}"
+    return _compact_tool_result(data.get("result") or "")
+
+
 def _call_scope_tool(name: str, args: dict[str, Any]) -> str:
     if name not in _ALLOWED_TOOL_NAMES:
         return (
             f"Error: unknown scope tool {name!r}. "
             f"Available: {', '.join(sorted(_ALLOWED_TOOL_NAMES))}"
         )
-    payload_args: dict[str, Any] = {}
+
     if name == "execute_sql":
-        payload_args["sql"] = str(args.get("sql") or "")
+        payload_args: dict[str, Any] = {"sql": str(args.get("sql") or "")}
         params = args.get("params", [])
         payload_args["params"] = params if isinstance(params, list) else []
-    data = _post_bridge(f"/tools/{name}", {"arguments": payload_args})
-    if data.get("error"):
-        return f"Error: {data['error']}"
-    return _compact_tool_result(data.get("result") or "")
+        return _bridge_tool(name, payload_args)
+    if name == "get_schema":
+        return _bridge_tool(name, {})
+    if name == "get_room_vault_items":
+        item_id = str(args.get("item_id") or "")
+        return _bridge_tool(name, {"item_id": item_id} if item_id else {})
+    if name == "list_query_agent_files":
+        return _bridge_tool(name, {})
+    if name == "read_query_agent_file":
+        return _bridge_tool(name, {"file_path": str(args.get("file_path") or "")})
+    if name == "verify_scope_fn":
+        source = str(args.get("source") or "")
+        tests = args.get("tests", [])
+        if isinstance(tests, str):
+            try:
+                tests = json.loads(tests)
+            except json.JSONDecodeError:
+                tests = []
+        if not isinstance(tests, list):
+            tests = []
+        data = _post_bridge("/sandbox/verify_scope_fn", {"source": source, "tests": tests})
+        return _compact_tool_result(json.dumps(data))
+    if name == "simulate_query":
+        payload = {
+            "query_agent_id": QUERY_AGENT_ID,
+            "prompt": str(args.get("prompt") or QUERY_PROMPT),
+            "scope_fn_source": str(args.get("scope_fn_source") or ""),
+        }
+        data = _post_bridge("/sandbox/simulate", payload)
+        return _compact_tool_result(json.dumps(data))
+    if name == "simulate_multi":
+        candidates = args.get("candidates", [])
+        if isinstance(candidates, str):
+            try:
+                candidates = json.loads(candidates)
+            except json.JSONDecodeError:
+                candidates = []
+        if not isinstance(candidates, list):
+            candidates = []
+        payload = {
+            "query_agent_id": QUERY_AGENT_ID,
+            "prompt": str(args.get("prompt") or QUERY_PROMPT),
+            "candidates": [c for c in candidates if isinstance(c, str) and c.strip()][:3],
+        }
+        data = _post_bridge("/sandbox/simulate_batch", payload)
+        return _compact_tool_result(json.dumps(data))
+    return f"Error: unknown scope tool {name!r}"
 
 
 def _assistant_message_for_history(message: dict[str, Any]) -> dict[str, Any]:
@@ -353,12 +553,52 @@ def _finalization_instruction(reason: str) -> str:
     )
 
 
+def _enabled_tool_summary() -> str:
+    names = sorted(_ALLOWED_TOOL_NAMES)
+    if not names:
+        return "no tools"
+    return ", ".join(names)
+
+
+def _mode_instruction() -> str:
+    reason = f" Reason: {SCOPE_MODE_REASON}." if SCOPE_MODE_REASON else ""
+    if SCOPE_MODE == "fast":
+        return (
+            "Scope mode: fast. Use schema and small SQL checks only when "
+            f"useful, then emit a compact transformer.{reason}"
+        )
+    if SCOPE_MODE == "rehearsed":
+        return (
+            "Scope mode: rehearsed. If the query-agent source is inspectable, "
+            "inspect the relevant files before trusting behavior. Verify a "
+            "candidate scope_fn before simulation, then use simulate_query or "
+            "simulate_multi when the likely user-visible output is uncertain. "
+            f"Do not over-simulate once the boundary is clear.{reason}"
+        )
+    if SCOPE_MODE == "sealed_conservative":
+        return (
+            "Scope mode: sealed_conservative. The query agent is sealed or "
+            "otherwise not inspectable; do not rely on source-code assumptions. "
+            "Use black-box simulation after verify_scope_fn and prefer a "
+            "scope_fn that preserves ordinary analytical utility while "
+            "guarding credentials, secrets, tool traces, and artifact bypass "
+            f"surfaces. Query inspection mode: {QUERY_INSPECTION_MODE}.{reason}"
+        )
+    return f"Scope mode: {SCOPE_MODE}.{reason}"
+
+
 def _run_scope_agent(body: str) -> str:
     system_prompt = (
         f"{SYSTEM_PROMPT}\n\n"
-        "Harness behavior: you may use get_schema and execute_sql for scope "
-        "design only. The harness verifies the emitted source after you answer. "
-        "Keep the function compact and general; do not research the answer."
+        f"{_mode_instruction()}\n"
+        f"Harness behavior: enabled tools are {_enabled_tool_summary()}. "
+        "Use the fast path for ordinary simple questions. When source "
+        "inspection or simulation tools are enabled, use them only for "
+        "uploaded/unknown query agents, complex policy boundaries, vault data, "
+        "artifact-producing prompts, or behavior that is hard to predict from "
+        "schema alone. The harness verifies the emitted source after you "
+        "answer. Keep the function compact and general; do not research the "
+        "final answer."
     )
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": system_prompt},

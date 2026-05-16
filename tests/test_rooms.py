@@ -854,3 +854,54 @@ def test_querier_only_output_redacts_owner_but_not_recipient(room_env):
     )
     assert recipient.status_code == 200
     assert recipient.json()["output"] == "secret answer"
+
+
+def test_run_status_surfaces_scope_evidence(room_env):
+    client, tenant, hive = room_env
+    out = _create_fixed_room(client, tenant["api_key"])
+    run_id = "run-scope-evidence"
+
+    hive.run_store.create(
+        run_id,
+        "query-a",
+        scope_agent_id="scope-a",
+        issuer_token_id=out["token_id"],
+        room_id=out["room_id"],
+        room_manifest_hash=out["room"]["manifest_hash"],
+        artifacts_enabled=False,
+    )
+    hive.run_store.update_usage(
+        run_id,
+        {
+            "stages": {
+                "scope": {
+                    "scope_mode": "rehearsed",
+                    "scope_mode_reason": "room_vault_items_present",
+                    "query_inspection_mode": "full",
+                    "bridge": {
+                        "tool_call_counts": {"get_schema": 1},
+                        "llm_tool_call_counts": {"simulate_query": 1},
+                    },
+                }
+            }
+        },
+    )
+
+    resp = client.get(
+        f"/v1/runs/{run_id}",
+        headers=_headers(out["token"]),
+    )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["scope_mode"] == "rehearsed"
+    assert body["scope_mode_reason"] == "room_vault_items_present"
+    assert body["query_inspection_mode"] == "full"
+    assert body["scope_evidence"] == {
+        "mode": "rehearsed",
+        "reason": "room_vault_items_present",
+        "query_inspection_mode": "full",
+        "tool_call_counts": {"get_schema": 1},
+        "llm_tool_call_counts": {"simulate_query": 1},
+    }
+    assert body["usage"]["stages"]["scope"]["scope_mode"] == "rehearsed"

@@ -115,6 +115,9 @@ def test_build_run_attestation_round_trips(hive, signer_state):
         prompt="how many docs?",
         output="42 docs",
         error=None,
+        scope_mode="rehearsed",
+        scope_mode_reason="custom_or_uploaded_query_agent",
+        query_inspection_mode="full",
     )
     assert envelope is not None
     assert envelope["body"]["run_id"] == "run-abc123"
@@ -122,6 +125,9 @@ def test_build_run_attestation_round_trips(hive, signer_state):
     assert envelope["body"]["compose_hash"] == "deadbeef" * 8
     assert envelope["body"]["query_agent_id"] == "qa-1"
     assert envelope["body"]["scope_agent_id"] == "scope-1"
+    assert envelope["body"]["scope_mode"] == "rehearsed"
+    assert envelope["body"]["scope_mode_reason"] == "custom_or_uploaded_query_agent"
+    assert envelope["body"]["query_inspection_mode"] == "full"
     assert envelope["body"]["output_hash"] == hashlib.sha256(
         b"42 docs"
     ).hexdigest()

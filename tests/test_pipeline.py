@@ -8,7 +8,12 @@ import hivemind.pipeline as pipeline_module
 from hivemind.config import Settings
 from hivemind.db import Database
 from hivemind.models import QueryRequest, StoreRequest
-from hivemind.pipeline import Pipeline, _add_stage_usage, _new_usage_summary
+from hivemind.pipeline import (
+    Pipeline,
+    _add_stage_usage,
+    _new_usage_summary,
+    _scope_evidence_from_usage,
+)
 from hivemind.sandbox.agents import AgentStore
 from hivemind.sandbox.models import AgentConfig
 from hivemind.sandbox.run_store import RunStore
@@ -91,6 +96,45 @@ def test_add_stage_usage_lifts_debug_trace_to_run_summary():
             "result_preview": "[{\"x\": 1}]",
         }
     ]
+
+
+def test_add_stage_usage_preserves_scope_mode_metadata():
+    summary = _new_usage_summary(max_tokens=100)
+    _add_stage_usage(
+        summary,
+        "scope",
+        {
+            "total_tokens": 12,
+            "scope_mode": "rehearsed",
+            "scope_mode_reason": "custom_or_uploaded_query_agent",
+            "query_inspection_mode": "full",
+        },
+        provider="openrouter",
+        model="test/model",
+    )
+
+    stage = summary["stages"]["scope"]
+    assert stage["scope_mode"] == "rehearsed"
+    assert stage["scope_mode_reason"] == "custom_or_uploaded_query_agent"
+    assert stage["query_inspection_mode"] == "full"
+
+
+def test_scope_evidence_from_usage_reads_scope_stage_metadata():
+    usage = {
+        "stages": {
+            "scope": {
+                "scope_mode": "sealed_conservative",
+                "scope_mode_reason": "query_agent_inspection_mode_sealed",
+                "query_inspection_mode": "sealed",
+            }
+        }
+    }
+
+    assert _scope_evidence_from_usage(usage) == {
+        "scope_mode": "sealed_conservative",
+        "scope_mode_reason": "query_agent_inspection_mode_sealed",
+        "query_inspection_mode": "sealed",
+    }
 
 
 def test_run_store_merge_usage_preserves_debug_trace():
@@ -461,6 +505,189 @@ class TestRunQuery:
         await pipeline._run_scope_agent(req, max_tokens=1000)
 
         assert captured["extra_volumes"] is None
+
+    @pytest.mark.asyncio
+    async def test_scope_agent_auto_mode_fast_for_default_query(self, monkeypatch):
+        settings = Settings(database_url="unused", llm_api_key="test")
+        scope_config = AgentConfig(
+            agent_id="scope-hermes",
+            name="Scope Hermes",
+            image="img:scope-hermes",
+            harness="hermes",
+        )
+        query_config = AgentConfig(
+            agent_id="default-query-hermes",
+            name="Default Query Hermes",
+            image="img:query-hermes",
+            harness="hermes",
+            inspection_mode="full",
+        )
+        agent_store = MagicMock(spec=AgentStore)
+        agent_store.get.side_effect = lambda agent_id: {
+            "scope-hermes": scope_config,
+            "default-query-hermes": query_config,
+        }.get(agent_id)
+        agent_store.list_file_paths.return_value = []
+        pipeline = Pipeline(settings, MagicMock(spec=Database), agent_store)
+        captured: dict = {}
+
+        class FakeBackend:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            async def run(self, **kwargs):
+                captured["env"] = kwargs.get("env")
+                return (
+                    json.dumps(
+                        {
+                            "scope_fn": (
+                                "def scope(sql, params, rows):\n"
+                                "    return {'allow': True, 'rows': rows}\n"
+                            )
+                        }
+                    ),
+                    {"total_tokens": 0},
+                )
+
+        monkeypatch.setattr(pipeline_module, "SandboxBackend", FakeBackend)
+
+        req = QueryRequest(
+            query="Count rows by day.",
+            query_agent_id="default-query-hermes",
+            scope_agent_id="scope-hermes",
+        )
+        _fn, _source, usage = await pipeline._run_scope_agent(req, max_tokens=1000)
+
+        assert captured["env"]["HIVEMIND_SCOPE_MODE"] == "fast"
+        assert captured["env"]["HIVEMIND_SCOPE_MODE_REASON"] == "default_fast_path"
+        assert "HIVEMIND_SCOPE_ENABLE_SIMULATION_TOOLS" not in captured["env"]
+        assert usage["scope_mode"] == "fast"
+        assert usage["scope_mode_reason"] == "default_fast_path"
+
+    @pytest.mark.asyncio
+    async def test_scope_agent_auto_mode_sealed_conservative_for_sealed_query(
+        self, monkeypatch
+    ):
+        settings = Settings(database_url="unused", llm_api_key="test")
+        scope_config = AgentConfig(
+            agent_id="scope-hermes",
+            name="Scope Hermes",
+            image="img:scope-hermes",
+            harness="hermes",
+        )
+        query_config = AgentConfig(
+            agent_id="uploaded-query",
+            name="Uploaded Query",
+            image="img:query",
+            harness="hermes",
+            inspection_mode="sealed",
+        )
+        agent_store = MagicMock(spec=AgentStore)
+        agent_store.get.side_effect = lambda agent_id: {
+            "scope-hermes": scope_config,
+            "uploaded-query": query_config,
+        }.get(agent_id)
+        agent_store.list_file_paths.return_value = []
+        pipeline = Pipeline(settings, MagicMock(spec=Database), agent_store)
+        captured: dict = {}
+
+        class FakeBackend:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            async def run(self, **kwargs):
+                captured["env"] = kwargs.get("env")
+                return (
+                    json.dumps(
+                        {
+                            "scope_fn": (
+                                "def scope(sql, params, rows):\n"
+                                "    return {'allow': True, 'rows': rows}\n"
+                            )
+                        }
+                    ),
+                    {"total_tokens": 0},
+                )
+
+        monkeypatch.setattr(pipeline_module, "SandboxBackend", FakeBackend)
+
+        req = QueryRequest(
+            query="Analyze this room.",
+            query_agent_id="uploaded-query",
+            scope_agent_id="scope-hermes",
+        )
+        _fn, _source, usage = await pipeline._run_scope_agent(req, max_tokens=1000)
+
+        assert captured["env"]["HIVEMIND_SCOPE_MODE"] == "sealed_conservative"
+        assert captured["env"]["HIVEMIND_SCOPE_MODE_REASON"] == (
+            "query_agent_inspection_mode_sealed"
+        )
+        assert captured["env"]["HIVEMIND_SCOPE_QUERY_INSPECTION_MODE"] == "sealed"
+        assert captured["env"]["HIVEMIND_SCOPE_ENABLE_SIMULATION_TOOLS"] == "true"
+        assert captured["env"]["HIVEMIND_SCOPE_ENABLE_AGENT_FILE_TOOLS"] == "true"
+        assert usage["scope_mode"] == "sealed_conservative"
+        assert usage["query_inspection_mode"] == "sealed"
+
+    @pytest.mark.asyncio
+    async def test_scope_agent_forwards_rehearsal_env_flags(self, monkeypatch):
+        settings = Settings(database_url="unused", llm_api_key="test")
+        agent_store = MagicMock(spec=AgentStore)
+        agent_store.get.return_value = AgentConfig(
+            agent_id="scope-hermes",
+            name="Scope Hermes",
+            image="img:scope-hermes",
+            harness="hermes",
+        )
+        agent_store.list_file_paths.return_value = []
+        pipeline = Pipeline(settings, MagicMock(spec=Database), agent_store)
+        captured: dict = {}
+        monkeypatch.setenv("HIVEMIND_SCOPE_ENABLE_SIMULATION_TOOLS", "true")
+        monkeypatch.setenv("HIVEMIND_SCOPE_ENABLE_AGENT_FILE_TOOLS", "true")
+
+        class FakeBackend:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            async def run(self, **kwargs):
+                captured["env"] = kwargs.get("env")
+                return (
+                    json.dumps(
+                        {
+                            "scope_fn": (
+                                "def scope(sql, params, rows):\n"
+                                "    return {'allow': True, 'rows': rows}\n"
+                            )
+                        }
+                    ),
+                    {"total_tokens": 0},
+                )
+
+        monkeypatch.setattr(pipeline_module, "SandboxBackend", FakeBackend)
+
+        req = QueryRequest(
+            query="What?",
+            query_agent_id="default-query-hermes",
+            scope_agent_id="scope-hermes",
+        )
+        await pipeline._run_scope_agent(
+            req,
+            max_tokens=1000,
+            room_vault_items=[
+                {
+                    "item_id": "item-1",
+                    "text": "secret-ish room note",
+                    "metadata": {},
+                    "created_at": None,
+                    "size_bytes": 20,
+                }
+            ],
+        )
+
+        assert captured["env"]["HIVEMIND_SCOPE_ENABLE_SIMULATION_TOOLS"] == "true"
+        assert captured["env"]["HIVEMIND_SCOPE_ENABLE_AGENT_FILE_TOOLS"] == "true"
+        assert captured["env"]["HIVEMIND_SCOPE_ENABLE_ROOM_VAULT_TOOLS"] == "true"
+        assert captured["env"]["HIVEMIND_SCOPE_MODE"] == "rehearsed"
+        assert captured["env"]["HIVEMIND_SCOPE_MODE_REASON"] == "room_vault_items_present"
 
     @pytest.mark.asyncio
     async def test_scope_agent_rejects_invalid_scope_fn(self, pg_db, monkeypatch):

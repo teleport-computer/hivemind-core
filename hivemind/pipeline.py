@@ -53,6 +53,112 @@ MEDIATOR_RESERVE_FRACTION = 0.3
 # query's very first call and the SDK subprocess exits with code 1.
 SCOPE_BUDGET_FRACTION = 0.5
 DEFAULT_ROOM_LLM_PROVIDER = "openrouter"
+SCOPE_MODE_FAST = "fast"
+SCOPE_MODE_REHEARSED = "rehearsed"
+SCOPE_MODE_SEALED_CONSERVATIVE = "sealed_conservative"
+SCOPE_MODES = {
+    SCOPE_MODE_FAST,
+    SCOPE_MODE_REHEARSED,
+    SCOPE_MODE_SEALED_CONSERVATIVE,
+}
+
+
+def _prompt_looks_artifact_or_report_like(prompt: str) -> bool:
+    prompt_lower = (prompt or "").lower()
+    return any(
+        marker in prompt_lower
+        for marker in (
+            "artifact",
+            "attachment",
+            "deep research",
+            "file",
+            "memo",
+            "pdf",
+            "report",
+            "research",
+            "study",
+            "writeup",
+        )
+    )
+
+
+def _policy_looks_complex(policy: str | None) -> bool:
+    text = (policy or "").strip()
+    if not text:
+        return False
+    lowered = text.lower()
+    if len(text) >= 300:
+        return True
+    return sum(
+        marker in lowered
+        for marker in (
+            "except",
+            "unless",
+            "not allowed",
+            "forbidden",
+            "must not",
+            "only allow",
+            "artifact",
+            "vault",
+            "row-level",
+        )
+    ) >= 2
+
+
+def _query_agent_is_default(agent_id: str | None) -> bool:
+    return bool((agent_id or "").startswith("default-"))
+
+
+def _scope_mode_override() -> str | None:
+    raw = os.environ.get("HIVEMIND_SCOPE_MODE", "").strip().lower()
+    if not raw:
+        return None
+    if raw not in SCOPE_MODES:
+        raise ValueError(
+            "HIVEMIND_SCOPE_MODE must be one of: "
+            + ", ".join(sorted(SCOPE_MODES))
+        )
+    return raw
+
+
+def _resolve_scope_mode(
+    req: QueryRequest,
+    *,
+    query_agent_id: str | None,
+    query_agent_config: AgentConfig | None,
+    room_vault_items: list[dict] | None,
+    artifacts_enabled: bool,
+) -> tuple[str, str, str]:
+    """Choose the scope operating mode from run-risk signals.
+
+    This is intentionally an automatic runtime policy. Room creators choose
+    coarse trust facts such as query-agent inspection mode and artifact
+    permissions; the pipeline chooses how much scope preflight those facts
+    require.
+    """
+    query_inspection_mode = (
+        str(getattr(query_agent_config, "inspection_mode", "") or "full")
+        .strip()
+        .lower()
+    )
+    override = _scope_mode_override()
+    if override:
+        return override, "operator_override", query_inspection_mode
+    if query_inspection_mode == "sealed":
+        return (
+            SCOPE_MODE_SEALED_CONSERVATIVE,
+            "query_agent_inspection_mode_sealed",
+            query_inspection_mode,
+        )
+    if room_vault_items:
+        return SCOPE_MODE_REHEARSED, "room_vault_items_present", query_inspection_mode
+    if not _query_agent_is_default(query_agent_id):
+        return SCOPE_MODE_REHEARSED, "custom_or_uploaded_query_agent", query_inspection_mode
+    if artifacts_enabled and _prompt_looks_artifact_or_report_like(req.query):
+        return SCOPE_MODE_REHEARSED, "artifact_or_report_prompt", query_inspection_mode
+    if _policy_looks_complex(req.policy):
+        return SCOPE_MODE_REHEARSED, "complex_policy", query_inspection_mode
+    return SCOPE_MODE_FAST, "default_fast_path", query_inspection_mode
 
 
 def _looks_like_report_output(prompt: str, output: str) -> bool:
@@ -166,6 +272,23 @@ def _new_usage_summary(max_tokens: int = 0) -> dict:
     }
 
 
+def _scope_evidence_from_usage(usage: dict | None) -> dict:
+    if not isinstance(usage, dict):
+        return {}
+    stages = usage.get("stages", {})
+    if not isinstance(stages, dict):
+        return {}
+    scope_stage = stages.get("scope", {})
+    if not isinstance(scope_stage, dict):
+        return {}
+    evidence = {}
+    for key in ("scope_mode", "scope_mode_reason", "query_inspection_mode"):
+        value = scope_stage.get(key)
+        if isinstance(value, str) and value:
+            evidence[key] = value
+    return evidence
+
+
 def _add_stage_usage(
     summary: dict,
     stage: str,
@@ -188,6 +311,10 @@ def _add_stage_usage(
     }
     if isinstance(usage.get("bridge"), dict):
         item["bridge"] = usage["bridge"]
+    for key in ("scope_mode", "scope_mode_reason", "query_inspection_mode"):
+        value = usage.get(key)
+        if isinstance(value, str) and value:
+            item[key] = value
     debug_trace = usage.get("debug_trace")
     if isinstance(debug_trace, list) and debug_trace:
         stage_trace = []
@@ -645,6 +772,7 @@ class Pipeline:
         llm_egress_enabled: bool = True,
         room_vault_items: list[dict] | None = None,
         allowed_tables: list[str] | None = None,
+        artifacts_enabled: bool = False,
     ) -> tuple[Callable, str, dict]:
         """Run scope agent to produce a scope function.
 
@@ -662,6 +790,18 @@ class Pipeline:
 
         query_agent_id = req.query_agent_id or self.settings.default_query_agent
         allowed_query_agent_id = query_agent_id
+        query_agent_config = None
+        if query_agent_id:
+            query_agent_config = await asyncio.to_thread(
+                self.agent_store.get, query_agent_id
+            )
+        scope_mode, scope_mode_reason, query_inspection_mode = _resolve_scope_mode(
+            req,
+            query_agent_id=query_agent_id,
+            query_agent_config=query_agent_config,
+            room_vault_items=room_vault_items,
+            artifacts_enabled=artifacts_enabled,
+        )
 
         # Build simulation function for the scope agent
         async def run_query_fn(
@@ -697,6 +837,9 @@ class Pipeline:
         env = {
             "QUERY_PROMPT": req.query,
             "QUERY_AGENT_ID": query_agent_id or "",
+            "HIVEMIND_SCOPE_MODE": scope_mode,
+            "HIVEMIND_SCOPE_MODE_REASON": scope_mode_reason,
+            "HIVEMIND_SCOPE_QUERY_INSPECTION_MODE": query_inspection_mode,
             # Pass the privacy/utility policy through so scope can design
             # its scope_fn around the caller's intent. Empty string when
             # no policy is specified.
@@ -706,10 +849,18 @@ class Pipeline:
         # env-var-based experiments set on the server process actually take effect.
         for _toggle in ("HIVEMIND_DISABLE_SIMULATE", "HIVEMIND_DISABLE_SEMLIFT",
                         "HIVEMIND_SCOPE_MAX_ATTEMPTS", "HIVEMIND_SCOPE_MULTI",
-                        "HIVEMIND_SCOPE_CI"):
+                        "HIVEMIND_SCOPE_CI",
+                        "HIVEMIND_SCOPE_ENABLE_SIMULATION_TOOLS",
+                        "HIVEMIND_SCOPE_ENABLE_AGENT_FILE_TOOLS",
+                        "HIVEMIND_SCOPE_ENABLE_ROOM_VAULT_TOOLS"):
             _val = os.environ.get(_toggle)
             if _val is not None:
                 env[_toggle] = _val
+        if scope_mode in {SCOPE_MODE_REHEARSED, SCOPE_MODE_SEALED_CONSERVATIVE}:
+            env.setdefault("HIVEMIND_SCOPE_ENABLE_SIMULATION_TOOLS", "true")
+            env.setdefault("HIVEMIND_SCOPE_ENABLE_AGENT_FILE_TOOLS", "true")
+        if room_vault_items:
+            env.setdefault("HIVEMIND_SCOPE_ENABLE_ROOM_VAULT_TOOLS", "true")
 
         # Scope agents get FULL_READ access, restricted to the room's
         # signed allowed_tables.
@@ -776,6 +927,11 @@ class Pipeline:
             provider=provider,
             llm_egress_enabled=llm_egress_enabled,
         )
+        if not isinstance(usage, dict):
+            usage = {}
+        usage.setdefault("scope_mode", scope_mode)
+        usage.setdefault("scope_mode_reason", scope_mode_reason)
+        usage.setdefault("query_inspection_mode", query_inspection_mode)
 
         try:
             data = _extract_scope_agent_json(raw)
@@ -993,6 +1149,9 @@ class Pipeline:
         allowed_llm_providers: list[str] | None = None,
         artifacts_enabled: bool | None = True,
         room_vault_item_count: int = 0,
+        scope_mode: str | None = None,
+        scope_mode_reason: str | None = None,
+        query_inspection_mode: str | None = None,
     ) -> dict | None:
         """Build the signed run attestation envelope, or ``None`` if the
         run signer isn't available (e.g. local dev without dstack).
@@ -1010,6 +1169,9 @@ class Pipeline:
               "query_agent_id": "...",
               "query_files_digest": "...",
               "query_attested_files_digest": "...",
+              "scope_mode": "fast|rehearsed|sealed_conservative|",
+              "scope_mode_reason": "...",
+              "query_inspection_mode": "full|sealed|",
               "prompt_hash": "<sha256>",
               "output_hash": "<sha256>",
               "error_hash": "<sha256>" | "",
@@ -1061,6 +1223,9 @@ class Pipeline:
             "allowed_llm_providers": list(allowed_llm_providers or []),
             "artifacts_enabled": bool(artifacts_enabled),
             "room_vault_item_count": int(room_vault_item_count or 0),
+            "scope_mode": scope_mode or "",
+            "scope_mode_reason": scope_mode_reason or "",
+            "query_inspection_mode": query_inspection_mode or "",
             "prompt_hash": self._sha256_hex(prompt or ""),
             "output_hash": self._sha256_hex(output or ""),
             "error_hash": self._sha256_hex(error) if error else "",
@@ -1191,6 +1356,7 @@ class Pipeline:
                         llm_egress_enabled=llm_egress_enabled,
                         room_vault_items=room_vault_items,
                         allowed_tables=allowed_tables,
+                        artifacts_enabled=artifacts_enabled,
                     )
                     used = scope_usage.get("total_tokens", 0)
                     remaining = max(1, remaining - used)
@@ -1431,6 +1597,7 @@ class Pipeline:
 
             output_cap = max(0, int(self.settings.max_run_output_chars))
             final_output = (query_output or "")[:output_cap]
+            scope_evidence = _scope_evidence_from_usage(usage_total)
             attestation_envelope = await asyncio.to_thread(
                 self._build_run_attestation,
                 run_id=run_id,
@@ -1446,6 +1613,9 @@ class Pipeline:
                 allowed_llm_providers=allowed_llm_providers,
                 artifacts_enabled=artifacts_enabled,
                 room_vault_item_count=len(room_vault_items),
+                scope_mode=scope_evidence.get("scope_mode"),
+                scope_mode_reason=scope_evidence.get("scope_mode_reason"),
+                query_inspection_mode=scope_evidence.get("query_inspection_mode"),
             )
             await self._record_run_usage(
                 run_store,
@@ -1468,6 +1638,7 @@ class Pipeline:
             logger.error("Tracked query run %s failed: %s", run_id, e)
             try:
                 err_str = str(e)[:500]
+                scope_evidence = _scope_evidence_from_usage(usage_total)
                 attestation_envelope = await asyncio.to_thread(
                     self._build_run_attestation,
                     run_id=run_id,
@@ -1484,6 +1655,9 @@ class Pipeline:
                     allowed_llm_providers=allowed_llm_providers,
                     artifacts_enabled=artifacts_enabled,
                     room_vault_item_count=len(room_vault_items or []),
+                    scope_mode=scope_evidence.get("scope_mode"),
+                    scope_mode_reason=scope_evidence.get("scope_mode_reason"),
+                    query_inspection_mode=scope_evidence.get("query_inspection_mode"),
                 )
                 await asyncio.to_thread(
                     run_store.update_status, run_id, "failed",
