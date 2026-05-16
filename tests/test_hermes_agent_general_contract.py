@@ -791,6 +791,39 @@ def test_query_agent_retries_malformed_categorical_table_with_json_guidance(
     assert "COUNT(*) or COUNT(DISTINCT row identifier)" in retry_body
 
 
+def test_query_agent_retries_empty_array_category_table(monkeypatch, capsys):
+    monkeypatch.setenv(
+        "QUERY_PROMPT",
+        "Show category diversity by day as a markdown table with columns: "
+        "day, diversity_score, top_category, percent_top_category.",
+    )
+    malformed = (
+        "| day | diversity_score | top_category | percent_top_category |\n"
+        "|---|---:|---|---:|\n"
+        "| 2026-05-16 | 38112 | [] | 19.2 |\n"
+    )
+    fixed = (
+        "| day | diversity_score | top_category | percent_top_category |\n"
+        "|---|---:|---|---:|\n"
+        "| 2026-05-16 | 1204 | alpha | 18.2% |\n"
+    )
+    mod, calls = _load_query_agent(
+        monkeypatch,
+        "default_query_hermes_retry_empty_array_category_contract_test",
+        chat_responses=[_chat_response(malformed), _chat_response(fixed)],
+    )
+
+    mod.main()
+
+    captured = capsys.readouterr()
+    assert captured.out.strip() == fixed.strip()
+    assert len(calls["llm_payloads"]) == 2
+    retry_body = calls["llm_payloads"][1]["messages"][1]["content"]
+    assert "malformed categorical ranking response" in retry_body
+    assert "empty-array labels like []" in retry_body
+    assert "literal percent sign" in retry_body
+
+
 def test_query_agent_retries_data_unavailable_analysis_placeholder(
     monkeypatch,
     capsys,
@@ -1783,6 +1816,8 @@ def test_query_prompt_is_tool_aware_without_canned_policy():
     assert "LEFT(col, 1) = '['" in source
     assert "not bracketed/quoted JSON or text fragments" in source
     assert "jsonb_array_elements_text(<col>::jsonb)" in source
+    assert "Empty arrays such as ``[]`` mean there is no category element" in source
+    assert "literal percent sign" in source
     assert "displayed cleaned label must also be" in source
     assert "duplicate identical labels" in source
     assert "exclude NULL or empty labels" in source

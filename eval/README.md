@@ -98,14 +98,16 @@ The relay job needs tenant access to the eval room. Store that key as GitHub
 secret `HERMES_PROD_EVAL_API_KEY`; the workflow writes a temporary hmctl
 profile on the relay before running the scenarios.
 
-Automatic follow-up runs always execute `watch_history_top_hashtags` as the
-fast canary with `--max-tokens 250000`, `--max-llm-calls 20`, and
-`--timeout 300`. In `auto` mode they only add `watch_history_report_artifact`
-for Hermes agent, eval, artifact, sandbox, pipeline, dependency, or related
-test changes; `HERMES_POST_DEPLOY_EVAL_MODE=full` always runs the deep
-report/PDF canary and `skip` disables the automatic follow-up. The deep report
-canary keeps the larger `--max-tokens 1000000`, `--max-llm-calls 60`, and
-`--timeout 900` budget.
+Automatic follow-up runs always execute `watch_history_top_hashtags` and
+`watch_history_feed_diversity` as fast canaries. The top-hashtags canary uses
+`--max-tokens 250000`, `--max-llm-calls 20`, and `--timeout 300`; the feed
+diversity canary uses `--max-tokens 300000`, `--max-llm-calls 24`, and
+`--timeout 360`. In `auto` mode they only add
+`watch_history_report_artifact` for Hermes agent, eval, artifact, sandbox,
+pipeline, dependency, or related test changes; `HERMES_POST_DEPLOY_EVAL_MODE=full`
+always runs the deep report/PDF canary and `skip` disables the automatic
+follow-up. The deep report canary keeps the larger `--max-tokens 1000000`,
+`--max-llm-calls 60`, and `--timeout 900` budget.
 
 The same workflow can be manually dispatched for a single scenario against any
 room, with optional artifact fetching. Follow-up evals fail their own workflow

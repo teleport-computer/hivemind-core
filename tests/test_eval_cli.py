@@ -353,6 +353,55 @@ def test_top_hashtags_grade_rejects_plausible_placeholder_table():
     assert any(f.kind == "forbidden_match" for f in result.findings)
 
 
+def test_feed_diversity_grade_accepts_concrete_daily_table():
+    good = (
+        "| day | diversity_score | top_category | percent_top_category | "
+        "wider_or_narrower_than_yesterday |\n"
+        "|---|---:|---|---:|---|\n"
+        "| 2026-05-11 | 22263 | fyp | 8.9% | same |\n"
+        "| 2026-05-12 | 28705 | fyp | 8.8% | wider |\n\n"
+        "The cat says: Your feed has more windows to stare through today."
+    )
+
+    assert grade_text(good, SCENARIOS["watch_history_feed_diversity"]).passed is True
+
+
+def test_feed_diversity_grade_rejects_data_unavailable_placeholder():
+    bad = (
+        "## TikTok Feed Diversity This Week\n\n"
+        "| day | diversity_score | top_category | percent_top_category | "
+        "wider_or_narrower_than_yesterday |\n"
+        "|---|---|---|---|---|\n"
+        "| *(data unavailable)* | - | - | - | - |\n\n"
+        "**Limitation:** I was unable to successfully query the database due "
+        "to SQL execution errors and function compatibility issues.\n\n"
+        "**What the analysis would show:** whether your feed expanded."
+    )
+
+    result = grade_text(bad, SCENARIOS["watch_history_feed_diversity"])
+
+    assert result.passed is False
+    assert any(f.kind == "forbidden_match" for f in result.findings)
+    assert any(f.kind == "required_missing" for f in result.findings)
+
+
+def test_feed_diversity_grade_rejects_empty_array_top_category():
+    bad = (
+        "| day | diversity_score | top_category | percent_top_category | "
+        "wider_or_narrower_than_yesterday |\n"
+        "|---|---|---|---|---|\n"
+        "| 2026-05-16 | 38112 | [] | 19.2 | narrower |\n"
+        "| 2026-05-15 | 123944 | [] | 18.8 | narrower |\n\n"
+        "The cat would say: Meow."
+    )
+
+    result = grade_text(bad, SCENARIOS["watch_history_feed_diversity"])
+
+    assert result.passed is False
+    assert any(f.kind == "forbidden_match" for f in result.findings)
+    assert any(f.kind == "required_missing" for f in result.findings)
+
+
 def test_run_room_fails_when_required_report_artifacts_missing(tmp_path, monkeypatch):
     output = _deep_report_output()
 

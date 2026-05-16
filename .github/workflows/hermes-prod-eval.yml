@@ -229,6 +229,10 @@ jobs:
               max_tokens=250000
               max_llm_calls=20
               timeout_seconds=300
+            elif [ "$scenario" = "watch_history_feed_diversity" ]; then
+              max_tokens=300000
+              max_llm_calls=24
+              timeout_seconds=360
             fi
 
             local out_dir="eval/results/prod/$(date -u +%Y%m%dT%H%M%SZ)-${scenario}-attempt-${attempt}"
@@ -268,7 +272,7 @@ jobs:
           fi
 
           mode="$(printf '%s' "${HERMES_EVAL_MODE:-fast}" | tr '[:upper:]' '[:lower:]')"
-          scenarios=(watch_history_top_hashtags)
+          scenarios=(watch_history_top_hashtags watch_history_feed_diversity)
           case "$mode" in
             skip)
               echo "Skipping post-deploy Hermes prod eval because HERMES_EVAL_MODE=skip"

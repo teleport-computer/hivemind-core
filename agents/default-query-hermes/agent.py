@@ -96,6 +96,11 @@ For JSON or JSONB arrays, unnest one element per row before grouping. For
 text-encoded arrays or delimited lists, normalize the text by removing container
 syntax such as brackets and quotes, split into one element per row, trim each
 element, exclude empty elements, and group by that cleaned element.
+For diversity, top-category, or category-share questions over tag-like,
+topic-like, or category-like list fields, compute statistics over unnested
+clean elements. Empty arrays such as ``[]`` mean there is no category element;
+do not present ``[]`` as the top category unless the user explicitly asks about
+missing or uncategorized records.
 When PostgreSQL JSON array functions fail because a column is stored as text,
 retry with an explicit jsonb cast for valid JSON arrays or fall back to
 regexp_split_to_table over cleaned text; do not stop at a compatibility note.
@@ -109,6 +114,9 @@ labels, treat it as unfinished evidence and spend a remaining SQL call on a
 corrected normalization query instead of presenting it.
 For categorical rankings, exclude NULL or empty labels unless the user asks to
 analyze missing, blank, or unknown values.
+If the requested output column is a percent, render the final value with a
+literal percent sign unless the user explicitly requested a raw fraction or
+numeric ratio.
 For exact counts or top-N rankings, do not sample and do not apply LIMIT before
 the grouping/counting step. Use SQL to compute over all matching rows, then
 ORDER BY the metric and LIMIT only the final ranked result.
@@ -317,6 +325,8 @@ _UNRESOLVED_RESPONSE_PATTERNS = (
 _MALFORMED_CATEGORICAL_RESPONSE_PATTERNS = (
     r"(?m)^\|\s*\d+\s*\|\s*(?:\[|\"|\])",
     r"(?m)^\|\s*\d+\s*\|[^\n]*\|\s*(?:null|none|nan)\s*\|?\s*$",
+    r"(?m)^\|[^\n]*\|\s*(?:\[\]|null|none|nan)\s*\|[^\n]*$",
+    r"(?m)^\|[^\n]*\|\s*\[[^\n|]*(?:\"|'|,)[^\n|]*\|[^\n]*$",
 )
 
 def _completion_token_cap(default: int = 8192, hard_cap: int = 16384) -> int:
@@ -522,7 +532,12 @@ def _finalization_instruction(reason: str) -> str:
         "rank the merged rows by the requested metric. Do not infer exact "
         "counts or top-N rankings from schema probes or small sample rows; if "
         "no successful aggregate evidence supports the requested ranking, say "
-        "so plainly rather than inventing values."
+        "so plainly rather than inventing values. If the final answer contains "
+        "a categorical label that is NULL, NaN, an empty array like [], or a "
+        "serialized container rather than a cleaned label, it is not ready: "
+        "revise the SQL to unnest and clean that field before answering. If "
+        "the requested column is a percent, include a literal percent sign in "
+        "the rendered table."
     )
 
 
@@ -709,7 +724,9 @@ def _retry_body(body: str, reason: str, previous_response: str) -> str:
             "string_to_array. Use COUNT(*) or COUNT(DISTINCT row identifier) "
             "for event/item/watch counts unless the user explicitly asked to "
             "sum another metric column. Before finalizing, reject labels that "
-            "still start with '[', ']', or '\"', and reject NULL/NaN metrics.\n"
+            "still start with '[', ']', or '\"', reject empty-array labels like "
+            "[], and reject NULL/NaN metrics. For requested percent columns, "
+            "format final values with a literal percent sign.\n"
         )
     if any(
         marker in retry_context
