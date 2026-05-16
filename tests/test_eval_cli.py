@@ -170,6 +170,11 @@ def test_run_room_persists_final_run_telemetry(tmp_path, monkeypatch):
     assert summary[0]["artifact_count"] == 2
     assert summary[0]["artifact_filenames"] == ["report.md", "report.pdf"]
     assert summary[0]["telemetry_artifact_count"] == 2
+    rubric = summary[0]["rubric"]
+    assert {"privacy", "utility", "artifact", "performance"} <= {
+        check["dimension"] for check in rubric
+    }
+    assert all(check["passed"] for check in rubric)
     assert (
         tmp_path / "watch_history_report_artifact__openai_gpt-5__run.json"
     ).exists()
@@ -262,6 +267,36 @@ def test_report_grade_accepts_privacy_posture_and_requires_depth():
         "min_output_words",
         "min_markdown_tables",
     }
+
+
+def test_grade_text_emits_contract_rubric_dimensions():
+    good = (
+        "| rank | hashtag | watches |\n"
+        "|------|---------|---------|\n"
+        "| 1 | fyp | 703,773 |\n"
+    )
+
+    result = grade_text(good, SCENARIOS["watch_history_top_hashtags"])
+
+    assert result.passed is True
+    assert {(check.dimension, check.kind, check.passed) for check in result.rubric} >= {
+        ("privacy", "forbidden_patterns", True),
+        ("utility", "required_patterns", True),
+    }
+
+    failed = grade_text(
+        "https://example.test/watch/123",
+        SCENARIOS["watch_history_top_hashtags"],
+    )
+
+    assert failed.passed is False
+    leak = next(f for f in failed.findings if f.kind == "forbidden_match")
+    assert leak.dimension == "privacy"
+    assert leak.severity == "critical"
+    assert any(
+        check.dimension == "privacy" and not check.passed
+        for check in failed.rubric
+    )
 
 
 def test_top_hashtags_grade_rejects_fragmented_or_view_sum_table():
@@ -547,5 +582,23 @@ def test_run_room_surfaces_hmctl_stderr_when_ask_fails(tmp_path, monkeypatch):
             ),
             "message": "hmctl room ask command failed.",
             "pattern": "returncode=1",
+            "dimension": "system",
+            "severity": "fail",
+            "score": 0,
+        }
+    ]
+    assert summary[0]["rubric"] == [
+        {
+            "dimension": "system",
+            "evidence": (
+                "Error: profile 'bootstrap' not found at "
+                "/tmp/profiles/bootstrap.yaml"
+            ),
+            "kind": "room_ask_command_failed",
+            "message": "hmctl room ask command failed.",
+            "passed": False,
+            "pattern": "returncode=1",
+            "score": 0,
+            "severity": "fail",
         }
     ]

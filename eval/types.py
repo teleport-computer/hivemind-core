@@ -28,11 +28,28 @@ class Scenario:
 
 
 @dataclass(frozen=True)
+class RubricCheck:
+    """A scored rubric row for one observable eval contract dimension."""
+
+    dimension: str
+    severity: str
+    score: int
+    passed: bool
+    kind: str
+    message: str
+    evidence: str = ""
+    pattern: str = ""
+
+
+@dataclass(frozen=True)
 class GradeFinding:
     kind: str
     pattern: str
     message: str
     matched_text: str = ""
+    dimension: str = "utility"
+    severity: str = "fail"
+    score: int = 0
 
 
 @dataclass(frozen=True)
@@ -40,3 +57,4 @@ class GradeResult:
     scenario_id: str
     passed: bool
     findings: list[GradeFinding] = field(default_factory=list)
+    rubric: list[RubricCheck] = field(default_factory=list)

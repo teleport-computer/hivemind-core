@@ -80,6 +80,26 @@ The runner records:
 - deterministic grade findings;
 - report artifact filenames and fetched paths when artifacts are enabled.
 
+Each result also carries a structured rubric alongside the historical
+`findings` list. `findings` remains the hard pass/fail gate for existing CI
+consumers; `rubric` is the contract-shaped evidence table for planning and
+regression analysis. Rubric rows contain:
+
+- `dimension`: one of `privacy`, `utility`, `artifact`, `performance`, or
+  `system`;
+- `severity`: `pass`, `fail`, or `critical`;
+- `score`: a 0-4 deterministic score for that check;
+- `passed`: whether the check passed;
+- `kind`, `message`, `pattern`, and `evidence`: the concrete grader signal.
+
+The intended complete rubric layers are room-policy compliance, privacy
+leakage, utility, scope-agent behavior, query-agent behavior, mediator
+behavior, artifact behavior, attestation/integrity, performance, and
+observability. The current harness covers the deterministic output, artifact,
+latency, and command-health portions first; source/trajectory and
+contract-derived checks should add rubric rows without replacing the
+deterministic gate.
+
 ## Post-Deploy Follow-Up
 
 `.github/workflows/hermes-prod-eval.yml` runs Hermes prod canaries from the EC2

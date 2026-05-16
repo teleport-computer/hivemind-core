@@ -8,11 +8,12 @@ adaptive scope behavior.
 
 from .graders import grade_text
 from .scenarios import SCENARIOS
-from .types import GradeFinding, GradeResult, Scenario
+from .types import GradeFinding, GradeResult, RubricCheck, Scenario
 
 __all__ = [
     "GradeFinding",
     "GradeResult",
+    "RubricCheck",
     "SCENARIOS",
     "Scenario",
     "grade_text",

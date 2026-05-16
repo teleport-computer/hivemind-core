@@ -16,7 +16,7 @@ import yaml
 
 from .graders import count_markdown_tables, count_words, grade_text
 from .scenarios import SCENARIOS
-from .types import GradeFinding, Scenario
+from .types import GradeFinding, RubricCheck, Scenario
 
 
 def _int_value(value: object) -> int:
@@ -248,6 +248,8 @@ def _artifact_findings(
                         f"Run did not expose a required {expected} artifact."
                     ),
                     matched_text=",".join(sorted(found)),
+                    dimension="artifact",
+                    severity="fail",
                 )
             )
     return findings
@@ -279,6 +281,8 @@ def _command_failure_findings(
             pattern=f"returncode={returncode}",
             message=f"hmctl {phase.replace('_', ' ')} command failed.",
             matched_text=excerpt,
+            dimension="system",
+            severity="fail",
         )
     ]
 
@@ -293,6 +297,8 @@ def _latency_findings(metrics: dict, scenario: Scenario) -> list[GradeFinding]:
                     kind="latency_missing",
                     pattern="duration_seconds",
                     message="Run telemetry did not include total duration.",
+                    dimension="performance",
+                    severity="fail",
                 )
             )
         elif float(actual) > scenario.max_duration_seconds:
@@ -302,6 +308,8 @@ def _latency_findings(metrics: dict, scenario: Scenario) -> list[GradeFinding]:
                     pattern=f"duration_seconds<={scenario.max_duration_seconds:g}",
                     message="Run exceeded the scenario total latency budget.",
                     matched_text=str(actual),
+                    dimension="performance",
+                    severity="fail",
                 )
             )
     stages = metrics.get("stage_seconds") or {}
@@ -315,6 +323,8 @@ def _latency_findings(metrics: dict, scenario: Scenario) -> list[GradeFinding]:
                     kind="latency_missing",
                     pattern=f"stage_seconds.{stage}",
                     message=f"Run telemetry did not include {stage} duration.",
+                    dimension="performance",
+                    severity="fail",
                 )
             )
         elif float(actual) > budget:
@@ -324,9 +334,85 @@ def _latency_findings(metrics: dict, scenario: Scenario) -> list[GradeFinding]:
                     pattern=f"stage_seconds.{stage}<={budget:g}",
                     message=f"{stage} stage exceeded the scenario latency budget.",
                     matched_text=str(actual),
+                    dimension="performance",
+                    severity="fail",
                 )
             )
     return findings
+
+
+def _rubric_from_findings(findings: list[GradeFinding]) -> list[RubricCheck]:
+    return [
+        RubricCheck(
+            dimension=finding.dimension,
+            severity=finding.severity,
+            score=finding.score,
+            passed=False,
+            kind=finding.kind,
+            message=finding.message,
+            evidence=finding.matched_text,
+            pattern=finding.pattern,
+        )
+        for finding in findings
+    ]
+
+
+def _artifact_rubric(
+    artifacts: list[object],
+    scenario: Scenario,
+    findings: list[GradeFinding],
+) -> list[RubricCheck]:
+    if not scenario.required_artifact_extensions:
+        return []
+    if findings:
+        return _rubric_from_findings(findings)
+    return [
+        RubricCheck(
+            dimension="artifact",
+            severity="pass",
+            score=4,
+            passed=True,
+            kind="required_artifacts",
+            message="Run exposed all required artifact extensions.",
+            evidence=",".join(sorted(_artifact_extensions(artifacts))),
+            pattern=";".join(scenario.required_artifact_extensions),
+        )
+    ]
+
+
+def _latency_rubric(
+    metrics: dict,
+    scenario: Scenario,
+    findings: list[GradeFinding],
+) -> list[RubricCheck]:
+    has_budget = (
+        scenario.max_duration_seconds is not None
+        or bool(scenario.max_stage_seconds)
+    )
+    if not has_budget:
+        return []
+    if findings:
+        return _rubric_from_findings(findings)
+    stage_seconds = metrics.get("stage_seconds")
+    stage_evidence = json.dumps(stage_seconds, sort_keys=True) if stage_seconds else "{}"
+    return [
+        RubricCheck(
+            dimension="performance",
+            severity="pass",
+            score=4,
+            passed=True,
+            kind="latency_budget",
+            message="Run stayed within scenario latency budgets.",
+            evidence=(
+                f"duration_seconds={metrics.get('duration_seconds')}; "
+                f"stage_seconds={stage_evidence}"
+            ),
+            pattern=(
+                f"duration_seconds<={scenario.max_duration_seconds}; "
+                f"stage_seconds={scenario.max_stage_seconds}"
+            ),
+        )
+    ]
 
 
 def _cmd_run_room(args: argparse.Namespace) -> int:
@@ -449,6 +535,15 @@ def _cmd_run_room(args: argparse.Namespace) -> int:
             command_findings
             or [*text_grade.findings, *artifact_findings, *latency_findings]
         )
+        rubric = (
+            _rubric_from_findings(command_findings)
+            if command_findings
+            else [
+                *text_grade.rubric,
+                *_artifact_rubric(artifacts, scenario, artifact_findings),
+                *_latency_rubric(metrics, scenario, latency_findings),
+            ]
+        )
         passed = not findings
         row = {
             "scenario": scenario.id,
@@ -457,6 +552,7 @@ def _cmd_run_room(args: argparse.Namespace) -> int:
             "run_id": run_id,
             "passed": passed,
             "findings": [asdict(finding) for finding in findings],
+            "rubric": [asdict(check) for check in rubric],
             "output_chars": len(output),
             "output_words": count_words(output),
             "markdown_table_count": count_markdown_tables(output),
