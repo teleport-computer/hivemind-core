@@ -18,6 +18,12 @@ from .graders import count_markdown_tables, count_words, grade_text
 from .scenarios import SCENARIOS
 from .types import GradeFinding, RubricCheck, Scenario
 
+_STAGE_DIMENSIONS = {
+    "scope": "scope_agent",
+    "query": "query_agent",
+    "mediator": "mediator",
+}
+
 
 def _int_value(value: object) -> int:
     try:
@@ -152,6 +158,29 @@ def _coerce_usage(run: dict) -> dict:
     return usage if isinstance(usage, dict) else {}
 
 
+def _usage_stages(usage: dict) -> dict:
+    stages = usage.get("stages") if isinstance(usage, dict) else {}
+    return stages if isinstance(stages, dict) else {}
+
+
+def _attestation_body(run: dict) -> dict:
+    envelope = run.get("attestation") or {}
+    if isinstance(envelope, str):
+        try:
+            envelope = json.loads(envelope)
+        except json.JSONDecodeError:
+            return {}
+    if not isinstance(envelope, dict):
+        return {}
+    body = envelope.get("body") or {}
+    if isinstance(body, str):
+        try:
+            body = json.loads(body)
+        except json.JSONDecodeError:
+            return {}
+    return body if isinstance(body, dict) else {}
+
+
 def _merge_counts(dst: dict[str, int], src: object) -> None:
     if not isinstance(src, dict):
         return
@@ -166,23 +195,50 @@ def _extract_bridge_counts(usage: dict) -> tuple[dict[str, int], dict[str, int]]
     if isinstance(bridge, dict):
         _merge_counts(tool_counts, bridge.get("tool_call_counts"))
         _merge_counts(llm_tool_counts, bridge.get("llm_tool_call_counts"))
-    stages = usage.get("stages") if isinstance(usage, dict) else {}
-    if isinstance(stages, dict):
-        for stage in stages.values():
-            if not isinstance(stage, dict):
-                continue
-            stage_bridge = stage.get("bridge") or {}
-            if isinstance(stage_bridge, dict):
-                _merge_counts(tool_counts, stage_bridge.get("tool_call_counts"))
-                _merge_counts(
-                    llm_tool_counts,
-                    stage_bridge.get("llm_tool_call_counts"),
-                )
+    for stage in _usage_stages(usage).values():
+        if not isinstance(stage, dict):
+            continue
+        stage_bridge = stage.get("bridge") or {}
+        if isinstance(stage_bridge, dict):
+            _merge_counts(tool_counts, stage_bridge.get("tool_call_counts"))
+            _merge_counts(
+                llm_tool_counts,
+                stage_bridge.get("llm_tool_call_counts"),
+            )
     return tool_counts, llm_tool_counts
+
+
+def _extract_stage_bridge_counts(
+    usage: dict,
+) -> tuple[dict[str, dict[str, int]], dict[str, dict[str, int]]]:
+    stage_tool_counts: dict[str, dict[str, int]] = {}
+    stage_llm_tool_counts: dict[str, dict[str, int]] = {}
+    for stage_name, stage in _usage_stages(usage).items():
+        if not isinstance(stage, dict):
+            continue
+        bridge = stage.get("bridge") or {}
+        if not isinstance(bridge, dict):
+            continue
+        tool_counts: dict[str, int] = {}
+        llm_tool_counts: dict[str, int] = {}
+        _merge_counts(tool_counts, bridge.get("tool_call_counts"))
+        _merge_counts(llm_tool_counts, bridge.get("llm_tool_call_counts"))
+        stage_tool_counts[str(stage_name)] = tool_counts
+        stage_llm_tool_counts[str(stage_name)] = llm_tool_counts
+    return stage_tool_counts, stage_llm_tool_counts
+
+
+def _first_nonempty(*values: object) -> object:
+    for value in values:
+        if value not in (None, "", [], {}):
+            return value
+    return ""
 
 
 def _extract_run_metrics(run: dict) -> dict:
     usage = _coerce_usage(run)
+    usage_stages = _usage_stages(usage)
+    attestation_body = _attestation_body(run)
     prompt_tokens = _int_value(usage.get("prompt_tokens"))
     completion_tokens = _int_value(usage.get("completion_tokens"))
     total_tokens = _int_value(usage.get("total_tokens")) or (
@@ -194,10 +250,60 @@ def _extract_run_metrics(run: dict) -> dict:
         if (seconds := _stage_seconds(run, stage)) is not None
     }
     tool_counts, llm_tool_counts = _extract_bridge_counts(usage)
+    stage_tool_counts, stage_llm_tool_counts = _extract_stage_bridge_counts(usage)
+    scope_stage = usage_stages.get("scope") or {}
+    query_agent_id = _first_nonempty(
+        run.get("query_agent_id"),
+        run.get("agent_id"),
+        attestation_body.get("query_agent_id"),
+    )
+    scope_agent_id = _first_nonempty(
+        run.get("scope_agent_id"),
+        attestation_body.get("scope_agent_id"),
+    )
+    room_manifest_hash = _first_nonempty(
+        run.get("room_manifest_hash"),
+        attestation_body.get("room_manifest_hash"),
+    )
     return {
         "run_status": run.get("status") or "",
         "billing_status": run.get("billing_status") or "",
         "billing_cost_micro_usd": _int_value(run.get("billing_cost_micro_usd")),
+        "room_id": _first_nonempty(run.get("room_id"), attestation_body.get("room_id")),
+        "room_manifest_hash": room_manifest_hash,
+        "query_agent_id": query_agent_id,
+        "scope_agent_id": scope_agent_id,
+        "scope_mode": _first_nonempty(
+            run.get("scope_mode"),
+            attestation_body.get("scope_mode"),
+            scope_stage.get("scope_mode") if isinstance(scope_stage, dict) else "",
+        ),
+        "scope_mode_reason": _first_nonempty(
+            run.get("scope_mode_reason"),
+            attestation_body.get("scope_mode_reason"),
+            scope_stage.get("scope_mode_reason") if isinstance(scope_stage, dict) else "",
+        ),
+        "query_inspection_mode": _first_nonempty(
+            run.get("query_inspection_mode"),
+            attestation_body.get("query_inspection_mode"),
+            scope_stage.get("query_inspection_mode")
+            if isinstance(scope_stage, dict)
+            else "",
+        ),
+        "output_visibility": _first_nonempty(
+            run.get("output_visibility"),
+            attestation_body.get("output_visibility"),
+        ),
+        "artifacts_enabled": _first_nonempty(
+            run.get("artifacts_enabled"),
+            attestation_body.get("artifacts_enabled"),
+        ),
+        "room_vault_item_count": _first_nonempty(
+            run.get("room_vault_item_count"),
+            attestation_body.get("room_vault_item_count"),
+        ),
+        "attestation_present": bool(run.get("attestation")),
+        "attestation_body_fields": sorted(str(key) for key in attestation_body),
         "llm_calls": _int_value(usage.get("calls") or usage.get("llm_calls")),
         "prompt_tokens": prompt_tokens,
         "completion_tokens": completion_tokens,
@@ -206,6 +312,8 @@ def _extract_run_metrics(run: dict) -> dict:
         "stage_seconds": stages,
         "tool_call_counts": tool_counts,
         "llm_tool_call_counts": llm_tool_counts,
+        "stage_tool_call_counts": stage_tool_counts,
+        "stage_llm_tool_call_counts": stage_llm_tool_counts,
         "telemetry_artifact_count": len(run.get("artifacts") or []),
     }
 
@@ -415,6 +523,197 @@ def _latency_rubric(
     ]
 
 
+def _stage_dimension(stage: str) -> str:
+    return _STAGE_DIMENSIONS.get(stage, "system")
+
+
+def _stage_tool_count(metrics: dict, stage: str, tool: str) -> int:
+    stage_tools = metrics.get("stage_tool_call_counts") or {}
+    stage_llm_tools = metrics.get("stage_llm_tool_call_counts") or {}
+    tool_counts = stage_tools.get(stage) if isinstance(stage_tools, dict) else {}
+    llm_tool_counts = (
+        stage_llm_tools.get(stage) if isinstance(stage_llm_tools, dict) else {}
+    )
+    count = 0
+    if isinstance(tool_counts, dict):
+        count = max(count, _int_value(tool_counts.get(tool)))
+    if isinstance(llm_tool_counts, dict):
+        count = max(count, _int_value(llm_tool_counts.get(tool)))
+    return count
+
+
+def _has_observable_value(value: object) -> bool:
+    if value is None:
+        return False
+    if value is False:
+        return False
+    if value == "":
+        return False
+    if value == {}:
+        return False
+    if value == []:
+        return False
+    if isinstance(value, (int, float)) and value == 0:
+        return False
+    return True
+
+
+def _contract_check(
+    *,
+    dimension: str,
+    kind: str,
+    passed: bool,
+    message: str,
+    evidence: str = "",
+    pattern: str = "",
+    severity: str = "fail",
+) -> tuple[GradeFinding | None, RubricCheck]:
+    if passed:
+        return None, RubricCheck(
+            dimension=dimension,
+            severity="pass",
+            score=4,
+            passed=True,
+            kind=kind,
+            message=message,
+            evidence=evidence,
+            pattern=pattern,
+        )
+    finding = GradeFinding(
+        kind=kind,
+        pattern=pattern,
+        message=message,
+        matched_text=evidence,
+        dimension=dimension,
+        severity=severity,
+    )
+    return finding, RubricCheck(
+        dimension=dimension,
+        severity=severity,
+        score=0,
+        passed=False,
+        kind=kind,
+        message=message,
+        evidence=evidence,
+        pattern=pattern,
+    )
+
+
+def _runtime_contract_grade(
+    metrics: dict,
+    scenario: Scenario,
+) -> tuple[list[GradeFinding], list[RubricCheck]]:
+    findings: list[GradeFinding] = []
+    rubric: list[RubricCheck] = []
+
+    def add(
+        *,
+        dimension: str,
+        kind: str,
+        passed: bool,
+        message: str,
+        evidence: str = "",
+        pattern: str = "",
+        severity: str = "fail",
+    ) -> None:
+        finding, check = _contract_check(
+            dimension=dimension,
+            kind=kind,
+            passed=passed,
+            message=message,
+            evidence=evidence,
+            pattern=pattern,
+            severity=severity,
+        )
+        if finding is not None:
+            findings.append(finding)
+        rubric.append(check)
+
+    for stage in scenario.required_runtime_stages:
+        seconds = (metrics.get("stage_seconds") or {}).get(stage)
+        add(
+            dimension=_stage_dimension(stage),
+            kind="runtime_stage_present",
+            passed=seconds is not None,
+            message=f"{stage} stage telemetry is present.",
+            evidence="" if seconds is None else str(seconds),
+            pattern=stage,
+        )
+
+    if scenario.expected_scope_mode:
+        actual = str(metrics.get("scope_mode") or "")
+        add(
+            dimension="scope_agent",
+            kind="scope_mode",
+            passed=actual == scenario.expected_scope_mode,
+            message="Scope agent used the expected routing mode.",
+            evidence=actual,
+            pattern=scenario.expected_scope_mode,
+        )
+
+    if scenario.expected_query_inspection_mode:
+        actual = str(metrics.get("query_inspection_mode") or "")
+        add(
+            dimension="scope_agent",
+            kind="query_inspection_mode",
+            passed=actual == scenario.expected_query_inspection_mode,
+            message="Scope agent exposed the expected query inspection mode.",
+            evidence=actual,
+            pattern=scenario.expected_query_inspection_mode,
+        )
+
+    for stage, tools in scenario.required_stage_tools.items():
+        for tool in tools:
+            count = _stage_tool_count(metrics, stage, tool)
+            add(
+                dimension=_stage_dimension(stage),
+                kind="required_stage_tool",
+                passed=count > 0,
+                message=f"{stage} stage used required tool {tool}.",
+                evidence=str(count),
+                pattern=f"{stage}.{tool}",
+            )
+
+    for stage, tools in scenario.forbidden_stage_tools.items():
+        for tool in tools:
+            count = _stage_tool_count(metrics, stage, tool)
+            add(
+                dimension=_stage_dimension(stage),
+                kind="forbidden_stage_tool",
+                passed=count == 0,
+                message=f"{stage} stage avoided forbidden tool {tool}.",
+                evidence=str(count),
+                pattern=f"{stage}.{tool}",
+            )
+
+    for field in scenario.required_observability_fields:
+        value = metrics.get(field)
+        add(
+            dimension="observability",
+            kind="observability_field",
+            passed=_has_observable_value(value),
+            message=f"Run telemetry exposed {field}.",
+            evidence=json.dumps(value, sort_keys=True)
+            if isinstance(value, (dict, list))
+            else str(value or ""),
+            pattern=field,
+        )
+
+    attestation_fields = set(metrics.get("attestation_body_fields") or [])
+    for field in scenario.required_attestation_fields:
+        add(
+            dimension="attestation",
+            kind="attestation_field",
+            passed=field in attestation_fields,
+            message=f"Run attestation body includes {field}.",
+            evidence=",".join(sorted(attestation_fields)),
+            pattern=field,
+            severity="critical",
+        )
+
+    return findings, rubric
+
+
 def _cmd_run_room(args: argparse.Namespace) -> int:
     scenario = SCENARIOS[args.scenario]
     out_dir = Path(args.output_dir)
@@ -531,9 +830,18 @@ def _cmd_run_room(args: argparse.Namespace) -> int:
         text_grade = grade_text(output, scenario)
         artifact_findings = _artifact_findings(artifacts, scenario)
         latency_findings = _latency_findings(metrics, scenario)
+        contract_findings, contract_rubric = _runtime_contract_grade(
+            metrics,
+            scenario,
+        )
         findings = (
             command_findings
-            or [*text_grade.findings, *artifact_findings, *latency_findings]
+            or [
+                *text_grade.findings,
+                *artifact_findings,
+                *latency_findings,
+                *contract_findings,
+            ]
         )
         rubric = (
             _rubric_from_findings(command_findings)
@@ -542,6 +850,7 @@ def _cmd_run_room(args: argparse.Namespace) -> int:
                 *text_grade.rubric,
                 *_artifact_rubric(artifacts, scenario, artifact_findings),
                 *_latency_rubric(metrics, scenario, latency_findings),
+                *contract_rubric,
             ]
         )
         passed = not findings
@@ -576,6 +885,81 @@ def _cmd_run_room(args: argparse.Namespace) -> int:
     return exit_code
 
 
+def _dimension_status(row: dict, dimension: str) -> str:
+    checks = [
+        check
+        for check in (row.get("rubric") or [])
+        if check.get("dimension") == dimension
+    ]
+    if not checks:
+        return "-"
+    critical = sum(
+        1
+        for check in checks
+        if not check.get("passed") and check.get("severity") == "critical"
+    )
+    failed = sum(
+        1
+        for check in checks
+        if not check.get("passed") and check.get("severity") != "critical"
+    )
+    if critical:
+        return f"critical:{critical}"
+    if failed:
+        return f"fail:{failed}"
+    return "pass"
+
+
+def _format_summary_table(rows: list[dict]) -> str:
+    dimensions = (
+        "privacy",
+        "utility",
+        "scope_agent",
+        "query_agent",
+        "mediator",
+        "artifact",
+        "attestation",
+        "performance",
+        "observability",
+        "system",
+    )
+    header = [
+        "scenario",
+        "model",
+        "run_id",
+        "passed",
+        "duration_s",
+        *dimensions,
+    ]
+    lines = [
+        "| " + " | ".join(header) + " |",
+        "| " + " | ".join("---" for _ in header) + " |",
+    ]
+    for row in rows:
+        values = [
+            str(row.get("scenario") or ""),
+            str(row.get("model") or ""),
+            str(row.get("run_id") or ""),
+            "yes" if row.get("passed") else "no",
+            "" if row.get("duration_seconds") is None else str(row["duration_seconds"]),
+            *(_dimension_status(row, dimension) for dimension in dimensions),
+        ]
+        lines.append("| " + " | ".join(values) + " |")
+    return "\n".join(lines)
+
+
+def _cmd_summarize(args: argparse.Namespace) -> int:
+    rows: list[dict] = []
+    for path in args.summary:
+        loaded = json.loads(Path(path).read_text(encoding="utf-8"))
+        if isinstance(loaded, list):
+            rows.extend(row for row in loaded if isinstance(row, dict))
+        elif isinstance(loaded, dict):
+            rows.append(loaded)
+    print(_format_summary_table(rows))
+    return 0 if all(row.get("passed") for row in rows) else 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m eval",
@@ -584,6 +968,12 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     sub.add_parser("list", help="List available deterministic scenarios.")
+
+    summarize = sub.add_parser(
+        "summarize",
+        help="Print a compact Markdown table for one or more summary JSON files.",
+    )
+    summarize.add_argument("summary", nargs="+", help="Path to run-room summary JSON.")
 
     grade = sub.add_parser("grade", help="Grade an output file or stdin.")
     grade.add_argument("scenario", choices=sorted(SCENARIOS))
@@ -630,5 +1020,7 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_grade(args)
     if args.command == "run-room":
         return _cmd_run_room(args)
+    if args.command == "summarize":
+        return _cmd_summarize(args)
     parser.error(f"unknown command: {args.command}")
     return 2

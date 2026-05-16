@@ -30,10 +30,49 @@ def _deep_report_output() -> str:
     )
 
 
-def _report_run_telemetry(*, artifacts: list[dict] | None = None) -> dict:
+def _report_run_telemetry(
+    *,
+    artifacts: list[dict] | None = None,
+    query_tools: dict[str, int] | None = None,
+    scope_mode: str = "fast",
+) -> dict:
+    query_tools = query_tools if query_tools is not None else {
+        "get_schema": 1,
+        "execute_sql": 3,
+    }
+    stage_usage = {
+        "scope": {
+            "calls": 1,
+            "scope_mode": scope_mode,
+            "scope_mode_reason": "default_fast_path",
+            "query_inspection_mode": "full",
+            "bridge": {
+                "tool_call_counts": {"get_schema": 1},
+                "llm_tool_call_counts": {"get_schema": 1},
+            },
+        },
+        "query": {
+            "calls": 1,
+            "bridge": {
+                "tool_call_counts": query_tools,
+                "llm_tool_call_counts": query_tools,
+            },
+        },
+        "mediator": {
+            "calls": 1,
+            "bridge": {
+                "tool_call_counts": {},
+                "llm_tool_call_counts": {},
+            },
+        },
+    }
     return {
         "run_id": "run-123",
+        "agent_id": "default-query-hermes",
         "status": "completed",
+        "room_id": "room-abc",
+        "room_manifest_hash": "manifest-hash",
+        "scope_agent_id": "default-scope-hermes",
         "billing_status": "settled",
         "billing_cost_micro_usd": 456,
         "created_at": 20.0,
@@ -48,6 +87,20 @@ def _report_run_telemetry(*, artifacts: list[dict] | None = None) -> dict:
             "calls": 3,
             "prompt_tokens": 100,
             "completion_tokens": 40,
+            "stages": stage_usage,
+        },
+        "attestation": {
+            "body": {
+                "run_id": "run-123",
+                "room_id": "room-abc",
+                "room_manifest_hash": "manifest-hash",
+                "query_agent_id": "default-query-hermes",
+                "scope_agent_id": "default-scope-hermes",
+                "scope_mode": scope_mode,
+                "query_inspection_mode": "full",
+                "scope_mode_reason": "default_fast_path",
+                "output_hash": "hash-output",
+            }
         },
         "artifacts": artifacts if artifacts is not None else [],
     }
@@ -94,6 +147,12 @@ def test_extract_run_metrics_decodes_usage_and_stage_timings():
     assert metrics["stage_seconds"] == {"scope": 1.5, "query": 3.0}
     assert metrics["tool_call_counts"] == {"execute_sql": 2}
     assert metrics["llm_tool_call_counts"] == {"get_schema": 1}
+    assert metrics["stage_tool_call_counts"] == {
+        "query": {"execute_sql": 2}
+    }
+    assert metrics["stage_llm_tool_call_counts"] == {
+        "query": {"get_schema": 1}
+    }
     assert metrics["telemetry_artifact_count"] == 2
 
 
@@ -171,7 +230,17 @@ def test_run_room_persists_final_run_telemetry(tmp_path, monkeypatch):
     assert summary[0]["artifact_filenames"] == ["report.md", "report.pdf"]
     assert summary[0]["telemetry_artifact_count"] == 2
     rubric = summary[0]["rubric"]
-    assert {"privacy", "utility", "artifact", "performance"} <= {
+    assert {
+        "privacy",
+        "utility",
+        "scope_agent",
+        "query_agent",
+        "mediator",
+        "artifact",
+        "attestation",
+        "performance",
+        "observability",
+    } <= {
         check["dimension"] for check in rubric
     }
     assert all(check["passed"] for check in rubric)
@@ -494,24 +563,23 @@ def test_run_room_fails_when_latency_budget_is_exceeded(tmp_path, monkeypatch):
                 stdout=json.dumps({"run_id": "run-123", "output": output}),
                 stderr="",
             )
+        telemetry = _report_run_telemetry()
+        telemetry.update(
+            {
+                "created_at": 0.0,
+                "updated_at": 300.0,
+                "scope_started_at": 0.0,
+                "scope_ended_at": 100.0,
+                "query_started_at": 100.0,
+                "query_ended_at": 250.0,
+                "mediator_started_at": 250.0,
+                "mediator_ended_at": 300.0,
+            }
+        )
         return subprocess.CompletedProcess(
             cmd,
             0,
-            stdout=json.dumps(
-                {
-                    "run_id": "run-123",
-                    "status": "completed",
-                    "created_at": 0.0,
-                    "updated_at": 300.0,
-                    "scope_started_at": 0.0,
-                    "scope_ended_at": 100.0,
-                    "query_started_at": 100.0,
-                    "query_ended_at": 250.0,
-                    "mediator_started_at": 250.0,
-                    "mediator_ended_at": 300.0,
-                    "usage_json": {"calls": 3, "total_tokens": 1200},
-                }
-            ),
+            stdout=json.dumps(telemetry),
             stderr="",
         )
 
@@ -541,6 +609,102 @@ def test_run_room_fails_when_latency_budget_is_exceeded(tmp_path, monkeypatch):
         "stage_seconds.scope<=90",
         "stage_seconds.query<=120",
     }
+
+
+def test_run_room_fails_when_required_query_tool_missing(tmp_path, monkeypatch):
+    output = (
+        "| rank | hashtag | watches |\n"
+        "|------|---------|---------|\n"
+        "| 1 | fyp | 703,773 |\n"
+    )
+
+    def fake_run(cmd, *, text, capture_output, timeout):
+        if "ask" in cmd:
+            return subprocess.CompletedProcess(
+                cmd,
+                0,
+                stdout=json.dumps({"run_id": "run-123", "output": output}),
+                stderr="",
+            )
+        return subprocess.CompletedProcess(
+            cmd,
+            0,
+            stdout=json.dumps(_report_run_telemetry(query_tools={"get_schema": 1})),
+            stderr="",
+        )
+
+    monkeypatch.setenv("HMCTL_BIN", "hmctl")
+    monkeypatch.setattr(eval_cli.subprocess, "run", fake_run)
+
+    parser = eval_cli.build_parser()
+    args = parser.parse_args(
+        [
+            "run-room",
+            "watch_history_top_hashtags",
+            "room-abc",
+            "--model",
+            "openai/gpt-5",
+            "--output-dir",
+            str(tmp_path),
+        ]
+    )
+
+    assert eval_cli._cmd_run_room(args) == 1
+    summary = json.loads(
+        (tmp_path / "watch_history_top_hashtags__summary.json").read_text()
+    )
+    assert summary[0]["passed"] is False
+    assert any(
+        finding["kind"] == "required_stage_tool"
+        and finding["pattern"] == "query.execute_sql"
+        and finding["dimension"] == "query_agent"
+        for finding in summary[0]["findings"]
+    )
+
+
+def test_summarize_prints_compact_rubric_table(tmp_path, capsys):
+    summary_path = tmp_path / "summary.json"
+    summary_path.write_text(
+        json.dumps(
+            [
+                {
+                    "scenario": "watch_history_top_hashtags",
+                    "model": "openai/gpt-5",
+                    "run_id": "run-123",
+                    "passed": False,
+                    "duration_seconds": 12.5,
+                    "rubric": [
+                        {
+                            "dimension": "privacy",
+                            "severity": "pass",
+                            "score": 4,
+                            "passed": True,
+                            "kind": "forbidden_patterns",
+                            "message": "ok",
+                        },
+                        {
+                            "dimension": "query_agent",
+                            "severity": "fail",
+                            "score": 0,
+                            "passed": False,
+                            "kind": "required_stage_tool",
+                            "message": "missing",
+                        },
+                    ],
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    parser = eval_cli.build_parser()
+    args = parser.parse_args(["summarize", str(summary_path)])
+
+    assert eval_cli._cmd_summarize(args) == 1
+    out = capsys.readouterr().out
+    assert "| scenario | model | run_id | passed | duration_s |" in out
+    assert "watch_history_top_hashtags" in out
+    assert "fail:1" in out
 
 
 def test_run_room_surfaces_hmctl_stderr_when_ask_fails(tmp_path, monkeypatch):

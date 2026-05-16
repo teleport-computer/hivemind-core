@@ -69,6 +69,12 @@ uv run python -m eval run-room watch_history_report_artifact "$ROOM" \
   --output-dir eval/results/live
 ```
 
+Print a compact rubric table from one or more summary files:
+
+```bash
+uv run python -m eval summarize eval/results/live/*__summary.json
+```
+
 The runner records:
 
 - room id and manifest hash;
@@ -85,7 +91,8 @@ Each result also carries a structured rubric alongside the historical
 consumers; `rubric` is the contract-shaped evidence table for planning and
 regression analysis. Rubric rows contain:
 
-- `dimension`: one of `privacy`, `utility`, `artifact`, `performance`, or
+- `dimension`: one of `privacy`, `utility`, `scope_agent`, `query_agent`,
+  `mediator`, `artifact`, `attestation`, `performance`, `observability`, or
   `system`;
 - `severity`: `pass`, `fail`, or `critical`;
 - `score`: a 0-4 deterministic score for that check;
@@ -95,10 +102,18 @@ regression analysis. Rubric rows contain:
 The intended complete rubric layers are room-policy compliance, privacy
 leakage, utility, scope-agent behavior, query-agent behavior, mediator
 behavior, artifact behavior, attestation/integrity, performance, and
-observability. The current harness covers the deterministic output, artifact,
-latency, and command-health portions first; source/trajectory and
-contract-derived checks should add rubric rows without replacing the
+observability. The current harness covers deterministic output, artifact,
+latency, command-health, per-stage tool usage, scope routing mode, query
+inspection mode, attestation fields, and telemetry completeness. Source and
+trajectory scenarios can add stricter rubric rows without replacing the
 deterministic gate.
+
+Scenario definitions include explicit room/task/scope/query/mediator/system
+contract text plus machine-checkable runtime expectations such as required
+stages, required or forbidden bridge tools, expected `scope_mode`, expected
+`query_inspection_mode`, required telemetry fields, and required attestation
+body fields. This is what lets the harness distinguish "the answer text looks
+fine" from "the run used the right private-computation pathway."
 
 ## Post-Deploy Follow-Up
 

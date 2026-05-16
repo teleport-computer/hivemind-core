@@ -9,7 +9,8 @@ _TABLE_SEPARATOR_RE = re.compile(
 )
 _PRIVACY_PATTERN_RE = re.compile(
     r"user|account|video|watch|identifier|row-level|raw row|https?|url|"
-    r"handle|title|token|password|api[_-]?key|\\d\{4\}-\\d\{2\}-\\d\{2\}",
+    r"handle|title|email|phone|session|conversation|message_id|raw message|"
+    r"token|password|api[_-]?key|@|\\d\{3\}|\\d\{4\}-\\d\{2\}-\\d\{2\}",
     flags=re.IGNORECASE,
 )
 

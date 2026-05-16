@@ -24,6 +24,19 @@ class Scenario:
     max_duration_seconds: float | None = None
     max_stage_seconds: dict[str, float] = field(default_factory=dict)
     superpower_demand: tuple[str, ...] = ()
+    room_contract: str = ""
+    task_contract: str = ""
+    scope_contract: str = ""
+    query_contract: str = ""
+    mediator_contract: str = ""
+    system_contract: str = ""
+    expected_scope_mode: str = ""
+    expected_query_inspection_mode: str = ""
+    required_runtime_stages: tuple[str, ...] = ()
+    required_stage_tools: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    forbidden_stage_tools: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    required_observability_fields: tuple[str, ...] = ()
+    required_attestation_fields: tuple[str, ...] = ()
     notes: str = ""
 
 

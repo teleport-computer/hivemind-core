@@ -254,13 +254,19 @@ jobs:
               args+=(--fetch)
             fi
 
+            summary="${out_dir}/${scenario}__summary.json"
             if uv run --python 3.12 "${args[@]}"; then
+              if [ -f "$summary" ]; then
+                uv run --python 3.12 python -m eval summarize "$summary" || true
+              fi
               echo "Eval results remain on relay at: $(pwd)/${out_dir}"
               return 0
             fi
 
-            summary="${out_dir}/${scenario}__summary.json"
             echo "$summary" > /tmp/hivemind-last-eval-summary.txt
+            if [ -f "$summary" ]; then
+              uv run --python 3.12 python -m eval summarize "$summary" || true
+            fi
             echo "Eval failed; results remain on relay at: $(pwd)/${out_dir}"
             return 1
           }
